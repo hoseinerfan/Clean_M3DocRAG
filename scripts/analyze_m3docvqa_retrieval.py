@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
         dest="recall_ks",
         type=int,
         nargs="+",
-        default=[20, 50, 100, 500, 1000],
+        default=[1, 2, 4, 5, 10, 20, 50, 100, 500, 1000],
         help="Recall@k levels to compute",
     )
     parser.add_argument(
