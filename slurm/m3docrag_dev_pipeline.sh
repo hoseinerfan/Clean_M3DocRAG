@@ -21,6 +21,7 @@ DATASET_NAME="${DATASET_NAME:-m3-docvqa}"
 SPLIT="${SPLIT:-dev}"
 BITS="${BITS:-16}"
 N_RETRIEVAL_PAGES="${N_RETRIEVAL_PAGES:-1}"
+RETRIEVAL_ONLY="${RETRIEVAL_ONLY:-False}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 DATA_LEN="${DATA_LEN:-}"
@@ -36,7 +37,14 @@ INDEX_NAME="${EMBEDDING_NAME}_pageindex_${FAISS_INDEX_TYPE}"
 
 EMBEDDING_DIR="${REPO_ROOT}/embeddings/${EMBEDDING_NAME}"
 INDEX_DIR="${REPO_ROOT}/embeddings/${INDEX_NAME}"
-RAG_OUTPUT_DIR="${REPO_ROOT}/output/rag_${SPLIT}${OUTPUT_TAG:+_${OUTPUT_TAG}}"
+
+if [[ "${RETRIEVAL_ONLY,,}" == "true" ]]; then
+  OUTPUT_PREFIX="retrieval_only"
+else
+  OUTPUT_PREFIX="rag"
+fi
+
+RAG_OUTPUT_DIR="${REPO_ROOT}/output/${OUTPUT_PREFIX}_${SPLIT}${OUTPUT_TAG:+_${OUTPUT_TAG}}"
 
 source "$CONDA_SH"
 conda activate "$ENV_PREFIX"
@@ -57,6 +65,7 @@ echo "DATASET_NAME=$DATASET_NAME"
 echo "SPLIT=$SPLIT"
 echo "EMBEDDING_NAME=$EMBEDDING_NAME"
 echo "INDEX_NAME=$INDEX_NAME"
+echo "RETRIEVAL_ONLY=$RETRIEVAL_ONLY"
 echo "RAG_OUTPUT_DIR=$RAG_OUTPUT_DIR"
 
 python --version
@@ -100,6 +109,7 @@ run_rag() {
     --split="$SPLIT"
     --bits="$BITS"
     --n_retrieval_pages="$N_RETRIEVAL_PAGES"
+    --retrieval_only="$RETRIEVAL_ONLY"
     --data_name="$DATASET_NAME"
     --model_name_or_path="$VQA_MODEL_NAME"
     --embedding_name="$EMBEDDING_NAME"

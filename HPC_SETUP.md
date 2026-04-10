@@ -87,6 +87,8 @@ Reported metrics:
 
 Output files were written under `output/rag_dev/`.
 
+Retrieval-only runs can be submitted through the same Slurm wrapper by setting `RETRIEVAL_ONLY=True`. In that mode the wrapper writes outputs under `output/retrieval_only_<split>...`, while still using the same embeddings and FAISS index.
+
 ## Known Gotchas
 
 - In `examples/run_page_embedding.py`, `--data_len` does not limit work when `--loop_unique_doc_ids=True`, because the dataset length is driven by the full supporting-doc-id list in that code path.
