@@ -52,6 +52,11 @@ def parse_args() -> argparse.Namespace:
         default=[20, 50, 100, 500, 1000],
         help="Recall@k levels to compute",
     )
+    parser.add_argument(
+        "--summary-only",
+        action="store_true",
+        help="Print only aggregate summary in plain-text mode",
+    )
     return parser.parse_args()
 
 
@@ -243,6 +248,8 @@ def main() -> None:
         "average_recall_at_k_with_deduping "
         f"{summary['average_recall_at_k_with_deduping']}"
     )
+    if args.summary_only:
+        return
     for item in analyses:
         print("-" * 80)
         print(f"qid {item['qid']}")
