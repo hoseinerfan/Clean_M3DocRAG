@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.build/
+.conda/
+.mmqa_repo/
+.pip-cache/
+.tmp/
+*.egg-info/
+data/
+embeddings/
+env/
+model/
+output/
+playwright-browsers/
