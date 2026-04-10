@@ -108,5 +108,5 @@ That stages:
 
 - `requirements.lock.txt`
 - `HPC_SETUP.md`
-- `slurm/m3docrag_dev_pipeline.sbatch`
+- `slurm/m3docrag_dev_pipeline.sh`
 - `.gitignore`

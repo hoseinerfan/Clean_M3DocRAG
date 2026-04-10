@@ -8,7 +8,7 @@ cd "$REPO_ROOT"
 required_files=(
   "requirements.lock.txt"
   "HPC_SETUP.md"
-  "slurm/m3docrag_dev_pipeline.sbatch"
+  "slurm/m3docrag_dev_pipeline.sh"
   ".gitignore"
 )
 
@@ -19,7 +19,7 @@ for path in "${required_files[@]}"; do
   fi
 done
 
-git add requirements.lock.txt HPC_SETUP.md slurm/m3docrag_dev_pipeline.sbatch .gitignore
+git add requirements.lock.txt HPC_SETUP.md slurm/m3docrag_dev_pipeline.sh .gitignore
 
 echo "Staged HPC artifacts:"
 git status --short
