@@ -83,12 +83,38 @@ def analyze_one(qid: str, pred_item: dict, gold_item: dict, topn: int) -> dict:
                 }
             )
 
+    deduped_rows = []
+    seen_docs: set[str] = set()
+    for idx, row in enumerate(retrieval_rows, start=1):
+        doc_id = row[0]
+        if doc_id in seen_docs:
+            continue
+        seen_docs.add(doc_id)
+        deduped_rows.append(
+            {
+                "deduped_rank": len(deduped_rows) + 1,
+                "original_row_rank": idx,
+                "doc_id": row[0],
+                "page_idx": row[1],
+                "score": row[2],
+            }
+        )
+
+    gold_page_row_ranks_deduped = [
+        row for row in deduped_rows if row["doc_id"] in gold_doc_ids
+    ]
+
     first_gold_doc_rank = min(
         (rank for rank in gold_doc_unique_ranks.values() if rank is not None),
         default=None,
     )
     first_gold_page_row_rank = (
         gold_page_row_ranks[0]["row_rank"] if gold_page_row_ranks else None
+    )
+    first_gold_page_row_rank_deduped = (
+        gold_page_row_ranks_deduped[0]["deduped_rank"]
+        if gold_page_row_ranks_deduped
+        else None
     )
 
     return {
@@ -99,7 +125,11 @@ def analyze_one(qid: str, pred_item: dict, gold_item: dict, topn: int) -> dict:
         "first_gold_doc_rank": first_gold_doc_rank,
         "gold_doc_unique_ranks": gold_doc_unique_ranks,
         "first_gold_page_row_rank": first_gold_page_row_rank,
+        "first_gold_page_row_rank_deduped": first_gold_page_row_rank_deduped,
         "gold_page_row_hits": gold_page_row_ranks,
+        "gold_page_ranks_without_deduping": [row["row_rank"] for row in gold_page_row_ranks],
+        "gold_page_ranks_with_deduping": [row["deduped_rank"] for row in gold_page_row_ranks_deduped],
+        "gold_page_hits_with_deduping": gold_page_row_ranks_deduped,
         "pred_answer": pred_item.get("pred_answer", ""),
         "time_retrieval": pred_item.get("time_retrieval"),
         "time_qa": pred_item.get("time_qa"),
@@ -135,8 +165,8 @@ def main() -> None:
         return
 
     print(
-        "Note: first_gold_page_row_rank is not a benchmark-provided gold page label. "
-        "It is the first retrieved page row whose doc_id matches a gold supporting doc."
+        "Note: M3DocVQA does not provide true gold page_idx labels. "
+        "The page-rank fields below mean retrieved page rows whose doc_id matches a gold supporting doc."
     )
     for item in analyses:
         print("-" * 80)
@@ -147,7 +177,11 @@ def main() -> None:
         print(f"first_gold_doc_rank {item['first_gold_doc_rank']}")
         print(f"gold_doc_unique_ranks {item['gold_doc_unique_ranks']}")
         print(f"first_gold_page_row_rank {item['first_gold_page_row_rank']}")
+        print(f"first_gold_page_row_rank_deduped {item['first_gold_page_row_rank_deduped']}")
+        print(f"gold_page_ranks_without_deduping {item['gold_page_ranks_without_deduping']}")
+        print(f"gold_page_ranks_with_deduping {item['gold_page_ranks_with_deduping']}")
         print(f"gold_page_row_hits {item['gold_page_row_hits'][:5]}")
+        print(f"gold_page_hits_with_deduping {item['gold_page_hits_with_deduping'][:5]}")
         print("top_retrieval_rows")
         for row in item["top_retrieval_rows"]:
             print(row)
