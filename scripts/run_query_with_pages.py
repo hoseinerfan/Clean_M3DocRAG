@@ -12,6 +12,7 @@ from accelerate import Accelerator
 
 from m3docrag.datasets.m3_docvqa import M3DocVQADataset
 from m3docrag.utils.distributed import supports_flash_attention
+from m3docrag.utils.paths import LOCAL_MODEL_DIR
 from m3docrag.utils.prompts import short_answer_template
 from m3docrag.vqa import VQAModel
 
@@ -88,14 +89,32 @@ def parse_page_specs(page_specs: list[str]) -> list[tuple[str, int]]:
     return parsed
 
 
+def resolve_model_path(model_name_or_path: str) -> Path:
+    candidate = Path(model_name_or_path)
+    if candidate.exists():
+        return candidate
+
+    local_candidate = Path(LOCAL_MODEL_DIR) / model_name_or_path
+    if local_candidate.exists():
+        return local_candidate
+
+    return candidate
+
+
 def main() -> None:
     args = parse_args()
 
     dataset = M3DocVQADataset(make_dataset_args(args))
+    model_path = resolve_model_path(args.model_name_or_path)
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Could not resolve model path for {args.model_name_or_path}. "
+            f"Tried {model_path}"
+        )
 
     use_flash_attn = torch.cuda.is_available() and supports_flash_attention()
     vqa_model = VQAModel(
-        model_name_or_path=args.model_name_or_path,
+        model_name_or_path=model_path,
         model_type=infer_vqa_model_type(args.model_name_or_path),
         bits=args.bits,
         use_flash_attn=use_flash_attn,
@@ -131,7 +150,7 @@ def main() -> None:
         "query": args.query,
         "data_name": args.data_name,
         "split": args.split,
-        "model_name_or_path": args.model_name_or_path,
+        "model_name_or_path": str(model_path),
         "bits": args.bits,
         "explicit_pages": resolved_pages,
         "pred_answer": pred_answer,
