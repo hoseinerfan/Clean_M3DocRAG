@@ -44,6 +44,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Emit machine-readable JSON instead of text",
     )
+    parser.add_argument(
+        "--recall-k",
+        dest="recall_ks",
+        type=int,
+        nargs="+",
+        default=[20, 50, 100, 500, 1000],
+        help="Recall@k levels to compute",
+    )
     return parser.parse_args()
 
 
@@ -61,9 +69,39 @@ def first_unique_doc_ranks(retrieval_rows: list[list]) -> dict[str, int]:
     return doc2rank
 
 
-def analyze_one(qid: str, pred_item: dict, gold_item: dict, topn: int) -> dict:
+def dedupe_rows_by_doc(retrieval_rows: list[list]) -> list[list]:
+    deduped = []
+    seen_docs: set[str] = set()
+    for row in retrieval_rows:
+        doc_id = row[0]
+        if doc_id in seen_docs:
+            continue
+        seen_docs.add(doc_id)
+        deduped.append(row)
+    return deduped
+
+
+def compute_recall_dict(
+    retrieval_rows: list[list], gold_doc_ids: set[str], recall_ks: list[int], dedupe_first: bool
+) -> dict[int, float]:
+    n_relevant = len(gold_doc_ids)
+    if dedupe_first:
+        ranked_rows = dedupe_rows_by_doc(retrieval_rows)
+    else:
+        ranked_rows = retrieval_rows
+
+    recalls = {}
+    for k in recall_ks:
+        top_k_rows = ranked_rows[:k]
+        top_k_doc_ids = {row[0] for row in top_k_rows}
+        recalls[k] = len(top_k_doc_ids & gold_doc_ids) / n_relevant if n_relevant > 0 else 0.0
+    return recalls
+
+
+def analyze_one(qid: str, pred_item: dict, gold_item: dict, topn: int, recall_ks: list[int]) -> dict:
     retrieval_rows = pred_item.get("page_retrieval_results", [])
     gold_doc_ids = sorted({ctx["doc_id"] for ctx in gold_item["supporting_context"]})
+    gold_doc_id_set = set(gold_doc_ids)
     doc_rank_map = first_unique_doc_ranks(retrieval_rows)
 
     gold_doc_unique_ranks = {
@@ -101,7 +139,7 @@ def analyze_one(qid: str, pred_item: dict, gold_item: dict, topn: int) -> dict:
         )
 
     gold_page_row_ranks_deduped = [
-        row for row in deduped_rows if row["doc_id"] in gold_doc_ids
+        row for row in deduped_rows if row["doc_id"] in gold_doc_id_set
     ]
 
     first_gold_doc_rank = min(
@@ -130,10 +168,27 @@ def analyze_one(qid: str, pred_item: dict, gold_item: dict, topn: int) -> dict:
         "gold_page_ranks_without_deduping": [row["row_rank"] for row in gold_page_row_ranks],
         "gold_page_ranks_with_deduping": [row["deduped_rank"] for row in gold_page_row_ranks_deduped],
         "gold_page_hits_with_deduping": gold_page_row_ranks_deduped,
+        "recall_at_k_without_deduping": compute_recall_dict(
+            retrieval_rows, gold_doc_id_set, recall_ks, dedupe_first=False
+        ),
+        "recall_at_k_with_deduping": compute_recall_dict(
+            retrieval_rows, gold_doc_id_set, recall_ks, dedupe_first=True
+        ),
         "pred_answer": pred_item.get("pred_answer", ""),
         "time_retrieval": pred_item.get("time_retrieval"),
         "time_qa": pred_item.get("time_qa"),
         "top_retrieval_rows": retrieval_rows[:topn],
+    }
+
+
+def average_recall(analyses: list[dict], key: str, recall_ks: list[int]) -> dict[int, float]:
+    return {
+        k: (
+            sum(item[key][k] for item in analyses) / len(analyses)
+            if analyses
+            else 0.0
+        )
+        for k in recall_ks
     }
 
 
@@ -158,15 +213,35 @@ def main() -> None:
             raise KeyError(f"QID missing in prediction file: {qid}")
         if qid not in gold_by_qid:
             raise KeyError(f"QID missing in gold file: {qid}")
-        analyses.append(analyze_one(qid, pred[qid], gold_by_qid[qid], args.topn))
+        analyses.append(analyze_one(qid, pred[qid], gold_by_qid[qid], args.topn, args.recall_ks))
+
+    summary = {
+        "n_qids": len(analyses),
+        "average_recall_at_k_without_deduping": average_recall(
+            analyses, "recall_at_k_without_deduping", args.recall_ks
+        ),
+        "average_recall_at_k_with_deduping": average_recall(
+            analyses, "recall_at_k_with_deduping", args.recall_ks
+        ),
+    }
 
     if args.json:
-        print(json.dumps(analyses, indent=2))
+        print(json.dumps({"summary": summary, "per_qid": analyses}, indent=2))
         return
 
     print(
         "Note: M3DocVQA does not provide true gold page_idx labels. "
         "The page-rank fields below mean retrieved page rows whose doc_id matches a gold supporting doc."
+    )
+    print("summary")
+    print(f"n_qids {summary['n_qids']}")
+    print(
+        "average_recall_at_k_without_deduping "
+        f"{summary['average_recall_at_k_without_deduping']}"
+    )
+    print(
+        "average_recall_at_k_with_deduping "
+        f"{summary['average_recall_at_k_with_deduping']}"
     )
     for item in analyses:
         print("-" * 80)
@@ -180,6 +255,8 @@ def main() -> None:
         print(f"first_gold_page_row_rank_deduped {item['first_gold_page_row_rank_deduped']}")
         print(f"gold_page_ranks_without_deduping {item['gold_page_ranks_without_deduping']}")
         print(f"gold_page_ranks_with_deduping {item['gold_page_ranks_with_deduping']}")
+        print(f"recall_at_k_without_deduping {item['recall_at_k_without_deduping']}")
+        print(f"recall_at_k_with_deduping {item['recall_at_k_with_deduping']}")
         print(f"gold_page_row_hits {item['gold_page_row_hits'][:5]}")
         print(f"gold_page_hits_with_deduping {item['gold_page_hits_with_deduping'][:5]}")
         print("top_retrieval_rows")
