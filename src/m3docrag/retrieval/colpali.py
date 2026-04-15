@@ -24,6 +24,55 @@ from typing import List
 from colpali_engine.models import ColPali, ColPaliProcessor
 from colpali_engine.models import ColQwen2, ColQwen2Processor
 
+
+QUERY_TOKEN_FILTER_CHOICES = ("full", "drop_pad_like", "semantic_only")
+_DROP_PAD_LIKE_TOKENS = {"<pad>"}
+_SEMANTIC_ONLY_DROPPED_TOKENS = {"<pad>", "<bos>", "<eos>", "Question", ":", "\n"}
+
+
+def _normalize_attention_mask(attention_mask):
+    if attention_mask is None:
+        return None
+    attention_mask = attention_mask.detach().cpu()
+    if attention_mask.ndim > 1:
+        attention_mask = attention_mask.squeeze(-1)
+    return attention_mask.bool()
+
+
+def build_query_keep_mask(raw_tokens: List[str], attention_mask, query_token_filter: str) -> torch.Tensor:
+    if query_token_filter not in QUERY_TOKEN_FILTER_CHOICES:
+        raise ValueError(
+            f"Unsupported query_token_filter={query_token_filter!r}. "
+            f"Expected one of {QUERY_TOKEN_FILTER_CHOICES}."
+        )
+
+    keep_mask = torch.ones(len(raw_tokens), dtype=torch.bool)
+    normalized_attention_mask = _normalize_attention_mask(attention_mask)
+    if normalized_attention_mask is not None:
+        keep_mask &= normalized_attention_mask
+
+    if query_token_filter == "full":
+        return keep_mask
+
+    if query_token_filter == "drop_pad_like":
+        dropped_tokens = _DROP_PAD_LIKE_TOKENS
+    else:
+        dropped_tokens = _SEMANTIC_ONLY_DROPPED_TOKENS
+
+    semantic_keep_mask = torch.tensor(
+        [token not in dropped_tokens for token in raw_tokens],
+        dtype=torch.bool,
+    )
+    keep_mask &= semantic_keep_mask
+
+    if not keep_mask.any():
+        raise ValueError(
+            f"Query token filter {query_token_filter!r} removed every query token. "
+            "This ablation is ill-posed for the current query."
+        )
+
+    return keep_mask
+
 def init(
     backbone_name_or_path="/job/model/colpaligemma-3b-pt-448-base",
     adapter_name_or_path= "/job/model/colpali-v1.2",
@@ -256,6 +305,61 @@ class ColPaliRetrievalModel:
             to_cpu=to_cpu,
             use_tqdm=use_tqdm,
             collate_fn=collate_fn)
+
+    def encode_query_with_metadata(
+        self,
+        query: str,
+        to_cpu: bool = False,
+        query_token_filter: str = "full",
+    ):
+        batch_query = self.processor.process_queries([query])
+
+        token_ids = batch_query.get("input_ids")
+        if token_ids is None:
+            raise ValueError("Query processor did not return input_ids.")
+        token_ids = token_ids[0].detach().cpu()
+
+        attention_mask = batch_query.get("attention_mask")
+        normalized_attention_mask = None
+        if attention_mask is not None:
+            normalized_attention_mask = _normalize_attention_mask(attention_mask[0])
+
+        tokenizer = getattr(self.processor, "tokenizer", None)
+        if tokenizer is None:
+            raw_tokens = [f"tok_{i}" for i in range(len(token_ids))]
+        else:
+            raw_tokens = tokenizer.convert_ids_to_tokens(token_ids.tolist())
+
+        keep_mask = build_query_keep_mask(
+            raw_tokens=raw_tokens,
+            attention_mask=normalized_attention_mask,
+            query_token_filter=query_token_filter,
+        )
+
+        with torch.no_grad():
+            batch_query = {k: v.to(self.model.device) for k, v in batch_query.items()}
+            embeddings_query = self.model(**batch_query)[0]
+
+        embeddings_query = embeddings_query[keep_mask.to(embeddings_query.device)]
+        if to_cpu:
+            embeddings_query = embeddings_query.to("cpu")
+
+        kept_indices = keep_mask.nonzero(as_tuple=True)[0].tolist()
+        filtered_raw_tokens = [raw_tokens[idx] for idx in kept_indices]
+
+        filtered_attention_mask = None
+        if normalized_attention_mask is not None:
+            filtered_attention_mask = normalized_attention_mask[keep_mask]
+
+        return {
+            "embeddings": embeddings_query,
+            "token_ids": token_ids[keep_mask],
+            "attention_mask": filtered_attention_mask,
+            "raw_tokens": filtered_raw_tokens,
+            "raw_tokens_all": raw_tokens,
+            "kept_token_indices": kept_indices,
+            "query_token_filter": query_token_filter,
+        }
 
     
     def encode_images(self,

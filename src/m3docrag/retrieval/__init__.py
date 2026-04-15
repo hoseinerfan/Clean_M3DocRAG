@@ -15,4 +15,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-from .colpali import ColPaliRetrievalModel
+from .colpali import ColPaliRetrievalModel, QUERY_TOKEN_FILTER_CHOICES

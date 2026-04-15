@@ -59,6 +59,7 @@ class RAGModelBase:
         all_token_embeddings = None,
 
         n_return_pages: int = 1,
+        query_token_filter: str = "full",
         single_page_from_each_doc: bool = False,
         show_progress=False,
     ) -> List[Tuple]:
@@ -84,8 +85,12 @@ class RAGModelBase:
         if index is not None:
 
             # [n_query_tokens, dim]
-            query_emb = self.retrieval_model.encode_queries([query])[0]
-            query_emb = query_emb.cpu().float().numpy().astype(np.float32)
+            query_meta = self.retrieval_model.encode_query_with_metadata(
+                query=query,
+                to_cpu=True,
+                query_token_filter=query_token_filter,
+            )
+            query_emb = query_meta["embeddings"].float().numpy().astype(np.float32)
 
             # NN search
             k = n_return_pages
@@ -142,6 +147,13 @@ class RAGModelBase:
 
             return sorted_results
 
+        query_meta = self.retrieval_model.encode_query_with_metadata(
+            query=query,
+            to_cpu=True,
+            query_token_filter=query_token_filter,
+        )
+        filtered_query_emb = query_meta["embeddings"]
+
         docid2scores = {}
         for doc_id, doc_embs in tqdm(
             docid2embs.items(),
@@ -154,9 +166,10 @@ class RAGModelBase:
                 doc_lens = docid2lens[doc_id]
 
             scores = self.retrieval_model.retrieve(
-                query=query,
+                query=None,
                 doc_embeds=doc_embs,
                 doc_lens=doc_lens,
+                query_embeds=[filtered_query_emb],
                 to_cpu=True,
                 return_top_1=False
             )

@@ -14,7 +14,7 @@ from accelerate import Accelerator
 from PIL import Image, ImageDraw, ImageFont
 
 from m3docrag.datasets.m3_docvqa import M3DocVQADataset
-from m3docrag.retrieval import ColPaliRetrievalModel
+from m3docrag.retrieval import ColPaliRetrievalModel, QUERY_TOKEN_FILTER_CHOICES
 from m3docrag.utils.paths import LOCAL_DATA_DIR, LOCAL_EMBEDDINGS_DIR, LOCAL_MODEL_DIR
 
 
@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retrieval_model_name_or_path", default="colpaligemma-3b-pt-448-base")
     parser.add_argument("--retrieval_adapter_model_name_or_path", default="colpali-v1.2")
     parser.add_argument("--n_retrieval_pages", type=int, default=10)
+    parser.add_argument(
+        "--query_token_filter",
+        default="full",
+        choices=QUERY_TOKEN_FILTER_CHOICES,
+        help="Match the real retrieval ablation mode when recomputing scores.",
+    )
     parser.add_argument(
         "--plot-rank-start",
         type=int,
@@ -90,6 +96,7 @@ def make_dataset_args(cli_args: argparse.Namespace) -> SimpleNamespace:
         page_retrieval_type="logits",
         loop_unique_doc_ids=False,
         n_retrieval_pages=cli_args.n_retrieval_pages,
+        query_token_filter=cli_args.query_token_filter,
         faiss_index_type=cli_args.faiss_index_type,
         model_name_or_path="Qwen2-VL-7B-Instruct",
         retrieval_model_name_or_path=cli_args.retrieval_model_name_or_path,
@@ -127,34 +134,6 @@ def load_query_from_qid(args: argparse.Namespace) -> str:
     raise KeyError(f"QID not found in gold file: {args.qid}")
 
 
-def extract_query_token_labels(retrieval_model: ColPaliRetrievalModel, query: str) -> list[str]:
-    processor = retrieval_model.processor
-    token_ids = None
-    attention_mask = None
-
-    batch_query = processor.process_queries([query])
-    if "input_ids" in batch_query:
-        token_ids = batch_query["input_ids"][0].detach().cpu()
-    if "attention_mask" in batch_query:
-        attention_mask = batch_query["attention_mask"][0].detach().cpu()
-
-    if token_ids is None:
-        return []
-
-    if attention_mask is not None:
-        if attention_mask.ndim > 1:
-            attention_mask = attention_mask.squeeze(-1)
-        valid_positions = attention_mask.bool()
-        token_ids = token_ids[valid_positions]
-
-    tokenizer = getattr(processor, "tokenizer", None)
-    if tokenizer is None:
-        return [f"tok_{i}" for i in range(len(token_ids))]
-
-    labels = tokenizer.convert_ids_to_tokens(token_ids.tolist())
-    return [clean_token_label(token) for token in labels]
-
-
 def clean_token_label(token: str) -> str:
     token = token.replace("▁", " ")
     token = token.replace("<pad>", "[PAD]")
@@ -165,16 +144,12 @@ def clean_token_label(token: str) -> str:
 
 
 def compute_page_contributions(
-    retrieval_model: ColPaliRetrievalModel,
-    query: str,
+    query_emb: np.ndarray,
     index,
     token2pageuid: list[str],
     all_token_embeddings_np: np.ndarray,
     n_retrieval_pages: int,
 ) -> dict:
-    query_emb = retrieval_model.encode_queries([query])[0]
-    query_emb = query_emb.cpu().float().numpy().astype(np.float32)
-
     distances, indices = index.search(query_emb, n_retrieval_pages)
 
     final_page2scores: dict[str, float] = {}
@@ -322,6 +297,7 @@ def build_heatmap_image(
 def build_json_payload(
     query: str,
     qid: str | None,
+    query_token_filter: str,
     query_token_labels: list[str],
     plotted_pages: list[dict],
     query_token_page_details: list[dict[str, dict]],
@@ -364,6 +340,7 @@ def build_json_payload(
     return {
         "qid": qid,
         "query": query,
+        "query_token_filter": query_token_filter,
         "full_retrieved_page_count": full_retrieved_page_count,
         "plotted_rank_start": plot_rank_start,
         "plotted_rank_count": plot_rank_count,
@@ -403,18 +380,21 @@ def main() -> None:
     token2pageuid, all_token_embeddings = build_flattened_index_inputs(docid2embs)
     all_token_embeddings_np = all_token_embeddings.float().numpy()
 
-    contribution_output = compute_page_contributions(
-        retrieval_model=retrieval_model,
+    query_meta = retrieval_model.encode_query_with_metadata(
         query=query,
+        to_cpu=True,
+        query_token_filter=args.query_token_filter,
+    )
+    query_emb = query_meta["embeddings"].float().numpy().astype(np.float32)
+    query_token_labels = [clean_token_label(token) for token in query_meta["raw_tokens"]]
+
+    contribution_output = compute_page_contributions(
+        query_emb=query_emb,
         index=index,
         token2pageuid=token2pageuid,
         all_token_embeddings_np=all_token_embeddings_np,
         n_retrieval_pages=args.n_retrieval_pages,
     )
-
-    query_token_labels = extract_query_token_labels(retrieval_model, query)
-    if len(query_token_labels) != len(contribution_output["query_emb"]):
-        query_token_labels = [f"tok_{i}" for i in range(len(contribution_output["query_emb"]))]
 
     plot_rank_start = max(1, args.plot_rank_start)
     if args.plot_rank_count <= 0:
@@ -443,6 +423,7 @@ def main() -> None:
     payload = build_json_payload(
         query=query,
         qid=args.qid,
+        query_token_filter=args.query_token_filter,
         query_token_labels=query_token_labels,
         plotted_pages=plotted_pages,
         query_token_page_details=contribution_output["query_token_page_details"],

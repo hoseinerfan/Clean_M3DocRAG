@@ -13,7 +13,7 @@ from accelerate import Accelerator
 
 from m3docrag.datasets.m3_docvqa import M3DocVQADataset
 from m3docrag.rag import MultimodalRAGModel
-from m3docrag.retrieval import ColPaliRetrievalModel
+from m3docrag.retrieval import ColPaliRetrievalModel, QUERY_TOKEN_FILTER_CHOICES
 from m3docrag.utils.distributed import supports_flash_attention
 from m3docrag.utils.paths import LOCAL_EMBEDDINGS_DIR, LOCAL_MODEL_DIR
 from m3docrag.utils.prompts import short_answer_template
@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_name_or_path", default="Qwen2-VL-7B-Instruct")
     parser.add_argument("--bits", type=int, default=16)
     parser.add_argument("--n_retrieval_pages", type=int, default=4)
+    parser.add_argument(
+        "--query_token_filter",
+        default="full",
+        choices=QUERY_TOKEN_FILTER_CHOICES,
+    )
     parser.add_argument("--retrieval_only", action="store_true")
     parser.add_argument("--output", help="Optional JSON output path")
     return parser.parse_args()
@@ -77,6 +82,7 @@ def make_dataset_args(cli_args: argparse.Namespace) -> SimpleNamespace:
         page_retrieval_type="logits",
         loop_unique_doc_ids=False,
         n_retrieval_pages=cli_args.n_retrieval_pages,
+        query_token_filter=cli_args.query_token_filter,
         faiss_index_type=cli_args.faiss_index_type,
         model_name_or_path=cli_args.model_name_or_path,
         retrieval_model_name_or_path=cli_args.retrieval_model_name_or_path,
@@ -159,6 +165,7 @@ def main() -> None:
         token2pageuid=token2pageuid,
         all_token_embeddings=all_token_embeddings_np,
         n_return_pages=args.n_retrieval_pages,
+        query_token_filter=args.query_token_filter,
         show_progress=True,
     )
 
@@ -169,6 +176,7 @@ def main() -> None:
         "embedding_name": args.embedding_name,
         "faiss_index_type": args.faiss_index_type,
         "n_retrieval_pages": args.n_retrieval_pages,
+        "query_token_filter": args.query_token_filter,
         "retrieval_only": args.retrieval_only,
         "page_retrieval_results": retrieval_results,
     }
