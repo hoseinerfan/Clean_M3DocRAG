@@ -115,6 +115,11 @@ def parse_args() -> argparse.Namespace:
         default=896,
         help="Square output size for the overlaid page image",
     )
+    parser.add_argument(
+        "--save-patch-crops",
+        action="store_true",
+        help="Also save the winning original-page patch crops for contributing page tokens.",
+    )
     return parser.parse_args()
 
 
@@ -621,6 +626,83 @@ def page_uid_to_doc_page(page_uid: str) -> tuple[str, int]:
     return doc_id, int(page_idx_text)
 
 
+def build_patch_crop_records(
+    page_image: Image.Image,
+    page_token_count: int,
+    contributing_cells: dict[int, dict],
+    query_token_labels: list[str],
+    output_dir: Path,
+    stem: str,
+) -> list[dict]:
+    prefix_tokens, grid_side = infer_patch_grid(page_token_count)
+    width, height = page_image.size
+
+    spatial_patch_to_items: dict[int, list[dict]] = {}
+    for query_token_idx, details in sorted(contributing_cells.items()):
+        page_token_idx = details["page_token_idx"]
+        patch_idx = page_token_idx - prefix_tokens
+        if not (0 <= patch_idx < grid_side * grid_side):
+            continue
+        spatial_patch_to_items.setdefault(patch_idx, []).append(
+            {
+                "query_token_idx": query_token_idx,
+                "query_token": query_token_labels[query_token_idx],
+                **details,
+            }
+        )
+
+    if not spatial_patch_to_items:
+        return []
+
+    patch_dir = output_dir / f"{stem}_patch_crops"
+    patch_dir.mkdir(parents=True, exist_ok=True)
+
+    records = []
+    sorted_patches = sorted(
+        spatial_patch_to_items.items(),
+        key=lambda kv: max(item["score"] for item in kv[1]),
+        reverse=True,
+    )
+    for crop_rank, (patch_idx, items) in enumerate(sorted_patches, start=1):
+        row = patch_idx // grid_side
+        col = patch_idx % grid_side
+        x0 = int(round(col * width / grid_side))
+        y0 = int(round(row * height / grid_side))
+        x1 = int(round((col + 1) * width / grid_side))
+        y1 = int(round((row + 1) * height / grid_side))
+
+        crop = page_image.crop((x0, y0, x1, y1))
+        best_item = max(items, key=lambda x: x["score"])
+        crop_name = (
+            f"patch_{crop_rank:03d}_patch{patch_idx:04d}_"
+            f"tok{best_item['page_token_idx']:04d}.png"
+        )
+        crop_path = patch_dir / crop_name
+        crop.save(crop_path)
+
+        records.append(
+            {
+                "crop_rank": crop_rank,
+                "patch_idx": patch_idx,
+                "page_token_idx": best_item["page_token_idx"],
+                "grid_row": row,
+                "grid_col": col,
+                "bbox_xyxy": [x0, y0, x1, y1],
+                "path": str(crop_path),
+                "contributing_query_tokens": [
+                    {
+                        "query_token_idx": item["query_token_idx"],
+                        "query_token": item["query_token"],
+                        "score": item["score"],
+                    }
+                    for item in sorted(items, key=lambda x: x["score"], reverse=True)
+                ],
+            }
+        )
+
+    return records
+
+
 def make_page_payload(
     query: str,
     qid: str | None,
@@ -631,6 +713,7 @@ def make_page_payload(
     final_page_score: float,
     score_matrix: np.ndarray,
     contributing_cells: dict[int, dict],
+    patch_crops: list[dict] | None = None,
 ) -> dict:
     doc_id, page_idx = page_uid_to_doc_page(page_uid)
     contributions = []
@@ -660,6 +743,7 @@ def make_page_payload(
         "page_token_count": int(score_matrix.shape[0]),
         "query_token_count": int(score_matrix.shape[1]),
         "contributing_cells": contributions,
+        "patch_crops": patch_crops or [],
     }
 
 
@@ -780,6 +864,21 @@ def main() -> None:
         png_path = output_dir / f"{stem}.png"
         json_path = output_dir / f"{stem}.json"
         image.save(png_path)
+
+        patch_crops = []
+        page_image = None
+        if args.save_patch_crops or args.overlay_on_page:
+            page_image = dataset.get_images_from_doc_id(doc_id)[page_idx]
+        if args.save_patch_crops:
+            patch_crops = build_patch_crop_records(
+                page_image=page_image,
+                page_token_count=page_emb.shape[0],
+                contributing_cells=contributing_cells,
+                query_token_labels=query_token_labels,
+                output_dir=output_dir,
+                stem=stem,
+            )
+
         json_path.write_text(
             json.dumps(
                 make_page_payload(
@@ -792,6 +891,7 @@ def main() -> None:
                     final_page_score=page_score,
                     score_matrix=score_matrix,
                     contributing_cells=contributing_cells,
+                    patch_crops=patch_crops,
                 ),
                 indent=2,
             )
@@ -805,11 +905,11 @@ def main() -> None:
                 "page_uid": page_uid,
                 "png": str(png_path),
                 "json": str(json_path),
+                "patch_crops": patch_crops,
             }
         )
 
         if args.overlay_on_page:
-            page_image = dataset.get_images_from_doc_id(doc_id)[page_idx]
             overlay = build_overlay_image(
                 page_image=page_image,
                 page_uid=page_uid,
