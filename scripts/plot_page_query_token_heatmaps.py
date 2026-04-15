@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -45,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n_retrieval_pages", type=int, default=4)
     parser.add_argument(
         "--query_token_filter",
-        default="full",
+        default="semantic_only",
         choices=QUERY_TOKEN_FILTER_CHOICES,
         help="Match the real retrieval ablation mode when recomputing token-level scores.",
     )
@@ -101,7 +102,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--overlay-mode",
-        default="aspectfit",
+        default="original_exact",
         choices=["aspectfit", "processor_exact", "original_exact"],
         help=(
             "Overlay geometry: aspectfit keeps the page unwarped inside a square canvas; "
@@ -117,8 +118,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--overlay-clean",
-        action="store_true",
-        help="Render only the page and red boxes, without titles, legend, or numeric labels.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Hide numeric labels inside red boxes. Metadata is shown in a top banner.",
     )
     parser.add_argument(
         "--nonspatial-token-position",
@@ -199,6 +201,15 @@ def clean_token_label(token: str) -> str:
     token = token.replace("<eos>", "[EOS]")
     token = token.strip()
     return token if token else "[WS]"
+
+
+def load_font(size: int) -> ImageFont.ImageFont:
+    for font_name in ("DejaVuSans.ttf", "Arial.ttf"):
+        try:
+            return ImageFont.truetype(font_name, size=size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
 
 
 def compute_page_contributions(
@@ -552,6 +563,7 @@ def build_overlay_image(
     page_token_count: int,
     contributing_cells: dict[int, dict],
     query_token_labels: list[str],
+    query_token_filter: str,
     output_size: int,
     overlay_mode: str,
     overlay_clean: bool,
@@ -591,90 +603,89 @@ def build_overlay_image(
     else:
         raise ValueError(f"Unsupported overlay_mode={overlay_mode!r}")
 
-    legend_width = 0 if overlay_clean else 520
-    top_margin = 0 if overlay_clean else 40
-    canvas_width = display_image.width + legend_width
-    canvas_height = display_image.height + top_margin
-    canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
-    canvas.paste(display_image, (0, top_margin))
-    draw = ImageDraw.Draw(canvas)
-    font = ImageFont.load_default()
+    title_font = load_font(24)
+    meta_font = load_font(18)
 
-    if not overlay_clean:
-        draw.text((10, 10), f"{page_uid} | final_page_score={page_score:.4f}", fill="black", font=font)
-        if overlay_mode == "aspectfit":
-            overlay_note = "page preserved inside a square canvas; patch boxes are approximate."
-        elif overlay_mode == "processor_exact":
-            overlay_note = "exact processor-space square grid overlay on a warped page canvas."
-        else:
-            overlay_note = "exact square-grid patches projected back onto the original page."
-        draw.text(
-            (10, 24),
-            (
-                f"Overlay uses inferred patch grid {grid_side}x{grid_side} with extra_tokens={extra_tokens} "
-                f"interpreted as {nonspatial_token_position}; "
-                f"{overlay_note}"
-            ),
-            fill="black",
-            font=font,
+    header_lines = [
+        f"{page_uid} | final_page_score={page_score:.4f}",
+        (
+            f"grid={grid_side}x{grid_side} | extra_tokens={extra_tokens} | "
+            f"query_token_filter={query_token_filter} | token_layout={nonspatial_token_position} | "
+            f"overlay_mode={overlay_mode}"
+        ),
+    ]
+    for overlay_id, patch_record in enumerate(sorted_patch_records, start=1):
+        contributors = "; ".join(
+            [
+                f'q{item["query_token_idx"]} "{item["query_token"][:18]}" {item["score"]:.4f} tok={item["page_token_idx"]}'
+                for item in patch_record["items"]
+            ]
         )
+        header_lines.extend(
+            textwrap.wrap(
+                f"#{overlay_id} patch={patch_record['patch_idx']} grid=({patch_record['grid_row']},{patch_record['grid_col']}) | {contributors}",
+                width=120,
+            )
+        )
+    if non_spatial_items:
+        non_spatial_summary = "; ".join(
+            [
+                f'q{item["query_token_idx"]} "{item["query_token"][:18]}" {item["score"]:.4f} tok={item["page_token_idx"]}'
+                for item in sorted(non_spatial_items, key=lambda x: x["score"], reverse=True)
+            ]
+        )
+        header_lines.extend(textwrap.wrap(f"Non-spatial | {non_spatial_summary}", width=120))
+
+    measure_image = Image.new("RGB", (1, 1), "white")
+    measure_draw = ImageDraw.Draw(measure_image)
+    header_width = 0
+    header_height = 12
+    for idx, line in enumerate(header_lines):
+        font = title_font if idx == 0 else meta_font
+        bbox = measure_draw.textbbox((0, 0), line, font=font)
+        header_width = max(header_width, bbox[2] - bbox[0])
+        header_height += (bbox[3] - bbox[1]) + (8 if idx == 0 else 6)
+
+    side_padding = 10
+    canvas_width = max(display_image.width + 2 * side_padding, header_width + 2 * side_padding)
+    canvas_height = header_height + display_image.height + side_padding
+    canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
+    page_x = max(side_padding, (canvas_width - display_image.width) // 2)
+    top_margin = header_height
+    canvas.paste(display_image, (page_x, top_margin))
+    draw = ImageDraw.Draw(canvas)
+
+    text_y = 8
+    for idx, line in enumerate(header_lines):
+        font = title_font if idx == 0 else meta_font
+        draw.text((side_padding, text_y), line, fill="black", font=font)
+        bbox = draw.textbbox((side_padding, text_y), line, font=font)
+        text_y = bbox[3] + (8 if idx == 0 else 6)
 
     for overlay_id, patch_record in enumerate(sorted_patch_records, start=1):
         patch_idx = patch_record["patch_idx"]
         if overlay_mode == "aspectfit":
             x0, y0, x1, y1 = patch_bbox_xyxy(output_size, output_size, grid_side, patch_idx)
+            x0 += page_x
+            x1 += page_x
             y0 += top_margin
             y1 += top_margin
         elif overlay_mode == "processor_exact":
             x0, y0, x1, y1 = patch_bbox_xyxy(output_size, output_size, grid_side, patch_idx)
+            x0 += page_x
+            x1 += page_x
             y0 += top_margin
             y1 += top_margin
         else:
             x0, y0, x1, y1 = patch_bbox_xyxy(display_image.width, display_image.height, grid_side, patch_idx)
+            x0 += page_x
+            x1 += page_x
             y0 += top_margin
             y1 += top_margin
         draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
         if not overlay_clean:
             draw.rectangle([x0, y0, x0 + 20, y0 + 14], fill="red")
-            draw.text((x0 + 3, y0 + 2), str(overlay_id), fill="white", font=font)
-
-    if not overlay_clean:
-        legend_x = display_image.width + 12
-        legend_y = top_margin
-        draw.text((legend_x, 10), "Contributing patches", fill="black", font=font)
-
-        line_y = legend_y
-        for overlay_id, patch_record in enumerate(sorted_patch_records, start=1):
-            draw.text(
-                (legend_x, line_y),
-                f"#{overlay_id} patch_idx={patch_record['patch_idx']} grid=({patch_record['grid_row']},{patch_record['grid_col']})",
-                fill="black",
-                font=font,
-            )
-            line_y += 14
-            for item in patch_record["items"]:
-                label = item["query_token"][:18]
-                draw.text(
-                    (legend_x + 12, line_y),
-                    f'q{item["query_token_idx"]} "{label}" score={item["score"]:.4f} tok={item["page_token_idx"]}',
-                    fill="black",
-                    font=font,
-                )
-                line_y += 12
-            line_y += 6
-
-        if non_spatial_items:
-            draw.text((legend_x, line_y), "Non-spatial contributions", fill="black", font=font)
-            line_y += 14
-            for item in sorted(non_spatial_items, key=lambda x: x["score"], reverse=True):
-                label = item["query_token"][:18]
-                draw.text(
-                    (legend_x + 12, line_y),
-                    f'q{item["query_token_idx"]} "{label}" score={item["score"]:.4f} tok={item["page_token_idx"]}',
-                    fill="black",
-                    font=font,
-                )
-                line_y += 12
+            draw.text((x0 + 3, y0 + 2), str(overlay_id), fill="white", font=meta_font)
 
     return canvas
 
@@ -963,6 +974,7 @@ def main() -> None:
                 page_token_count=page_emb.shape[0],
                 contributing_cells=contributing_cells,
                 query_token_labels=query_token_labels,
+                query_token_filter=args.query_token_filter,
                 output_size=args.overlay_image_size,
                 overlay_mode=args.overlay_mode,
                 overlay_clean=args.overlay_clean,
