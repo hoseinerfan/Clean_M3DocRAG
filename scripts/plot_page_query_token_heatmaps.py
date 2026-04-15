@@ -88,6 +88,17 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Directory where per-page PNGs and JSON will be written",
     )
+    parser.add_argument(
+        "--overlay-on-page",
+        action="store_true",
+        help="Also render contributing page patches directly on the page image with a score legend",
+    )
+    parser.add_argument(
+        "--overlay-image-size",
+        type=int,
+        default=896,
+        help="Square output size for the overlaid page image",
+    )
     return parser.parse_args()
 
 
@@ -452,6 +463,118 @@ def build_sparse_contrib_image(
     return img
 
 
+def infer_patch_grid(page_token_count: int) -> tuple[int, int]:
+    for side in range(int(page_token_count**0.5), 0, -1):
+        patch_count = side * side
+        if patch_count <= page_token_count:
+            prefix_tokens = page_token_count - patch_count
+            if prefix_tokens >= 0:
+                return prefix_tokens, side
+    raise ValueError(f"Unable to infer patch grid from page_token_count={page_token_count}")
+
+
+def build_overlay_image(
+    page_image: Image.Image,
+    page_uid: str,
+    page_score: float,
+    page_token_count: int,
+    contributing_cells: dict[int, dict],
+    query_token_labels: list[str],
+    output_size: int,
+) -> Image.Image:
+    prefix_tokens, grid_side = infer_patch_grid(page_token_count)
+    page_img = page_image.convert("RGB").resize((output_size, output_size))
+
+    legend_width = 520
+    top_margin = 40
+    canvas = Image.new("RGB", (output_size + legend_width, output_size + top_margin), "white")
+    canvas.paste(page_img, (0, top_margin))
+    draw = ImageDraw.Draw(canvas)
+    font = ImageFont.load_default()
+
+    draw.text((10, 10), f"{page_uid} | final_page_score={page_score:.4f}", fill="black", font=font)
+    draw.text(
+        (10, 24),
+        f"Overlay uses inferred patch grid {grid_side}x{grid_side} with prefix_tokens={prefix_tokens}.",
+        fill="black",
+        font=font,
+    )
+
+    patch_to_items: dict[int, list[dict]] = {}
+    non_spatial_items: list[dict] = []
+    for query_token_idx, details in sorted(contributing_cells.items()):
+        item = {
+            "query_token_idx": query_token_idx,
+            "query_token": query_token_labels[query_token_idx],
+            **details,
+        }
+        page_token_idx = details["page_token_idx"]
+        patch_idx = page_token_idx - prefix_tokens
+        if 0 <= patch_idx < grid_side * grid_side:
+            patch_to_items.setdefault(patch_idx, []).append(item)
+        else:
+            non_spatial_items.append(item)
+
+    patch_px = output_size / grid_side
+    sorted_patches = sorted(
+        patch_to_items.items(),
+        key=lambda kv: max(item["score"] for item in kv[1]),
+        reverse=True,
+    )
+
+    for overlay_id, (patch_idx, items) in enumerate(sorted_patches, start=1):
+        row = patch_idx // grid_side
+        col = patch_idx % grid_side
+        x0 = int(round(col * patch_px))
+        y0 = top_margin + int(round(row * patch_px))
+        x1 = int(round((col + 1) * patch_px))
+        y1 = top_margin + int(round((row + 1) * patch_px))
+        draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
+        draw.rectangle([x0, y0, x0 + 20, y0 + 14], fill="red")
+        draw.text((x0 + 3, y0 + 2), str(overlay_id), fill="white", font=font)
+
+    legend_x = output_size + 12
+    legend_y = top_margin
+    draw.text((legend_x, 10), "Contributing patches", fill="black", font=font)
+
+    line_y = legend_y
+    for overlay_id, (patch_idx, items) in enumerate(sorted_patches, start=1):
+        row = patch_idx // grid_side
+        col = patch_idx % grid_side
+        draw.text(
+            (legend_x, line_y),
+            f"#{overlay_id} patch_idx={patch_idx} grid=({row},{col})",
+            fill="black",
+            font=font,
+        )
+        line_y += 14
+        for item in sorted(items, key=lambda x: x["score"], reverse=True):
+            label = item["query_token"][:18]
+            draw.text(
+                (legend_x + 12, line_y),
+                f'q{item["query_token_idx"]} "{label}" score={item["score"]:.4f} tok={item["page_token_idx"]}',
+                fill="black",
+                font=font,
+            )
+            line_y += 12
+        line_y += 6
+
+    if non_spatial_items:
+        draw.text((legend_x, line_y), "Non-spatial contributions", fill="black", font=font)
+        line_y += 14
+        for item in sorted(non_spatial_items, key=lambda x: x["score"], reverse=True):
+            label = item["query_token"][:18]
+            draw.text(
+                (legend_x + 12, line_y),
+                f'q{item["query_token_idx"]} "{label}" score={item["score"]:.4f} tok={item["page_token_idx"]}',
+                fill="black",
+                font=font,
+            )
+            line_y += 12
+
+    return canvas
+
+
 def page_uid_to_doc_page(page_uid: str) -> tuple[str, int]:
     doc_id, page_idx_text = page_uid.split("_page")
     return doc_id, int(page_idx_text)
@@ -636,6 +759,21 @@ def main() -> None:
                 "json": str(json_path),
             }
         )
+
+        if args.overlay_on_page:
+            page_image = dataset.get_images_from_doc_id(doc_id)[page_idx]
+            overlay = build_overlay_image(
+                page_image=page_image,
+                page_uid=page_uid,
+                page_score=page_score,
+                page_token_count=page_emb.shape[0],
+                contributing_cells=contributing_cells,
+                query_token_labels=query_token_labels,
+                output_size=args.overlay_image_size,
+            )
+            overlay_path = output_dir / f"{stem}_overlay.png"
+            overlay.save(overlay_path)
+            summary["files"][-1]["overlay_png"] = str(overlay_path)
 
     summary_path = output_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
