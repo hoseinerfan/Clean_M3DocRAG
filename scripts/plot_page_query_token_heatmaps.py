@@ -464,19 +464,31 @@ def build_overlay_image(
     output_size: int,
 ) -> Image.Image:
     prefix_tokens, grid_side = infer_patch_grid(page_token_count)
-    page_img = page_image.convert("RGB").resize((output_size, output_size))
+    page_img = page_image.convert("RGB")
+    original_width, original_height = page_img.size
+    scale = min(output_size / original_width, output_size / original_height)
+    resized_width = max(1, int(round(original_width * scale)))
+    resized_height = max(1, int(round(original_height * scale)))
+    resized_page = page_img.resize((resized_width, resized_height))
+    square_page_canvas = Image.new("RGB", (output_size, output_size), "white")
+    x_offset = (output_size - resized_width) // 2
+    y_offset = (output_size - resized_height) // 2
+    square_page_canvas.paste(resized_page, (x_offset, y_offset))
 
     legend_width = 520
     top_margin = 40
     canvas = Image.new("RGB", (output_size + legend_width, output_size + top_margin), "white")
-    canvas.paste(page_img, (0, top_margin))
+    canvas.paste(square_page_canvas, (0, top_margin))
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
 
     draw.text((10, 10), f"{page_uid} | final_page_score={page_score:.4f}", fill="black", font=font)
     draw.text(
         (10, 24),
-        f"Overlay uses inferred patch grid {grid_side}x{grid_side} with prefix_tokens={prefix_tokens}.",
+        (
+            f"Overlay uses inferred patch grid {grid_side}x{grid_side} with prefix_tokens={prefix_tokens}; "
+            f"page aspect ratio preserved inside a square processor canvas."
+        ),
         fill="black",
         font=font,
     )
