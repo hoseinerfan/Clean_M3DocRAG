@@ -74,6 +74,16 @@ def parse_args() -> argparse.Namespace:
         help="Show a y-axis tick label every N page tokens",
     )
     parser.add_argument(
+        "--contrib-only",
+        action="store_true",
+        help="Plot only the actual contributing query-token/page-token pairs",
+    )
+    parser.add_argument(
+        "--swap-axes",
+        action="store_true",
+        help="Swap axes so x=page tokens and y=query tokens",
+    )
+    parser.add_argument(
         "--output-dir",
         required=True,
         help="Directory where per-page PNGs and JSON will be written",
@@ -323,6 +333,125 @@ def build_page_heatmap_image(
     return img
 
 
+def build_sparse_contrib_image(
+    query_token_labels: list[str],
+    page_uid: str,
+    page_score: float,
+    contributing_cells: dict[int, dict],
+    cell_width: int,
+    cell_height: int,
+    swap_axes: bool,
+) -> Image.Image:
+    font = ImageFont.load_default()
+
+    contrib_items = [
+        {
+            "query_token_idx": q_idx,
+            "query_token": query_token_labels[q_idx],
+            **details,
+        }
+        for q_idx, details in sorted(contributing_cells.items())
+    ]
+    unique_page_token_indices = sorted({item["page_token_idx"] for item in contrib_items})
+    page_token_to_col = {page_token_idx: idx for idx, page_token_idx in enumerate(unique_page_token_indices)}
+
+    if swap_axes:
+        row_labels = [f"{item['query_token_idx']}: {item['query_token'][:28]}" for item in contrib_items]
+        col_labels = [str(idx) for idx in unique_page_token_indices]
+        n_rows = len(row_labels)
+        n_cols = len(col_labels)
+        left_margin = 200
+        top_margin = 40
+        right_margin = 20
+        bottom_margin = 120
+        width = left_margin + n_cols * cell_width + right_margin
+        height = top_margin + n_rows * max(cell_height, 24) + bottom_margin
+
+        img = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(img)
+        title = f"{page_uid} | final_page_score={page_score:.4f}"
+        subtitle = "Only contributing pairs. x=page token idx, y=query token. Cell text = exact dot product."
+        draw.text((10, 10), title, fill="black", font=font)
+        draw.text((10, 24), subtitle, fill="black", font=font)
+
+        for row_idx, label in enumerate(row_labels):
+            y0 = top_margin + row_idx * max(cell_height, 24)
+            y1 = y0 + max(cell_height, 24)
+            draw.text((8, y0 + 6), label, fill="black", font=font)
+            for col_idx in range(n_cols):
+                x0 = left_margin + col_idx * cell_width
+                x1 = x0 + cell_width
+                draw.rectangle([x0, y0, x1, y1], outline=(180, 180, 180), fill="white")
+
+            item = contrib_items[row_idx]
+            col_idx = page_token_to_col[item["page_token_idx"]]
+            x0 = left_margin + col_idx * cell_width
+            y0 = top_margin + row_idx * max(cell_height, 24)
+            x1 = x0 + cell_width
+            y1 = y0 + max(cell_height, 24)
+            draw.rectangle([x0, y0, x1, y1], outline="black", width=2, fill="white")
+            draw.text((x0 + 4, y0 + 6), f"{item['score']:.2f}", fill="black", font=font)
+
+        for col_idx, label in enumerate(col_labels):
+            token_img = Image.new("RGBA", (140, 24), (255, 255, 255, 0))
+            token_draw = ImageDraw.Draw(token_img)
+            token_draw.text((0, 0), label, fill="black", font=font)
+            rotated = token_img.rotate(90, expand=True)
+            x = left_margin + col_idx * cell_width + max(0, (cell_width - rotated.width) // 2)
+            y = top_margin + n_rows * max(cell_height, 24) + 6
+            img.paste(rotated, (x, y), rotated)
+
+        draw.text((left_margin, height - 18), "page token indices", fill="black", font=font)
+        return img
+
+    row_labels = [str(idx) for idx in unique_page_token_indices]
+    col_labels = [f"{item['query_token_idx']}: {item['query_token'][:18]}" for item in contrib_items]
+    n_rows = len(row_labels)
+    n_cols = len(col_labels)
+    left_margin = 76
+    top_margin = 40
+    right_margin = 20
+    bottom_margin = 170
+    width = left_margin + n_cols * cell_width + right_margin
+    height = top_margin + n_rows * max(cell_height, 18) + bottom_margin
+
+    img = Image.new("RGB", (width, height), "white")
+    draw = ImageDraw.Draw(img)
+    title = f"{page_uid} | final_page_score={page_score:.4f}"
+    subtitle = "Only contributing pairs. x=query token, y=page token idx. Cell text = exact dot product."
+    draw.text((10, 10), title, fill="black", font=font)
+    draw.text((10, 24), subtitle, fill="black", font=font)
+
+    for row_idx, label in enumerate(row_labels):
+        y0 = top_margin + row_idx * max(cell_height, 18)
+        y1 = y0 + max(cell_height, 18)
+        draw.text((8, y0 + 3), label, fill="black", font=font)
+        for col_idx in range(n_cols):
+            x0 = left_margin + col_idx * cell_width
+            x1 = x0 + cell_width
+            draw.rectangle([x0, y0, x1, y1], outline=(180, 180, 180), fill="white")
+
+    for col_idx, item in enumerate(contrib_items):
+        row_idx = page_token_to_col[item["page_token_idx"]]
+        x0 = left_margin + col_idx * cell_width
+        y0 = top_margin + row_idx * max(cell_height, 18)
+        x1 = x0 + cell_width
+        y1 = y0 + max(cell_height, 18)
+        draw.rectangle([x0, y0, x1, y1], outline="black", width=2, fill="white")
+        draw.text((x0 + 4, y0 + 3), f"{item['score']:.2f}", fill="black", font=font)
+
+    for col_idx, label in enumerate(col_labels):
+        token_img = Image.new("RGBA", (200, 24), (255, 255, 255, 0))
+        token_draw = ImageDraw.Draw(token_img)
+        token_draw.text((0, 0), label, fill="black", font=font)
+        rotated = token_img.rotate(90, expand=True)
+        x = left_margin + col_idx * cell_width + max(0, (cell_width - rotated.width) // 2)
+        y = top_margin + n_rows * max(cell_height, 18) + 6
+        img.paste(rotated, (x, y), rotated)
+
+    return img
+
+
 def page_uid_to_doc_page(page_uid: str) -> tuple[str, int]:
     doc_id, page_idx_text = page_uid.split("_page")
     return doc_id, int(page_idx_text)
@@ -455,16 +584,27 @@ def main() -> None:
                 contributing_cells[query_token_idx] = page_details
 
         page_title = f"rank={rank} {page_uid}"
-        image = build_page_heatmap_image(
-            query_token_labels=query_token_labels,
-            score_matrix=score_matrix,
-            page_title=page_title,
-            page_score=page_score,
-            contributing_cells=contributing_cells,
-            cell_width=args.cell_width,
-            cell_height=args.cell_height,
-            page_token_tick_step=args.page_token_tick_step,
-        )
+        if args.contrib_only:
+            image = build_sparse_contrib_image(
+                query_token_labels=query_token_labels,
+                page_uid=page_title,
+                page_score=page_score,
+                contributing_cells=contributing_cells,
+                cell_width=max(args.cell_width, 70),
+                cell_height=max(args.cell_height, 24),
+                swap_axes=args.swap_axes,
+            )
+        else:
+            image = build_page_heatmap_image(
+                query_token_labels=query_token_labels,
+                score_matrix=score_matrix,
+                page_title=page_title,
+                page_score=page_score,
+                contributing_cells=contributing_cells,
+                cell_width=args.cell_width,
+                cell_height=args.cell_height,
+                page_token_tick_step=args.page_token_tick_step,
+            )
 
         stem = f"rank_{rank:04d}_{sanitize_filename(page_uid)}"
         png_path = output_dir / f"{stem}.png"
