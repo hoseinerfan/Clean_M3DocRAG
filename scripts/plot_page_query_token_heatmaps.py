@@ -121,6 +121,15 @@ def parse_args() -> argparse.Namespace:
         help="Render only the page and red boxes, without titles, legend, or numeric labels.",
     )
     parser.add_argument(
+        "--nonspatial-token-position",
+        default="suffix",
+        choices=["prefix", "suffix"],
+        help=(
+            "How to interpret the non-spatial extra tokens in a page embedding. "
+            "Use 'suffix' to treat the first grid_side^2 tokens as rasterized page patches."
+        ),
+    )
+    parser.add_argument(
         "--save-patch-crops",
         action="store_true",
         help="Also save the winning original-page patch crops for contributing page tokens.",
@@ -478,8 +487,13 @@ def collect_spatial_patch_records(
     page_token_count: int,
     contributing_cells: dict[int, dict],
     query_token_labels: list[str],
+    nonspatial_token_position: str,
 ) -> tuple[int, int, list[dict], list[dict]]:
-    prefix_tokens, grid_side = infer_patch_grid(page_token_count)
+    extra_tokens, grid_side = infer_patch_grid(page_token_count)
+    if nonspatial_token_position not in {"prefix", "suffix"}:
+        raise ValueError(
+            f"Unsupported nonspatial_token_position={nonspatial_token_position!r}"
+        )
 
     patch_to_items: dict[int, list[dict]] = {}
     non_spatial_items: list[dict] = []
@@ -490,7 +504,10 @@ def collect_spatial_patch_records(
             **details,
         }
         page_token_idx = details["page_token_idx"]
-        patch_idx = page_token_idx - prefix_tokens
+        if nonspatial_token_position == "prefix":
+            patch_idx = page_token_idx - extra_tokens
+        else:
+            patch_idx = page_token_idx
         if 0 <= patch_idx < grid_side * grid_side:
             patch_to_items.setdefault(patch_idx, []).append(item)
         else:
@@ -515,7 +532,7 @@ def collect_spatial_patch_records(
             }
         )
 
-    return prefix_tokens, grid_side, sorted_patch_records, non_spatial_items
+    return extra_tokens, grid_side, sorted_patch_records, non_spatial_items
 
 
 def patch_bbox_xyxy(width: int, height: int, grid_side: int, patch_idx: int) -> tuple[int, int, int, int]:
@@ -538,11 +555,13 @@ def build_overlay_image(
     output_size: int,
     overlay_mode: str,
     overlay_clean: bool,
+    nonspatial_token_position: str,
 ) -> Image.Image:
-    prefix_tokens, grid_side, sorted_patch_records, non_spatial_items = collect_spatial_patch_records(
+    extra_tokens, grid_side, sorted_patch_records, non_spatial_items = collect_spatial_patch_records(
         page_token_count=page_token_count,
         contributing_cells=contributing_cells,
         query_token_labels=query_token_labels,
+        nonspatial_token_position=nonspatial_token_position,
     )
     page_img = page_image.convert("RGB")
     original_width, original_height = page_img.size
@@ -592,7 +611,8 @@ def build_overlay_image(
         draw.text(
             (10, 24),
             (
-                f"Overlay uses inferred patch grid {grid_side}x{grid_side} with prefix_tokens={prefix_tokens}; "
+                f"Overlay uses inferred patch grid {grid_side}x{grid_side} with extra_tokens={extra_tokens} "
+                f"interpreted as {nonspatial_token_position}; "
                 f"{overlay_note}"
             ),
             fill="black",
@@ -671,11 +691,13 @@ def build_patch_crop_records(
     query_token_labels: list[str],
     output_dir: Path,
     stem: str,
+    nonspatial_token_position: str,
 ) -> list[dict]:
-    _prefix_tokens, grid_side, sorted_patch_records, _non_spatial_items = collect_spatial_patch_records(
+    _extra_tokens, grid_side, sorted_patch_records, _non_spatial_items = collect_spatial_patch_records(
         page_token_count=page_token_count,
         contributing_cells=contributing_cells,
         query_token_labels=query_token_labels,
+        nonspatial_token_position=nonspatial_token_position,
     )
     width, height = page_image.size
 
@@ -726,6 +748,7 @@ def make_page_payload(
     query: str,
     qid: str | None,
     query_token_filter: str,
+    nonspatial_token_position: str,
     query_token_labels: list[str],
     rank: int,
     page_uid: str,
@@ -753,6 +776,7 @@ def make_page_payload(
         "qid": qid,
         "query": query,
         "query_token_filter": query_token_filter,
+        "nonspatial_token_position": nonspatial_token_position,
         "rank": rank,
         "page_uid": page_uid,
         "doc_id": doc_id,
@@ -835,6 +859,7 @@ def main() -> None:
         "query": query,
         "n_retrieval_pages": args.n_retrieval_pages,
         "query_token_filter": args.query_token_filter,
+        "nonspatial_token_position": args.nonspatial_token_position,
         "plot_rank_start": plot_rank_start,
         "plot_rank_count": len(selected_pages),
         "retrieved_pages": selected_pages,
@@ -896,6 +921,7 @@ def main() -> None:
                 query_token_labels=query_token_labels,
                 output_dir=output_dir,
                 stem=stem,
+                nonspatial_token_position=args.nonspatial_token_position,
             )
 
         json_path.write_text(
@@ -904,6 +930,7 @@ def main() -> None:
                     query=query,
                     qid=args.qid,
                     query_token_filter=args.query_token_filter,
+                    nonspatial_token_position=args.nonspatial_token_position,
                     query_token_labels=query_token_labels,
                     rank=rank,
                     page_uid=page_uid,
@@ -939,6 +966,7 @@ def main() -> None:
                 output_size=args.overlay_image_size,
                 overlay_mode=args.overlay_mode,
                 overlay_clean=args.overlay_clean,
+                nonspatial_token_position=args.nonspatial_token_position,
             )
             overlay_path = output_dir / f"{stem}_overlay.png"
             overlay.save(overlay_path)
