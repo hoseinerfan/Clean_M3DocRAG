@@ -116,6 +116,11 @@ def parse_args() -> argparse.Namespace:
         help="Square output size for the overlaid page image",
     )
     parser.add_argument(
+        "--overlay-clean",
+        action="store_true",
+        help="Render only the page and red boxes, without titles, legend, or numeric labels.",
+    )
+    parser.add_argument(
         "--save-patch-crops",
         action="store_true",
         help="Also save the winning original-page patch crops for contributing page tokens.",
@@ -469,6 +474,60 @@ def infer_patch_grid(page_token_count: int) -> tuple[int, int]:
     raise ValueError(f"Unable to infer patch grid from page_token_count={page_token_count}")
 
 
+def collect_spatial_patch_records(
+    page_token_count: int,
+    contributing_cells: dict[int, dict],
+    query_token_labels: list[str],
+) -> tuple[int, int, list[dict], list[dict]]:
+    prefix_tokens, grid_side = infer_patch_grid(page_token_count)
+
+    patch_to_items: dict[int, list[dict]] = {}
+    non_spatial_items: list[dict] = []
+    for query_token_idx, details in sorted(contributing_cells.items()):
+        item = {
+            "query_token_idx": query_token_idx,
+            "query_token": query_token_labels[query_token_idx],
+            **details,
+        }
+        page_token_idx = details["page_token_idx"]
+        patch_idx = page_token_idx - prefix_tokens
+        if 0 <= patch_idx < grid_side * grid_side:
+            patch_to_items.setdefault(patch_idx, []).append(item)
+        else:
+            non_spatial_items.append(item)
+
+    sorted_patch_records = []
+    for patch_idx, items in sorted(
+        patch_to_items.items(),
+        key=lambda kv: max(item["score"] for item in kv[1]),
+        reverse=True,
+    ):
+        row = patch_idx // grid_side
+        col = patch_idx % grid_side
+        best_item = max(items, key=lambda x: x["score"])
+        sorted_patch_records.append(
+            {
+                "patch_idx": patch_idx,
+                "grid_row": row,
+                "grid_col": col,
+                "page_token_idx": best_item["page_token_idx"],
+                "items": sorted(items, key=lambda x: x["score"], reverse=True),
+            }
+        )
+
+    return prefix_tokens, grid_side, sorted_patch_records, non_spatial_items
+
+
+def patch_bbox_xyxy(width: int, height: int, grid_side: int, patch_idx: int) -> tuple[int, int, int, int]:
+    row = patch_idx // grid_side
+    col = patch_idx % grid_side
+    x0 = int(round(col * width / grid_side))
+    y0 = int(round(row * height / grid_side))
+    x1 = int(round((col + 1) * width / grid_side))
+    y1 = int(round((row + 1) * height / grid_side))
+    return x0, y0, x1, y1
+
+
 def build_overlay_image(
     page_image: Image.Image,
     page_uid: str,
@@ -478,8 +537,13 @@ def build_overlay_image(
     query_token_labels: list[str],
     output_size: int,
     overlay_mode: str,
+    overlay_clean: bool,
 ) -> Image.Image:
-    prefix_tokens, grid_side = infer_patch_grid(page_token_count)
+    prefix_tokens, grid_side, sorted_patch_records, non_spatial_items = collect_spatial_patch_records(
+        page_token_count=page_token_count,
+        contributing_cells=contributing_cells,
+        query_token_labels=query_token_labels,
+    )
     page_img = page_image.convert("RGB")
     original_width, original_height = page_img.size
 
@@ -508,8 +572,8 @@ def build_overlay_image(
     else:
         raise ValueError(f"Unsupported overlay_mode={overlay_mode!r}")
 
-    legend_width = 520
-    top_margin = 40
+    legend_width = 0 if overlay_clean else 520
+    top_margin = 0 if overlay_clean else 40
     canvas_width = display_image.width + legend_width
     canvas_height = display_image.height + top_margin
     canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
@@ -517,106 +581,80 @@ def build_overlay_image(
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
 
-    draw.text((10, 10), f"{page_uid} | final_page_score={page_score:.4f}", fill="black", font=font)
-    if overlay_mode == "aspectfit":
-        overlay_note = "page preserved inside a square canvas; patch boxes are approximate."
-    elif overlay_mode == "processor_exact":
-        overlay_note = "exact processor-space square grid overlay on a warped page canvas."
-    else:
-        overlay_note = "exact square-grid patches projected back onto the original page."
-    draw.text(
-        (10, 24),
-        (
-            f"Overlay uses inferred patch grid {grid_side}x{grid_side} with prefix_tokens={prefix_tokens}; "
-            f"{overlay_note}"
-        ),
-        fill="black",
-        font=font,
-    )
-
-    patch_to_items: dict[int, list[dict]] = {}
-    non_spatial_items: list[dict] = []
-    for query_token_idx, details in sorted(contributing_cells.items()):
-        item = {
-            "query_token_idx": query_token_idx,
-            "query_token": query_token_labels[query_token_idx],
-            **details,
-        }
-        page_token_idx = details["page_token_idx"]
-        patch_idx = page_token_idx - prefix_tokens
-        if 0 <= patch_idx < grid_side * grid_side:
-            patch_to_items.setdefault(patch_idx, []).append(item)
-        else:
-            non_spatial_items.append(item)
-
-    sorted_patches = sorted(
-        patch_to_items.items(),
-        key=lambda kv: max(item["score"] for item in kv[1]),
-        reverse=True,
-    )
-
-    for overlay_id, (patch_idx, items) in enumerate(sorted_patches, start=1):
-        row = patch_idx // grid_side
-        col = patch_idx % grid_side
+    if not overlay_clean:
+        draw.text((10, 10), f"{page_uid} | final_page_score={page_score:.4f}", fill="black", font=font)
         if overlay_mode == "aspectfit":
-            patch_px = output_size / grid_side
-            x0 = int(round(col * patch_px))
-            y0 = top_margin + int(round(row * patch_px))
-            x1 = int(round((col + 1) * patch_px))
-            y1 = top_margin + int(round((row + 1) * patch_px))
+            overlay_note = "page preserved inside a square canvas; patch boxes are approximate."
         elif overlay_mode == "processor_exact":
-            patch_px = output_size / grid_side
-            x0 = int(round(col * patch_px))
-            y0 = top_margin + int(round(row * patch_px))
-            x1 = int(round((col + 1) * patch_px))
-            y1 = top_margin + int(round((row + 1) * patch_px))
+            overlay_note = "exact processor-space square grid overlay on a warped page canvas."
         else:
-            x0 = int(round(col * resized_width / grid_side))
-            y0 = top_margin + int(round(row * resized_height / grid_side))
-            x1 = int(round((col + 1) * resized_width / grid_side))
-            y1 = top_margin + int(round((row + 1) * resized_height / grid_side))
-        draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
-        draw.rectangle([x0, y0, x0 + 20, y0 + 14], fill="red")
-        draw.text((x0 + 3, y0 + 2), str(overlay_id), fill="white", font=font)
-
-    legend_x = display_image.width + 12
-    legend_y = top_margin
-    draw.text((legend_x, 10), "Contributing patches", fill="black", font=font)
-
-    line_y = legend_y
-    for overlay_id, (patch_idx, items) in enumerate(sorted_patches, start=1):
-        row = patch_idx // grid_side
-        col = patch_idx % grid_side
+            overlay_note = "exact square-grid patches projected back onto the original page."
         draw.text(
-            (legend_x, line_y),
-            f"#{overlay_id} patch_idx={patch_idx} grid=({row},{col})",
+            (10, 24),
+            (
+                f"Overlay uses inferred patch grid {grid_side}x{grid_side} with prefix_tokens={prefix_tokens}; "
+                f"{overlay_note}"
+            ),
             fill="black",
             font=font,
         )
-        line_y += 14
-        for item in sorted(items, key=lambda x: x["score"], reverse=True):
-            label = item["query_token"][:18]
-            draw.text(
-                (legend_x + 12, line_y),
-                f'q{item["query_token_idx"]} "{label}" score={item["score"]:.4f} tok={item["page_token_idx"]}',
-                fill="black",
-                font=font,
-            )
-            line_y += 12
-        line_y += 6
 
-    if non_spatial_items:
-        draw.text((legend_x, line_y), "Non-spatial contributions", fill="black", font=font)
-        line_y += 14
-        for item in sorted(non_spatial_items, key=lambda x: x["score"], reverse=True):
-            label = item["query_token"][:18]
+    for overlay_id, patch_record in enumerate(sorted_patch_records, start=1):
+        patch_idx = patch_record["patch_idx"]
+        if overlay_mode == "aspectfit":
+            x0, y0, x1, y1 = patch_bbox_xyxy(output_size, output_size, grid_side, patch_idx)
+            y0 += top_margin
+            y1 += top_margin
+        elif overlay_mode == "processor_exact":
+            x0, y0, x1, y1 = patch_bbox_xyxy(output_size, output_size, grid_side, patch_idx)
+            y0 += top_margin
+            y1 += top_margin
+        else:
+            x0, y0, x1, y1 = patch_bbox_xyxy(display_image.width, display_image.height, grid_side, patch_idx)
+            y0 += top_margin
+            y1 += top_margin
+        draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
+        if not overlay_clean:
+            draw.rectangle([x0, y0, x0 + 20, y0 + 14], fill="red")
+            draw.text((x0 + 3, y0 + 2), str(overlay_id), fill="white", font=font)
+
+    if not overlay_clean:
+        legend_x = display_image.width + 12
+        legend_y = top_margin
+        draw.text((legend_x, 10), "Contributing patches", fill="black", font=font)
+
+        line_y = legend_y
+        for overlay_id, patch_record in enumerate(sorted_patch_records, start=1):
             draw.text(
-                (legend_x + 12, line_y),
-                f'q{item["query_token_idx"]} "{label}" score={item["score"]:.4f} tok={item["page_token_idx"]}',
+                (legend_x, line_y),
+                f"#{overlay_id} patch_idx={patch_record['patch_idx']} grid=({patch_record['grid_row']},{patch_record['grid_col']})",
                 fill="black",
                 font=font,
             )
-            line_y += 12
+            line_y += 14
+            for item in patch_record["items"]:
+                label = item["query_token"][:18]
+                draw.text(
+                    (legend_x + 12, line_y),
+                    f'q{item["query_token_idx"]} "{label}" score={item["score"]:.4f} tok={item["page_token_idx"]}',
+                    fill="black",
+                    font=font,
+                )
+                line_y += 12
+            line_y += 6
+
+        if non_spatial_items:
+            draw.text((legend_x, line_y), "Non-spatial contributions", fill="black", font=font)
+            line_y += 14
+            for item in sorted(non_spatial_items, key=lambda x: x["score"], reverse=True):
+                label = item["query_token"][:18]
+                draw.text(
+                    (legend_x + 12, line_y),
+                    f'q{item["query_token_idx"]} "{label}" score={item["score"]:.4f} tok={item["page_token_idx"]}',
+                    fill="black",
+                    font=font,
+                )
+                line_y += 12
 
     return canvas
 
@@ -634,45 +672,26 @@ def build_patch_crop_records(
     output_dir: Path,
     stem: str,
 ) -> list[dict]:
-    prefix_tokens, grid_side = infer_patch_grid(page_token_count)
+    _prefix_tokens, grid_side, sorted_patch_records, _non_spatial_items = collect_spatial_patch_records(
+        page_token_count=page_token_count,
+        contributing_cells=contributing_cells,
+        query_token_labels=query_token_labels,
+    )
     width, height = page_image.size
 
-    spatial_patch_to_items: dict[int, list[dict]] = {}
-    for query_token_idx, details in sorted(contributing_cells.items()):
-        page_token_idx = details["page_token_idx"]
-        patch_idx = page_token_idx - prefix_tokens
-        if not (0 <= patch_idx < grid_side * grid_side):
-            continue
-        spatial_patch_to_items.setdefault(patch_idx, []).append(
-            {
-                "query_token_idx": query_token_idx,
-                "query_token": query_token_labels[query_token_idx],
-                **details,
-            }
-        )
-
-    if not spatial_patch_to_items:
+    if not sorted_patch_records:
         return []
 
     patch_dir = output_dir / f"{stem}_patch_crops"
     patch_dir.mkdir(parents=True, exist_ok=True)
 
     records = []
-    sorted_patches = sorted(
-        spatial_patch_to_items.items(),
-        key=lambda kv: max(item["score"] for item in kv[1]),
-        reverse=True,
-    )
-    for crop_rank, (patch_idx, items) in enumerate(sorted_patches, start=1):
-        row = patch_idx // grid_side
-        col = patch_idx % grid_side
-        x0 = int(round(col * width / grid_side))
-        y0 = int(round(row * height / grid_side))
-        x1 = int(round((col + 1) * width / grid_side))
-        y1 = int(round((row + 1) * height / grid_side))
+    for crop_rank, patch_record in enumerate(sorted_patch_records, start=1):
+        patch_idx = patch_record["patch_idx"]
+        x0, y0, x1, y1 = patch_bbox_xyxy(width, height, grid_side, patch_idx)
 
         crop = page_image.crop((x0, y0, x1, y1))
-        best_item = max(items, key=lambda x: x["score"])
+        best_item = patch_record["items"][0]
         crop_name = (
             f"patch_{crop_rank:03d}_patch{patch_idx:04d}_"
             f"tok{best_item['page_token_idx']:04d}.png"
@@ -685,8 +704,8 @@ def build_patch_crop_records(
                 "crop_rank": crop_rank,
                 "patch_idx": patch_idx,
                 "page_token_idx": best_item["page_token_idx"],
-                "grid_row": row,
-                "grid_col": col,
+                "grid_row": patch_record["grid_row"],
+                "grid_col": patch_record["grid_col"],
                 "bbox_xyxy": [x0, y0, x1, y1],
                 "path": str(crop_path),
                 "contributing_query_tokens": [
@@ -695,7 +714,7 @@ def build_patch_crop_records(
                         "query_token": item["query_token"],
                         "score": item["score"],
                     }
-                    for item in sorted(items, key=lambda x: x["score"], reverse=True)
+                    for item in patch_record["items"]
                 ],
             }
         )
@@ -919,6 +938,7 @@ def main() -> None:
                 query_token_labels=query_token_labels,
                 output_size=args.overlay_image_size,
                 overlay_mode=args.overlay_mode,
+                overlay_clean=args.overlay_clean,
             )
             overlay_path = output_dir / f"{stem}_overlay.png"
             overlay.save(overlay_path)
