@@ -69,6 +69,15 @@ def parse_args() -> argparse.Namespace:
         help="Explicit page_uid to render, e.g. <doc_id>_page<idx>. Can be passed multiple times.",
     )
     parser.add_argument(
+        "--explicit-page-mode",
+        default="direct_page_maxsim",
+        choices=["direct_page_maxsim", "retrieved_contrib"],
+        help=(
+            "When --page-uid is used, either compute page-local MaxSim directly on the selected page "
+            "or preserve the retrieved-contribution semantics from the global FAISS run."
+        ),
+    )
+    parser.add_argument(
         "--cell-width",
         type=int,
         default=28,
@@ -263,6 +272,26 @@ def compute_page_contributions(
         "final_page2scores": final_page2scores,
         "query_token_page_details": query_token_page_details,
     }
+
+
+def compute_direct_page_maxsim(page_emb: np.ndarray, query_emb: np.ndarray) -> tuple[np.ndarray, dict[int, dict], float]:
+    score_matrix = page_emb @ query_emb.T
+    contributing_cells: dict[int, dict] = {}
+    final_page_score = 0.0
+
+    for query_token_idx in range(score_matrix.shape[1]):
+        best_page_token_idx = int(np.argmax(score_matrix[:, query_token_idx]))
+        best_score = float(score_matrix[best_page_token_idx, query_token_idx])
+        contributing_cells[query_token_idx] = {
+            "score": best_score,
+            "found_nearest_doc_token_idx": None,
+            "page_token_idx": best_page_token_idx,
+            "faiss_distance": None,
+            "nn_rank_for_query_token": None,
+        }
+        final_page_score += best_score
+
+    return score_matrix, contributing_cells, final_page_score
 
 
 def sanitize_filename(text: str) -> str:
@@ -727,7 +756,11 @@ def build_selected_pages(
                     "rank": rank_map.get(page_uid),
                     "page_uid": page_uid,
                     "final_page_score": float(score_map.get(page_uid, 0.0)),
-                    "selected_via": "explicit_page_uid",
+                    "selected_via": (
+                        "explicit_page_uid_retrieved_contrib"
+                        if args.explicit_page_mode == "retrieved_contrib"
+                        else "explicit_page_uid_direct_page_maxsim"
+                    ),
                 }
             )
         return selected_pages
@@ -820,6 +853,7 @@ def build_patch_crop_records(
 def make_page_payload(
     query: str,
     qid: str | None,
+    contribution_mode: str,
     query_token_filter: str,
     nonspatial_token_position: str,
     query_token_labels: list[str],
@@ -848,6 +882,7 @@ def make_page_payload(
     return {
         "qid": qid,
         "query": query,
+        "contribution_mode": contribution_mode,
         "query_token_filter": query_token_filter,
         "nonspatial_token_position": nonspatial_token_position,
         "rank": rank,
@@ -886,10 +921,7 @@ def main() -> None:
     retrieval_model.model = accelerator.prepare(retrieval_model.model)
 
     dataset = M3DocVQADataset(make_dataset_args(args))
-    index = faiss.read_index(str(index_dir / "index.bin"))
     docid2embs = dataset.load_all_embeddings()
-    token2pageuid, token2localidx, all_token_embeddings = build_flattened_index_inputs(docid2embs)
-    all_token_embeddings_np = all_token_embeddings.float().numpy()
 
     query_meta = retrieval_model.encode_query_with_metadata(
         query=query,
@@ -899,21 +931,46 @@ def main() -> None:
     query_emb = query_meta["embeddings"].float().numpy().astype(np.float32)
     query_token_labels = [clean_token_label(token) for token in query_meta["raw_tokens"]]
 
-    contribution_output = compute_page_contributions(
-        query_emb=query_emb,
-        index=index,
-        token2pageuid=token2pageuid,
-        token2localidx=token2localidx,
-        all_token_embeddings_np=all_token_embeddings_np,
-        n_retrieval_pages=args.n_retrieval_pages,
-    )
+    contribution_output = None
+    if not (args.page_uid and args.explicit_page_mode == "direct_page_maxsim"):
+        index = faiss.read_index(str(index_dir / "index.bin"))
+        token2pageuid, token2localidx, all_token_embeddings = build_flattened_index_inputs(docid2embs)
+        all_token_embeddings_np = all_token_embeddings.float().numpy()
+
+        contribution_output = compute_page_contributions(
+            query_emb=query_emb,
+            index=index,
+            token2pageuid=token2pageuid,
+            token2localidx=token2localidx,
+            all_token_embeddings_np=all_token_embeddings_np,
+            n_retrieval_pages=args.n_retrieval_pages,
+        )
 
     plot_rank_start = max(1, args.plot_rank_start)
-    selected_pages = build_selected_pages(
-        args=args,
-        contribution_output=contribution_output,
-        docid2embs=docid2embs,
-    )
+    if args.page_uid and args.explicit_page_mode == "direct_page_maxsim":
+        selected_pages = []
+        for page_uid in args.page_uid:
+            doc_id, page_idx = page_uid_to_doc_page(page_uid)
+            if doc_id not in docid2embs:
+                raise KeyError(f"Explicit page doc_id not found in embeddings: {doc_id}")
+            if not (0 <= page_idx < len(docid2embs[doc_id])):
+                raise IndexError(
+                    f"Explicit page index out of range for {doc_id}: {page_idx} not in [0, {len(docid2embs[doc_id]) - 1}]"
+                )
+            selected_pages.append(
+                {
+                    "rank": None,
+                    "page_uid": page_uid,
+                    "final_page_score": None,
+                    "selected_via": "explicit_page_uid_direct_page_maxsim",
+                }
+            )
+    else:
+        selected_pages = build_selected_pages(
+            args=args,
+            contribution_output=contribution_output,
+            docid2embs=docid2embs,
+        )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -922,6 +979,7 @@ def main() -> None:
         "qid": args.qid,
         "query": query,
         "n_retrieval_pages": args.n_retrieval_pages,
+        "explicit_page_mode": args.explicit_page_mode if args.page_uid else None,
         "query_token_filter": args.query_token_filter,
         "nonspatial_token_position": args.nonspatial_token_position,
         "plot_rank_start": plot_rank_start if not args.page_uid else None,
@@ -938,13 +996,19 @@ def main() -> None:
         doc_id, page_idx = page_uid_to_doc_page(page_uid)
 
         page_emb = docid2embs[doc_id][page_idx].view(-1, 128).float().numpy()
-        score_matrix = page_emb @ contribution_output["query_emb"].T
-
-        contributing_cells = {}
-        for query_token_idx, details in enumerate(contribution_output["query_token_page_details"]):
-            page_details = details.get(page_uid)
-            if page_details is not None:
-                contributing_cells[query_token_idx] = page_details
+        if args.page_uid and args.explicit_page_mode == "direct_page_maxsim":
+            score_matrix, contributing_cells, page_score = compute_direct_page_maxsim(
+                page_emb=page_emb,
+                query_emb=query_emb,
+            )
+            item["final_page_score"] = page_score
+        else:
+            score_matrix = page_emb @ contribution_output["query_emb"].T
+            contributing_cells = {}
+            for query_token_idx, details in enumerate(contribution_output["query_token_page_details"]):
+                page_details = details.get(page_uid)
+                if page_details is not None:
+                    contributing_cells[query_token_idx] = page_details
 
         page_title = f"rank={rank} {page_uid}"
         if args.contrib_only:
@@ -994,6 +1058,11 @@ def main() -> None:
                 make_page_payload(
                     query=query,
                     qid=args.qid,
+                    contribution_mode=(
+                        "direct_page_maxsim"
+                        if args.page_uid and args.explicit_page_mode == "direct_page_maxsim"
+                        else "retrieved_contrib"
+                    ),
                     query_token_filter=args.query_token_filter,
                     nonspatial_token_position=args.nonspatial_token_position,
                     query_token_labels=query_token_labels,
