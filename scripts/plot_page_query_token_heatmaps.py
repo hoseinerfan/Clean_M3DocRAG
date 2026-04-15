@@ -100,6 +100,16 @@ def parse_args() -> argparse.Namespace:
         help="Also render contributing page patches directly on the page image with a score legend",
     )
     parser.add_argument(
+        "--overlay-mode",
+        default="aspectfit",
+        choices=["aspectfit", "processor_exact", "original_exact"],
+        help=(
+            "Overlay geometry: aspectfit keeps the page unwarped inside a square canvas; "
+            "processor_exact draws on the square processor canvas; "
+            "original_exact projects exact square-grid patches back onto the original page."
+        ),
+    )
+    parser.add_argument(
         "--overlay-image-size",
         type=int,
         default=896,
@@ -462,32 +472,58 @@ def build_overlay_image(
     contributing_cells: dict[int, dict],
     query_token_labels: list[str],
     output_size: int,
+    overlay_mode: str,
 ) -> Image.Image:
     prefix_tokens, grid_side = infer_patch_grid(page_token_count)
     page_img = page_image.convert("RGB")
     original_width, original_height = page_img.size
-    scale = min(output_size / original_width, output_size / original_height)
-    resized_width = max(1, int(round(original_width * scale)))
-    resized_height = max(1, int(round(original_height * scale)))
-    resized_page = page_img.resize((resized_width, resized_height))
-    square_page_canvas = Image.new("RGB", (output_size, output_size), "white")
-    x_offset = (output_size - resized_width) // 2
-    y_offset = (output_size - resized_height) // 2
-    square_page_canvas.paste(resized_page, (x_offset, y_offset))
+
+    if overlay_mode == "aspectfit":
+        scale = min(output_size / original_width, output_size / original_height)
+        resized_width = max(1, int(round(original_width * scale)))
+        resized_height = max(1, int(round(original_height * scale)))
+        resized_page = page_img.resize((resized_width, resized_height))
+        display_image = Image.new("RGB", (output_size, output_size), "white")
+        x_offset = (output_size - resized_width) // 2
+        y_offset = (output_size - resized_height) // 2
+        display_image.paste(resized_page, (x_offset, y_offset))
+    elif overlay_mode == "processor_exact":
+        display_image = page_img.resize((output_size, output_size))
+        x_offset = 0
+        y_offset = 0
+        resized_width = output_size
+        resized_height = output_size
+    elif overlay_mode == "original_exact":
+        scale = min(output_size / original_width, output_size / original_height)
+        resized_width = max(1, int(round(original_width * scale)))
+        resized_height = max(1, int(round(original_height * scale)))
+        display_image = page_img.resize((resized_width, resized_height))
+        x_offset = 0
+        y_offset = 0
+    else:
+        raise ValueError(f"Unsupported overlay_mode={overlay_mode!r}")
 
     legend_width = 520
     top_margin = 40
-    canvas = Image.new("RGB", (output_size + legend_width, output_size + top_margin), "white")
-    canvas.paste(square_page_canvas, (0, top_margin))
+    canvas_width = display_image.width + legend_width
+    canvas_height = display_image.height + top_margin
+    canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
+    canvas.paste(display_image, (0, top_margin))
     draw = ImageDraw.Draw(canvas)
     font = ImageFont.load_default()
 
     draw.text((10, 10), f"{page_uid} | final_page_score={page_score:.4f}", fill="black", font=font)
+    if overlay_mode == "aspectfit":
+        overlay_note = "page preserved inside a square canvas; patch boxes are approximate."
+    elif overlay_mode == "processor_exact":
+        overlay_note = "exact processor-space square grid overlay on a warped page canvas."
+    else:
+        overlay_note = "exact square-grid patches projected back onto the original page."
     draw.text(
         (10, 24),
         (
             f"Overlay uses inferred patch grid {grid_side}x{grid_side} with prefix_tokens={prefix_tokens}; "
-            f"page aspect ratio preserved inside a square processor canvas."
+            f"{overlay_note}"
         ),
         fill="black",
         font=font,
@@ -508,7 +544,6 @@ def build_overlay_image(
         else:
             non_spatial_items.append(item)
 
-    patch_px = output_size / grid_side
     sorted_patches = sorted(
         patch_to_items.items(),
         key=lambda kv: max(item["score"] for item in kv[1]),
@@ -518,15 +553,28 @@ def build_overlay_image(
     for overlay_id, (patch_idx, items) in enumerate(sorted_patches, start=1):
         row = patch_idx // grid_side
         col = patch_idx % grid_side
-        x0 = int(round(col * patch_px))
-        y0 = top_margin + int(round(row * patch_px))
-        x1 = int(round((col + 1) * patch_px))
-        y1 = top_margin + int(round((row + 1) * patch_px))
+        if overlay_mode == "aspectfit":
+            patch_px = output_size / grid_side
+            x0 = int(round(col * patch_px))
+            y0 = top_margin + int(round(row * patch_px))
+            x1 = int(round((col + 1) * patch_px))
+            y1 = top_margin + int(round((row + 1) * patch_px))
+        elif overlay_mode == "processor_exact":
+            patch_px = output_size / grid_side
+            x0 = int(round(col * patch_px))
+            y0 = top_margin + int(round(row * patch_px))
+            x1 = int(round((col + 1) * patch_px))
+            y1 = top_margin + int(round((row + 1) * patch_px))
+        else:
+            x0 = int(round(col * resized_width / grid_side))
+            y0 = top_margin + int(round(row * resized_height / grid_side))
+            x1 = int(round((col + 1) * resized_width / grid_side))
+            y1 = top_margin + int(round((row + 1) * resized_height / grid_side))
         draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
         draw.rectangle([x0, y0, x0 + 20, y0 + 14], fill="red")
         draw.text((x0 + 3, y0 + 2), str(overlay_id), fill="white", font=font)
 
-    legend_x = output_size + 12
+    legend_x = display_image.width + 12
     legend_y = top_margin
     draw.text((legend_x, 10), "Contributing patches", fill="black", font=font)
 
@@ -770,6 +818,7 @@ def main() -> None:
                 contributing_cells=contributing_cells,
                 query_token_labels=query_token_labels,
                 output_size=args.overlay_image_size,
+                overlay_mode=args.overlay_mode,
             )
             overlay_path = output_dir / f"{stem}_overlay.png"
             overlay.save(overlay_path)
