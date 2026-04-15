@@ -42,6 +42,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retrieval_adapter_model_name_or_path", default="colpali-v1.2")
     parser.add_argument("--n_retrieval_pages", type=int, default=10)
     parser.add_argument(
+        "--plot-rank-start",
+        type=int,
+        default=1,
+        help="1-based starting rank of retrieved pages to visualize",
+    )
+    parser.add_argument(
+        "--plot-rank-count",
+        type=int,
+        default=30,
+        help="How many retrieved-page rows to visualize in the heatmap",
+    )
+    parser.add_argument(
         "--cell-width",
         type=int,
         default=56,
@@ -206,13 +218,13 @@ def rgb_blend(low: tuple[int, int, int], high: tuple[int, int, int], t: float) -
 
 def build_heatmap_image(
     query_token_labels: list[str],
-    top_pages: list[tuple[str, float]],
+    plotted_pages: list[dict],
     query_token_page_details: list[dict[str, dict]],
     cell_width: int,
     cell_height: int,
 ) -> Image.Image:
     n_cols = len(query_token_labels)
-    n_rows = len(top_pages)
+    n_rows = len(plotted_pages)
 
     if n_cols == 0:
         raise ValueError("No query tokens available to plot.")
@@ -235,7 +247,8 @@ def build_heatmap_image(
 
     matrix = []
     max_value = 0.0
-    for page_uid, _page_score in top_pages:
+    for item in plotted_pages:
+        page_uid = item["page_uid"]
         row = []
         for details in query_token_page_details:
             value = details.get(page_uid, {}).get("score", 0.0)
@@ -246,11 +259,14 @@ def build_heatmap_image(
     title = "Per-query-token MaxSim contribution to retrieved page score"
     draw.text((12, 10), title, fill="black", font=font)
 
-    for row_idx, (page_uid, page_score) in enumerate(top_pages):
+    for row_idx, item in enumerate(plotted_pages):
+        page_uid = item["page_uid"]
+        page_score = item["final_page_score"]
+        rank = item["rank"]
         y0 = margin_top + row_idx * cell_height
         y1 = y0 + cell_height
 
-        label = f"{row_idx + 1:>2}. {page_uid} | sum={page_score:.3f}"
+        label = f"{rank:>4}. {page_uid} | sum={page_score:.3f}"
         draw.text((10, y0 + 8), label, fill="black", font=font)
 
         for col_idx, value in enumerate(matrix[row_idx]):
@@ -306,11 +322,16 @@ def build_json_payload(
     query: str,
     qid: str | None,
     query_token_labels: list[str],
-    top_pages: list[tuple[str, float]],
+    plotted_pages: list[dict],
     query_token_page_details: list[dict[str, dict]],
+    full_retrieved_page_count: int,
+    plot_rank_start: int,
+    plot_rank_count: int,
 ) -> dict:
     pages = []
-    for page_uid, page_score in top_pages:
+    for item in plotted_pages:
+        page_uid = item["page_uid"]
+        page_score = item["final_page_score"]
         token_contributions = []
         for q_idx, details in enumerate(query_token_page_details):
             page_details = details.get(page_uid)
@@ -330,6 +351,7 @@ def build_json_payload(
         doc_id, page_idx_text = page_uid.split("_page")
         pages.append(
             {
+                "rank": item["rank"],
                 "page_uid": page_uid,
                 "doc_id": doc_id,
                 "page_idx": int(page_idx_text),
@@ -341,8 +363,11 @@ def build_json_payload(
     return {
         "qid": qid,
         "query": query,
+        "full_retrieved_page_count": full_retrieved_page_count,
+        "plotted_rank_start": plot_rank_start,
+        "plotted_rank_count": plot_rank_count,
         "query_token_labels": query_token_labels,
-        "retrieved_pages": pages,
+        "plotted_pages": pages,
     }
 
 
@@ -388,9 +413,25 @@ def main() -> None:
     if len(query_token_labels) != len(contribution_output["query_emb"]):
         query_token_labels = [f"tok_{i}" for i in range(len(contribution_output["query_emb"]))]
 
+    plot_rank_start = max(1, args.plot_rank_start)
+    if args.plot_rank_count <= 0:
+        raise ValueError("--plot-rank-count must be positive")
+    plot_start_idx = plot_rank_start - 1
+    plot_end_idx = plot_start_idx + args.plot_rank_count
+    full_top_pages = contribution_output["top_pages"]
+    plotted_pages = [
+        {"rank": rank, "page_uid": page_uid, "final_page_score": page_score}
+        for rank, (page_uid, page_score) in enumerate(full_top_pages[plot_start_idx:plot_end_idx], start=plot_rank_start)
+    ]
+    if not plotted_pages:
+        raise ValueError(
+            f"No retrieved pages available for requested plot window "
+            f"start={plot_rank_start}, count={args.plot_rank_count}, total={len(full_top_pages)}"
+        )
+
     image = build_heatmap_image(
         query_token_labels=query_token_labels,
-        top_pages=contribution_output["top_pages"],
+        plotted_pages=plotted_pages,
         query_token_page_details=contribution_output["query_token_page_details"],
         cell_width=args.cell_width,
         cell_height=args.cell_height,
@@ -400,8 +441,11 @@ def main() -> None:
         query=query,
         qid=args.qid,
         query_token_labels=query_token_labels,
-        top_pages=contribution_output["top_pages"],
+        plotted_pages=plotted_pages,
         query_token_page_details=contribution_output["query_token_page_details"],
+        full_retrieved_page_count=len(full_top_pages),
+        plot_rank_start=plot_rank_start,
+        plot_rank_count=len(plotted_pages),
     )
 
     output_prefix = Path(args.output_prefix)
