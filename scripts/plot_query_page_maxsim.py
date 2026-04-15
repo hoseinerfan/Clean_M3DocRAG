@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import faiss
 import numpy as np
 import torch
+from accelerate import Accelerator
 from PIL import Image, ImageDraw, ImageFont
 
 from m3docrag.datasets.m3_docvqa import M3DocVQADataset
@@ -391,6 +392,8 @@ def main() -> None:
         backbone_name_or_path=retrieval_backbone_dir,
         adapter_name_or_path=retrieval_adapter_dir,
     )
+    accelerator = Accelerator()
+    retrieval_model.model = accelerator.prepare(retrieval_model.model)
 
     dataset_args = make_dataset_args(args)
     dataset = M3DocVQADataset(dataset_args)
