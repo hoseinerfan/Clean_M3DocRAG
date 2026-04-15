@@ -989,7 +989,7 @@ def main() -> None:
         "files": [],
     }
 
-    for item in selected_pages:
+    for selected_idx, item in enumerate(selected_pages, start=1):
         page_uid = item["page_uid"]
         page_score = item["final_page_score"]
         rank = item["rank"]
@@ -1010,7 +1010,8 @@ def main() -> None:
                 if page_details is not None:
                     contributing_cells[query_token_idx] = page_details
 
-        page_title = f"rank={rank} {page_uid}"
+        display_rank = f"rank={rank}" if rank is not None else f"explicit={selected_idx}"
+        page_title = f"{display_rank} {page_uid}"
         if args.contrib_only:
             image = build_sparse_contrib_image(
                 query_token_labels=query_token_labels,
@@ -1033,7 +1034,8 @@ def main() -> None:
                 page_token_tick_step=args.page_token_tick_step,
             )
 
-        stem = f"rank_{rank:04d}_{sanitize_filename(page_uid)}"
+        stem_prefix = f"rank_{rank:04d}" if rank is not None else f"explicit_{selected_idx:04d}"
+        stem = f"{stem_prefix}_{sanitize_filename(page_uid)}"
         png_path = output_dir / f"{stem}.png"
         json_path = output_dir / f"{stem}.json"
         image.save(png_path)
@@ -1082,6 +1084,7 @@ def main() -> None:
         summary["files"].append(
             {
                 "rank": rank,
+                "selected_index": selected_idx,
                 "page_uid": page_uid,
                 "png": str(png_path),
                 "json": str(json_path),
@@ -1111,7 +1114,12 @@ def main() -> None:
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(f"Saved summary to {summary_path}")
     for file_info in summary["files"]:
-        print(f"Saved rank {file_info['rank']} heatmap to {file_info['png']}")
+        label = (
+            f"rank {file_info['rank']}"
+            if file_info["rank"] is not None
+            else f"explicit page {file_info['selected_index']}"
+        )
+        print(f"Saved {label} heatmap to {file_info['png']}")
 
 
 if __name__ == "__main__":
