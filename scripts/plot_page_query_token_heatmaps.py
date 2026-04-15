@@ -63,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         help="How many retrieved pages to render",
     )
     parser.add_argument(
+        "--page-uid",
+        action="append",
+        default=[],
+        help="Explicit page_uid to render, e.g. <doc_id>_page<idx>. Can be passed multiple times.",
+    )
+    parser.add_argument(
         "--cell-width",
         type=int,
         default=28,
@@ -252,7 +258,9 @@ def compute_page_contributions(
     sorted_pages = sorted(final_page2scores.items(), key=lambda x: x[1], reverse=True)
     return {
         "query_emb": query_emb,
+        "sorted_pages": sorted_pages,
         "top_pages": sorted_pages[:n_retrieval_pages],
+        "final_page2scores": final_page2scores,
         "query_token_page_details": query_token_page_details,
     }
 
@@ -695,6 +703,60 @@ def page_uid_to_doc_page(page_uid: str) -> tuple[str, int]:
     return doc_id, int(page_idx_text)
 
 
+def build_selected_pages(
+    args: argparse.Namespace,
+    contribution_output: dict,
+    docid2embs: dict[str, torch.Tensor],
+) -> list[dict]:
+    sorted_pages = contribution_output["sorted_pages"]
+    rank_map = {page_uid: rank for rank, (page_uid, _score) in enumerate(sorted_pages, start=1)}
+    score_map = contribution_output["final_page2scores"]
+
+    if args.page_uid:
+        selected_pages = []
+        for page_uid in args.page_uid:
+            doc_id, page_idx = page_uid_to_doc_page(page_uid)
+            if doc_id not in docid2embs:
+                raise KeyError(f"Explicit page doc_id not found in embeddings: {doc_id}")
+            if not (0 <= page_idx < len(docid2embs[doc_id])):
+                raise IndexError(
+                    f"Explicit page index out of range for {doc_id}: {page_idx} not in [0, {len(docid2embs[doc_id]) - 1}]"
+                )
+            selected_pages.append(
+                {
+                    "rank": rank_map.get(page_uid),
+                    "page_uid": page_uid,
+                    "final_page_score": float(score_map.get(page_uid, 0.0)),
+                    "selected_via": "explicit_page_uid",
+                }
+            )
+        return selected_pages
+
+    plot_rank_start = max(1, args.plot_rank_start)
+    if args.plot_rank_count <= 0:
+        raise ValueError("--plot-rank-count must be positive")
+    plot_start_idx = plot_rank_start - 1
+    plot_end_idx = plot_start_idx + args.plot_rank_count
+    selected_pages = [
+        {
+            "rank": rank,
+            "page_uid": page_uid,
+            "final_page_score": page_score,
+            "selected_via": "retrieved_rank_window",
+        }
+        for rank, (page_uid, page_score) in enumerate(
+            sorted_pages[plot_start_idx:plot_end_idx],
+            start=plot_rank_start,
+        )
+    ]
+    if not selected_pages:
+        raise ValueError(
+            f"No retrieved pages available for requested plot window start={plot_rank_start}, "
+            f"count={args.plot_rank_count}, total={len(sorted_pages)}"
+        )
+    return selected_pages
+
+
 def build_patch_crop_records(
     page_image: Image.Image,
     page_token_count: int,
@@ -847,20 +909,11 @@ def main() -> None:
     )
 
     plot_rank_start = max(1, args.plot_rank_start)
-    if args.plot_rank_count <= 0:
-        raise ValueError("--plot-rank-count must be positive")
-    full_top_pages = contribution_output["top_pages"]
-    plot_start_idx = plot_rank_start - 1
-    plot_end_idx = plot_start_idx + args.plot_rank_count
-    selected_pages = [
-        {"rank": rank, "page_uid": page_uid, "final_page_score": page_score}
-        for rank, (page_uid, page_score) in enumerate(full_top_pages[plot_start_idx:plot_end_idx], start=plot_rank_start)
-    ]
-    if not selected_pages:
-        raise ValueError(
-            f"No retrieved pages available for requested plot window start={plot_rank_start}, "
-            f"count={args.plot_rank_count}, total={len(full_top_pages)}"
-        )
+    selected_pages = build_selected_pages(
+        args=args,
+        contribution_output=contribution_output,
+        docid2embs=docid2embs,
+    )
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -871,8 +924,9 @@ def main() -> None:
         "n_retrieval_pages": args.n_retrieval_pages,
         "query_token_filter": args.query_token_filter,
         "nonspatial_token_position": args.nonspatial_token_position,
-        "plot_rank_start": plot_rank_start,
+        "plot_rank_start": plot_rank_start if not args.page_uid else None,
         "plot_rank_count": len(selected_pages),
+        "explicit_page_uids": args.page_uid,
         "retrieved_pages": selected_pages,
         "files": [],
     }
