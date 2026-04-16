@@ -135,7 +135,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overlay-image-size",
         type=int,
-        default=896,
+        default=1280,
         help="Square output size for the overlaid page image",
     )
     parser.add_argument(
@@ -347,7 +347,7 @@ def build_page_heatmap_image(
 
     img = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(img)
-    font = ImageFont.load_default()
+    font = load_font(14)
 
     max_abs = float(np.max(np.abs(score_matrix))) if score_matrix.size else 0.0
 
@@ -420,7 +420,7 @@ def build_sparse_contrib_image(
     cell_height: int,
     swap_axes: bool,
 ) -> Image.Image:
-    font = ImageFont.load_default()
+    font = load_font(16)
 
     contrib_items = [
         {
@@ -449,7 +449,7 @@ def build_sparse_contrib_image(
         right_margin = 20
         bottom_margin = 70
         width = left_margin + n_cols * cell_width + right_margin
-        height = top_margin + n_rows * max(cell_height, 24) + bottom_margin
+        height = top_margin + n_rows * max(cell_height, 32) + bottom_margin
 
         img = Image.new("RGB", (width, height), "white")
         draw = ImageDraw.Draw(img)
@@ -462,8 +462,8 @@ def build_sparse_contrib_image(
         draw.text((10, 24), subtitle, fill="black", font=font)
 
         for row_idx, label in enumerate(row_labels):
-            y0 = top_margin + row_idx * max(cell_height, 24)
-            y1 = y0 + max(cell_height, 24)
+            y0 = top_margin + row_idx * max(cell_height, 32)
+            y1 = y0 + max(cell_height, 32)
             draw.text((8, y0 + 6), label, fill="black", font=font)
             for col_idx in range(n_cols):
                 x0 = left_margin + col_idx * cell_width
@@ -473,13 +473,13 @@ def build_sparse_contrib_image(
             item = contrib_items[row_idx]
             col_idx = page_token_to_col[item["page_token_idx"]]
             x0 = left_margin + col_idx * cell_width
-            y0 = top_margin + row_idx * max(cell_height, 24)
+            y0 = top_margin + row_idx * max(cell_height, 32)
             x1 = x0 + cell_width
-            y1 = y0 + max(cell_height, 24)
+            y1 = y0 + max(cell_height, 32)
             draw.rectangle([x0, y0, x1, y1], outline="black", width=2, fill="white")
             draw.text((x0 + 4, y0 + 6), f"{item['score']:.2f}", fill="black", font=font)
 
-        col_label_y = top_margin + n_rows * max(cell_height, 24) + 6
+        col_label_y = top_margin + n_rows * max(cell_height, 32) + 6
         for col_idx, label in enumerate(col_labels):
             bbox = draw.textbbox((0, 0), label, font=font)
             text_width = bbox[2] - bbox[0]
@@ -663,10 +663,10 @@ def build_overlay_image(
     else:
         raise ValueError(f"Unsupported overlay_mode={overlay_mode!r}")
 
-    title_font = load_font(24)
-    meta_font = load_font(18)
-    overlay_label_font = load_font(14)
-    panel_width = 460
+    title_font = load_font(30)
+    meta_font = load_font(22)
+    overlay_label_font = load_font(18)
+    panel_width = 560
     panel_padding = 14
 
     def wrap_text_to_panel(text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
@@ -1108,8 +1108,8 @@ def main() -> None:
                 page_uid=page_title,
                 page_score=page_score,
                 contributing_cells=contributing_cells,
-                cell_width=max(args.cell_width, 70),
-                cell_height=max(args.cell_height, 24),
+                cell_width=max(args.cell_width, 96),
+                cell_height=max(args.cell_height, 32),
                 swap_axes=args.swap_axes,
             )
         else:
