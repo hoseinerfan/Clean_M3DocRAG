@@ -155,6 +155,11 @@ def parse_args() -> argparse.Namespace:
 
 
 def classify_patch_from_splice_row(row: dict) -> str:
+    patch_class = str(row.get("patch_class", "")).strip().lower()
+    if patch_class in {"visual", "non_visual", "unknown"}:
+        return patch_class
+    if patch_class == "neutral":
+        return "unknown"
     concepts = row.get("top_concepts", []) or []
     concept_names = {str(item.get("concept", "")).strip() for item in concepts}
     if "visual_region" in concept_names:
@@ -242,15 +247,30 @@ def load_splice_query_axis_classes(
         return classes
 
     explicit_classes = record.get("query_token_classes")
-    if isinstance(explicit_classes, list) and len(explicit_classes) == len(query_token_labels):
-        normalized = []
-        for value in explicit_classes:
-            text = str(value).strip().lower()
-            if text in {"visual", "non_visual", "unknown"}:
-                normalized.append(text)
-            else:
-                normalized.append("unknown")
-        return normalized
+    if isinstance(explicit_classes, list) and explicit_classes:
+        if all(isinstance(value, dict) for value in explicit_classes):
+            for value in explicit_classes:
+                idx = int(value.get("index", -1))
+                if not (0 <= idx < len(classes)):
+                    continue
+                text = str(value.get("class", "")).strip().lower()
+                if text == "neutral":
+                    text = "unknown"
+                if text in {"visual", "non_visual", "unknown"}:
+                    classes[idx] = text
+            if any(x != "unknown" for x in classes):
+                return classes
+        elif len(explicit_classes) == len(query_token_labels):
+            normalized = []
+            for value in explicit_classes:
+                text = str(value).strip().lower()
+                if text == "neutral":
+                    text = "unknown"
+                if text in {"visual", "non_visual", "unknown"}:
+                    normalized.append(text)
+                else:
+                    normalized.append("unknown")
+            return normalized
 
     visual_token_indices = {int(x) for x in record.get("visual_token_indices", [])}
     non_visual_token_indices = {int(x) for x in record.get("non_visual_token_indices", [])}
