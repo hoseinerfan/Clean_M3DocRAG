@@ -134,7 +134,168 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Directory where per-page SVGs and JSON will be written.",
     )
+    parser.add_argument(
+        "--splice-patch-labels-jsonl",
+        default="",
+        help=(
+            "Optional SpLiCE patch-label JSONL from build_layout_patch_labels.py. "
+            "Used to classify x-axis patches as visual / non-visual / unknown."
+        ),
+    )
+    parser.add_argument(
+        "--splice-query-token-labels",
+        default="",
+        help=(
+            "Optional JSON or JSONL carrying query-token visual/non-visual labels keyed by qid/query_id. "
+            "Supported fields: query_token_classes, visual_token_indices, non_visual_token_indices, "
+            "visual_tokens, non_visual_tokens."
+        ),
+    )
     return parser.parse_args()
+
+
+def classify_patch_from_splice_row(row: dict) -> str:
+    concepts = row.get("top_concepts", []) or []
+    concept_names = {str(item.get("concept", "")).strip() for item in concepts}
+    if "visual_region" in concept_names:
+        return "visual"
+    if {"ocr_text", "table_text", "table_structure"} & concept_names:
+        return "non_visual"
+    return "unknown"
+
+
+def load_splice_patch_axis_classes(
+    labels_jsonl: str,
+    page_uid: str,
+    n_spatial_patches: int,
+) -> list[str]:
+    classes = ["unknown"] * n_spatial_patches
+    if not labels_jsonl:
+        return classes
+
+    labels_path = Path(labels_jsonl)
+    if not labels_path.exists():
+        raise FileNotFoundError(labels_path)
+
+    doc_id, page_idx = page_uid_to_doc_page(page_uid)
+    splice_page_id = f"{doc_id}:{page_idx}"
+
+    with labels_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if str(row.get("page_id", "")).strip() != splice_page_id:
+                continue
+            patch_index = int(row.get("patch_index", -1))
+            if 0 <= patch_index < n_spatial_patches:
+                classes[patch_index] = classify_patch_from_splice_row(row)
+    return classes
+
+
+def _query_label_record_from_path(path: Path, qid: str | None) -> dict | None:
+    if path.suffix.lower() == ".jsonl":
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                row_qid = str(row.get("qid", row.get("query_id", ""))).strip()
+                if qid is not None and row_qid == qid:
+                    return row
+        return None
+
+    payload = json.load(path.open("r", encoding="utf-8"))
+    if isinstance(payload, dict):
+        if qid is not None and qid in payload and isinstance(payload[qid], dict):
+            return payload[qid]
+        row_qid = str(payload.get("qid", payload.get("query_id", ""))).strip()
+        if qid is not None and row_qid == qid:
+            return payload
+    if isinstance(payload, list):
+        for row in payload:
+            if not isinstance(row, dict):
+                continue
+            row_qid = str(row.get("qid", row.get("query_id", ""))).strip()
+            if qid is not None and row_qid == qid:
+                return row
+    return None
+
+
+def load_splice_query_axis_classes(
+    query_labels_path: str,
+    qid: str | None,
+    query_token_labels: list[str],
+) -> list[str]:
+    classes = ["unknown"] * len(query_token_labels)
+    if not query_labels_path:
+        return classes
+
+    path = Path(query_labels_path)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    record = _query_label_record_from_path(path, qid)
+    if record is None:
+        return classes
+
+    explicit_classes = record.get("query_token_classes")
+    if isinstance(explicit_classes, list) and len(explicit_classes) == len(query_token_labels):
+        normalized = []
+        for value in explicit_classes:
+            text = str(value).strip().lower()
+            if text in {"visual", "non_visual", "unknown"}:
+                normalized.append(text)
+            else:
+                normalized.append("unknown")
+        return normalized
+
+    visual_token_indices = {int(x) for x in record.get("visual_token_indices", [])}
+    non_visual_token_indices = {int(x) for x in record.get("non_visual_token_indices", [])}
+
+    for idx in visual_token_indices:
+        if 0 <= idx < len(classes):
+            classes[idx] = "visual"
+    for idx in non_visual_token_indices:
+        if 0 <= idx < len(classes) and classes[idx] == "unknown":
+            classes[idx] = "non_visual"
+
+    visual_tokens = {str(x).strip().lower() for x in record.get("visual_tokens", [])}
+    non_visual_tokens = {str(x).strip().lower() for x in record.get("non_visual_tokens", [])}
+    if visual_tokens or non_visual_tokens:
+        for idx, token in enumerate(query_token_labels):
+            token_key = token.strip().lower()
+            if token_key in visual_tokens:
+                classes[idx] = "visual"
+            elif token_key in non_visual_tokens and classes[idx] == "unknown":
+                classes[idx] = "non_visual"
+
+    return classes
+
+
+def axis_class_counts(axis_classes: list[str]) -> dict[str, int]:
+    counts = {"visual": 0, "non_visual": 0, "unknown": 0}
+    for value in axis_classes:
+        counts[value if value in counts else "unknown"] += 1
+    return counts
+
+
+def axis_class_fill(axis_class: str) -> str:
+    if axis_class == "visual":
+        return "rgb(248,204,204)"
+    if axis_class == "non_visual":
+        return "rgb(217,234,248)"
+    return "rgb(245,245,245)"
+
+
+def axis_class_text_fill(axis_class: str) -> str:
+    if axis_class == "visual":
+        return "rgb(160,0,0)"
+    if axis_class == "non_visual":
+        return "rgb(35,75,120)"
+    return "black"
 
 
 def build_dot_matrix_svg(
@@ -150,6 +311,8 @@ def build_dot_matrix_svg(
     cell_height: int,
     patch_tick_step: int,
     dot_radius: int,
+    query_axis_classes: list[str] | None = None,
+    patch_axis_classes: list[str] | None = None,
 ) -> tuple[str, list[dict], list[dict], int, int]:
     extra_tokens, grid_side, _spatial_patch_records, non_spatial_items = collect_spatial_patch_records(
         page_token_count=page_token_count,
@@ -195,8 +358,17 @@ def build_dot_matrix_svg(
             for line in lines
         )
 
-    top_margin = 18 + total_line_height(title_lines, title_font) + total_line_height(subtitle_lines, label_font) + 8
-    bottom_margin = 90
+    legend_lines = [
+        "axis classes: visual=rose | non_visual=blue | unknown=gray"
+    ] if (query_axis_classes or patch_axis_classes) else []
+    top_margin = (
+        18
+        + total_line_height(title_lines, title_font)
+        + total_line_height(subtitle_lines, label_font)
+        + total_line_height(legend_lines, tick_font)
+        + 8
+    )
+    bottom_margin = 110
     height = top_margin + n_rows * cell_height + bottom_margin
 
     def line_height(font) -> int:
@@ -229,18 +401,35 @@ def build_dot_matrix_svg(
     svg_parts.extend(text_block_lines(10, text_y, title_lines, 18, title_line_height))
     text_y += len(title_lines) * title_line_height
     svg_parts.extend(text_block_lines(10, text_y, subtitle_lines, 16, label_line_height))
+    text_y += len(subtitle_lines) * label_line_height
+    if legend_lines:
+        svg_parts.extend(text_block_lines(10, text_y, legend_lines, 14, tick_line_height))
 
     grid_x0 = left_margin
     grid_y0 = top_margin
     grid_width = n_cols * cell_width
     grid_height = n_rows * cell_height
 
+    if patch_axis_classes:
+        for patch_idx, patch_class in enumerate(patch_axis_classes):
+            x0 = grid_x0 + patch_idx * cell_width
+            svg_parts.append(
+                f'<rect x="{x0}" y="{grid_y0}" width="{cell_width}" height="{grid_height}" '
+                f'fill="{axis_class_fill(patch_class)}" fill-opacity="0.35" stroke="none"/>'
+            )
+
     for row_idx, row_label in enumerate(row_labels):
         y0 = grid_y0 + row_idx * cell_height
         y_center = y0 + cell_height / 2 + 6
+        row_class = query_axis_classes[row_idx] if query_axis_classes else "unknown"
+        if query_axis_classes:
+            svg_parts.append(
+                f'<rect x="{grid_x0}" y="{y0}" width="{grid_width}" height="{cell_height}" '
+                f'fill="{axis_class_fill(row_class)}" fill-opacity="0.22" stroke="none"/>'
+            )
         svg_parts.append(
             f'<text x="8" y="{y_center:.1f}" font-size="16" '
-            f'font-family="DejaVu Sans, Arial, sans-serif" fill="black">{escape(row_label)}</text>'
+            f'font-family="DejaVu Sans, Arial, sans-serif" fill="{axis_class_text_fill(row_class)}">{escape(row_label)}</text>'
         )
 
     for col_boundary in range(n_cols + 1):
@@ -267,8 +456,8 @@ def build_dot_matrix_svg(
         patch_idx = page_token_idx - extra_tokens if nonspatial_token_position == "prefix" else page_token_idx
         if not (0 <= patch_idx < n_cols):
             continue
-        x0 = left_margin + patch_idx * cell_width
-        y0 = top_margin + query_token_idx * cell_height
+        x0 = grid_x0 + patch_idx * cell_width
+        y0 = grid_y0 + query_token_idx * cell_height
         cx = x0 + cell_width / 2
         cy = y0 + cell_height * 0.62
         score_text = f'{float(details["score"]):.2f}'
@@ -301,19 +490,20 @@ def build_dot_matrix_svg(
         tick_positions.append(n_cols - 1)
     for patch_idx in tick_positions:
         label = str(patch_idx)
-        x0 = left_margin + patch_idx * cell_width
+        x0 = grid_x0 + patch_idx * cell_width
         bbox = probe_draw.textbbox((0, 0), label, font=tick_font)
         text_width = bbox[2] - bbox[0]
         label_x = x0 + (cell_width - text_width) / 2
+        patch_class = patch_axis_classes[patch_idx] if patch_axis_classes and patch_idx < len(patch_axis_classes) else "unknown"
         svg_parts.append(
             f'<text x="{label_x}" y="{tick_y + 14}" font-size="14" '
-            f'font-family="DejaVu Sans, Arial, sans-serif" fill="black">{escape(label)}</text>'
+            f'font-family="DejaVu Sans, Arial, sans-serif" fill="{axis_class_text_fill(patch_class)}">{escape(label)}</text>'
         )
 
     axis_label = "x-axis: all spatial page patches (row-major patch index)"
     axis_bbox = probe_draw.textbbox((0, 0), axis_label, font=tick_font)
     axis_width = axis_bbox[2] - axis_bbox[0]
-    axis_x = left_margin + max(0, (n_cols * cell_width - axis_width) // 2)
+    axis_x = grid_x0 + max(0, (n_cols * cell_width - axis_width) // 2)
     svg_parts.append(
         f'<text x="{axis_x}" y="{tick_y + 32}" font-size="14" '
         f'font-family="DejaVu Sans, Arial, sans-serif" fill="black">{escape(axis_label)}</text>'
@@ -347,6 +537,8 @@ def make_page_payload(
     extra_tokens: int,
     dots: list[dict],
     non_spatial_items: list[dict],
+    query_axis_classes: list[str],
+    patch_axis_classes: list[str],
 ) -> dict:
     doc_id, page_idx = page_uid_to_doc_page(page_uid)
     return {
@@ -368,6 +560,10 @@ def make_page_payload(
         "n_spatial_patches": grid_side * grid_side,
         "n_dots": len(dots),
         "n_non_spatial_contributors": len(non_spatial_items),
+        "query_axis_classes": query_axis_classes,
+        "query_axis_class_counts": axis_class_counts(query_axis_classes),
+        "patch_axis_classes": patch_axis_classes,
+        "patch_axis_class_counts": axis_class_counts(patch_axis_classes),
         "dots": dots,
         "non_spatial_contributors": [
             {
@@ -492,6 +688,8 @@ def main() -> None:
         "explicit_page_mode": args.explicit_page_mode if args.page_uid else None,
         "query_token_filter": args.query_token_filter,
         "nonspatial_token_position": args.nonspatial_token_position,
+        "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
+        "splice_query_token_labels": args.splice_query_token_labels,
         "plot_rank_start": plot_rank_start if not args.page_uid else None,
         "plot_rank_count": len(selected_pages),
         "explicit_page_uids": args.page_uid,
@@ -530,6 +728,25 @@ def main() -> None:
                 if page_details is not None:
                     contributing_cells[query_token_idx] = page_details
 
+        query_axis_classes = load_splice_query_axis_classes(
+            query_labels_path=args.splice_query_token_labels,
+            qid=args.qid,
+            query_token_labels=query_token_labels,
+        )
+        _tmp_extra_tokens, tmp_grid_side, _tmp_patch_records, _tmp_non_spatial = collect_spatial_patch_records(
+            page_token_count=page_emb.shape[0],
+            contributing_cells={},
+            query_token_labels=query_token_labels,
+            nonspatial_token_position=args.nonspatial_token_position,
+        )
+        patch_axis_classes = load_splice_patch_axis_classes(
+            labels_jsonl=args.splice_patch_labels_jsonl,
+            page_uid=page_uid,
+            n_spatial_patches=tmp_grid_side * tmp_grid_side,
+        )
+        display_query_axis_classes = query_axis_classes if any(x != "unknown" for x in query_axis_classes) else None
+        display_patch_axis_classes = patch_axis_classes if any(x != "unknown" for x in patch_axis_classes) else None
+
         display_rank = f"rank={rank}" if rank is not None else f"explicit={selected_idx}"
         page_title = f"{display_rank} {page_uid}"
 
@@ -545,6 +762,8 @@ def main() -> None:
             cell_height=args.cell_height,
             patch_tick_step=args.patch_tick_step,
             dot_radius=args.dot_radius,
+            query_axis_classes=display_query_axis_classes,
+            patch_axis_classes=display_patch_axis_classes,
         )
 
         stem_prefix = f"rank_{rank:04d}" if rank is not None else f"explicit_{selected_idx:04d}"
@@ -572,6 +791,8 @@ def main() -> None:
             extra_tokens=extra_tokens,
             dots=dots,
             non_spatial_items=non_spatial_items,
+            query_axis_classes=query_axis_classes,
+            patch_axis_classes=patch_axis_classes,
         )
         json_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
