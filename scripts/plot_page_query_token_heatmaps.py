@@ -440,14 +440,17 @@ def build_sparse_contrib_image(
         left_margin = 200
         top_margin = 40
         right_margin = 20
-        bottom_margin = 24
+        bottom_margin = 44
         width = left_margin + n_cols * cell_width + right_margin
         height = top_margin + n_rows * max(cell_height, 24) + bottom_margin
 
         img = Image.new("RGB", (width, height), "white")
         draw = ImageDraw.Draw(img)
         title = f"{page_uid} | final_page_score={page_score:.4f}"
-        subtitle = "Only contributing pairs. x=page token idx, y=query token. Cell text = exact dot product."
+        subtitle = (
+            "Only contributing pairs. Columns = unique contributing page tokens; "
+            "rows = query tokens. Overlay boxes group these by spatial patch."
+        )
         draw.text((10, 10), title, fill="black", font=font)
         draw.text((10, 24), subtitle, fill="black", font=font)
 
@@ -468,6 +471,13 @@ def build_sparse_contrib_image(
             y1 = y0 + max(cell_height, 24)
             draw.rectangle([x0, y0, x1, y1], outline="black", width=2, fill="white")
             draw.text((x0 + 4, y0 + 6), f"{item['score']:.2f}", fill="black", font=font)
+
+        axis_label = "x-axis: unique contributing page token indices"
+        axis_bbox = draw.textbbox((0, 0), axis_label, font=font)
+        axis_width = axis_bbox[2] - axis_bbox[0]
+        axis_x = left_margin + max(0, (n_cols * cell_width - axis_width) // 2)
+        axis_y = top_margin + n_rows * max(cell_height, 24) + 10
+        draw.text((axis_x, axis_y), axis_label, fill="black", font=font)
 
         return img
 
