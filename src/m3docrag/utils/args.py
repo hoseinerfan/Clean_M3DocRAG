@@ -41,13 +41,6 @@ class TrainingArguments(transformers.TrainingArguments):
     loop_unique_doc_ids: bool = field(default=False, metadata={"help": "if true, apply retrieval only on unique doc ids"})
 
     n_retrieval_pages: int = 1
-    query_token_filter: str = field(
-        default="full",
-        metadata={
-            "help": "Optional query-token ablation for retrieval.",
-            "choices": ["full", "drop_pad_like", "semantic_only"],
-        },
-    )
 
 
     # Embedding indexing settings

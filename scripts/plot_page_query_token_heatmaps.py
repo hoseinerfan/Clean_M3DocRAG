@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--n_retrieval_pages", type=int, default=4)
     parser.add_argument(
         "--query_token_filter",
-        default="semantic_only",
+        default="full",
         choices=QUERY_TOKEN_FILTER_CHOICES,
         help="Match the real retrieval ablation mode when recomputing token-level scores.",
     )

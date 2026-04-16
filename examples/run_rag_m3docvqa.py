@@ -85,7 +85,6 @@ def run_model(
         token2pageuid=token2pageuid,
         all_token_embeddings=all_token_embeddings,
         n_return_pages=n_return_pages,
-        query_token_filter=args.query_token_filter,
         show_progress=True,
     )
     logger.info(top_n_page_retrieval_results)
@@ -391,26 +390,21 @@ def main():
     save_dir = Path(args.output_dir)
     save_dir.mkdir(exist_ok=True, parents=True)
     logger.info("Results will be saved at:", save_dir)
-    logger.info(f"query_token_filter={args.query_token_filter}")
 
     if args.retrieval_model_type == "colpali":
         ret_name = args.retrieval_adapter_model_name_or_path
     else:
         ret_name = args.retrieval_model_name_or_path
 
-    query_token_filter_suffix = ""
-    if args.query_token_filter != "full":
-        query_token_filter_suffix = f"_qtf-{args.query_token_filter}"
-
     if args.retrieval_only:
         pred_save_fname = (
             f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}"
-            f"{query_token_filter_suffix}_{experiment_date}.json"
+            f"_{experiment_date}.json"
         )
     else:
         pred_save_fname = (
             f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}"
-            f"{query_token_filter_suffix}_{args.model_name_or_path}_{experiment_date}.json"
+            f"_{args.model_name_or_path}_{experiment_date}.json"
         )
     results_file = save_dir / pred_save_fname
     with open(results_file, "w") as f:
@@ -426,12 +420,12 @@ def main():
     if args.retrieval_only:
         eval_save_fname = (
             f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}"
-            f"{query_token_filter_suffix}_{experiment_date}_eval_results.json"
+            f"_{experiment_date}_eval_results.json"
         )
     else:
         eval_save_fname = (
             f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}"
-            f"{query_token_filter_suffix}_{args.model_name_or_path}_{experiment_date}_eval_results.json"
+            f"_{args.model_name_or_path}_{experiment_date}_eval_results.json"
         )
     results_file = save_dir / eval_save_fname
     with open(results_file, "w") as f:

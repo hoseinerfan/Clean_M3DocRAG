@@ -59,7 +59,6 @@ class RAGModelBase:
         all_token_embeddings = None,
 
         n_return_pages: int = 1,
-        query_token_filter: str = "full",
         single_page_from_each_doc: bool = False,
         show_progress=False,
     ) -> List[Tuple]:
@@ -88,7 +87,6 @@ class RAGModelBase:
             query_meta = self.retrieval_model.encode_query_with_metadata(
                 query=query,
                 to_cpu=True,
-                query_token_filter=query_token_filter,
             )
             query_emb = query_meta["embeddings"].float().numpy().astype(np.float32)
 
@@ -150,7 +148,6 @@ class RAGModelBase:
         query_meta = self.retrieval_model.encode_query_with_metadata(
             query=query,
             to_cpu=True,
-            query_token_filter=query_token_filter,
         )
         filtered_query_emb = query_meta["embeddings"]
 

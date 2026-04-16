@@ -26,7 +26,6 @@ NUM_PROCESSES="${NUM_PROCESSES:-1}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 DATA_LEN="${DATA_LEN:-}"
 OUTPUT_TAG="${OUTPUT_TAG:-}"
-QUERY_TOKEN_FILTER="${QUERY_TOKEN_FILTER:-full}"
 
 RETRIEVAL_MODEL_NAME="${RETRIEVAL_MODEL_NAME:-colpaligemma-3b-pt-448-base}"
 RETRIEVAL_ADAPTER_MODEL_NAME="${RETRIEVAL_ADAPTER_MODEL_NAME:-colpali-v1.2}"
@@ -67,7 +66,6 @@ echo "SPLIT=$SPLIT"
 echo "EMBEDDING_NAME=$EMBEDDING_NAME"
 echo "INDEX_NAME=$INDEX_NAME"
 echo "RETRIEVAL_ONLY=$RETRIEVAL_ONLY"
-echo "QUERY_TOKEN_FILTER=$QUERY_TOKEN_FILTER"
 echo "RAG_OUTPUT_DIR=$RAG_OUTPUT_DIR"
 
 python --version
@@ -119,7 +117,6 @@ run_rag() {
     --retrieval_model_name_or_path="$RETRIEVAL_MODEL_NAME"
     --retrieval_adapter_model_name_or_path="$RETRIEVAL_ADAPTER_MODEL_NAME"
     --output_dir="$RAG_OUTPUT_DIR"
-    --query_token_filter="$QUERY_TOKEN_FILTER"
   )
 
   if [[ -n "$DATA_LEN" ]]; then
