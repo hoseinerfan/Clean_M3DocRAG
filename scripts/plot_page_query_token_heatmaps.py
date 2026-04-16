@@ -641,6 +641,7 @@ def build_overlay_image(
 
     title_font = load_font(24)
     meta_font = load_font(18)
+    overlay_label_font = load_font(14)
     panel_width = 460
     panel_padding = 14
 
@@ -740,32 +741,16 @@ def build_overlay_image(
         draw.rectangle([x0, y0, x1, y1], outline="red", width=3)
         if not overlay_clean:
             label = str(overlay_id)
-            bbox = draw.textbbox((0, 0), label, font=meta_font)
+            bbox = draw.textbbox((0, 0), label, font=overlay_label_font)
             text_width = bbox[2] - bbox[0]
             text_height = bbox[3] - bbox[1]
-            label_padding_x = 6
-            label_padding_y = 3
-            label_width = text_width + 2 * label_padding_x
-            label_height = text_height + 2 * label_padding_y
-
-            label_x0 = x1 + 4
-            label_y0 = y0
-            if label_x0 + label_width > display_image.width:
-                label_x0 = max(0, x0 - label_width - 4)
-            if label_y0 + label_height > display_image.height:
-                label_y0 = max(0, display_image.height - label_height)
-
-            draw.rectangle(
-                [label_x0, label_y0, label_x0 + label_width, label_y0 + label_height],
-                fill="white",
-                outline="red",
-                width=2,
-            )
+            label_x0 = x0 + max(0, (x1 - x0 - text_width) // 2)
+            label_y0 = max(0, y0 - text_height - 2)
             draw.text(
-                (label_x0 + label_padding_x, label_y0 + label_padding_y - 1),
+                (label_x0, label_y0),
                 label,
                 fill="red",
-                font=meta_font,
+                font=overlay_label_font,
             )
 
     return canvas
