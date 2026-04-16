@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import sys
+from html import escape
 from pathlib import Path
 
 import numpy as np
@@ -279,6 +280,186 @@ def build_dot_matrix_image(
     return img, dots, non_spatial_items, extra_tokens, grid_side
 
 
+def build_dot_matrix_svg(
+    *,
+    query_token_labels: list[str],
+    page_uid: str,
+    page_score: float,
+    page_token_count: int,
+    contributing_cells: dict[int, dict],
+    query_token_filter: str,
+    nonspatial_token_position: str,
+    cell_width: int,
+    cell_height: int,
+    patch_tick_step: int,
+    dot_radius: int,
+) -> tuple[str, list[dict], list[dict], int, int]:
+    extra_tokens, grid_side, _spatial_patch_records, non_spatial_items = collect_spatial_patch_records(
+        page_token_count=page_token_count,
+        contributing_cells=contributing_cells,
+        query_token_labels=query_token_labels,
+        nonspatial_token_position=nonspatial_token_position,
+    )
+
+    n_cols = grid_side * grid_side
+    n_rows = len(query_token_labels)
+    if n_rows == 0:
+        raise ValueError("No query tokens available to plot.")
+
+    title_font = load_font(18)
+    label_font = load_font(16)
+    tick_font = load_font(14)
+
+    probe = Image.new("RGB", (1, 1), "white")
+    probe_draw = ImageDraw.Draw(probe)
+
+    row_labels = [f'{idx}: {token[:28]}' for idx, token in enumerate(query_token_labels)]
+    max_row_label_width = 0
+    for label in row_labels:
+        bbox = probe_draw.textbbox((0, 0), label, font=label_font)
+        max_row_label_width = max(max_row_label_width, bbox[2] - bbox[0])
+
+    left_margin = max(120, max_row_label_width + 20)
+    right_margin = 20
+    width = left_margin + n_cols * cell_width + right_margin
+
+    title = f"{page_uid} | final_page_score={page_score:.4f}"
+    subtitle = (
+        f"Rows=query tokens | cols=all spatial page patches ({grid_side}x{grid_side} row-major) | "
+        f"extra_tokens={extra_tokens} | query_token_filter={query_token_filter} | token_layout={nonspatial_token_position}"
+    )
+    title_lines = wrap_text_lines(probe_draw, title, font=title_font, max_width=width - 20)
+    subtitle_lines = wrap_text_lines(probe_draw, subtitle, font=label_font, max_width=width - 20)
+
+    def total_line_height(lines: list[str], font) -> int:
+        return sum(
+            (probe_draw.textbbox((0, 0), line, font=font)[3] - probe_draw.textbbox((0, 0), line, font=font)[1]) + 4
+            for line in lines
+        )
+
+    top_margin = 18 + total_line_height(title_lines, title_font) + total_line_height(subtitle_lines, label_font) + 8
+    bottom_margin = 90
+    height = top_margin + n_rows * cell_height + bottom_margin
+
+    def line_height(font) -> int:
+        bbox = probe_draw.textbbox((0, 0), "Ag", font=font)
+        return (bbox[3] - bbox[1]) + 4
+
+    title_line_height = line_height(title_font)
+    label_line_height = line_height(label_font)
+    tick_line_height = line_height(tick_font)
+
+    def text_block_lines(start_x: int, start_y: int, lines: list[str], font_size: int, line_height_px: int) -> list[str]:
+        blocks = []
+        y = start_y
+        for line in lines:
+            blocks.append(
+                f'<text x="{start_x}" y="{y + font_size}" font-size="{font_size}" '
+                f'font-family="DejaVu Sans, Arial, sans-serif" fill="black">{escape(line)}</text>'
+            )
+            y += line_height_px
+        return blocks
+
+    svg_parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+        f'viewBox="0 0 {width} {height}">',
+        '<rect width="100%" height="100%" fill="white"/>',
+    ]
+
+    text_y = 10
+    svg_parts.extend(text_block_lines(10, text_y, title_lines, 18, title_line_height))
+    text_y += len(title_lines) * title_line_height
+    svg_parts.extend(text_block_lines(10, text_y, subtitle_lines, 16, label_line_height))
+
+    grid_x0 = left_margin
+    grid_y0 = top_margin
+    grid_width = n_cols * cell_width
+    grid_height = n_rows * cell_height
+
+    for row_idx, row_label in enumerate(row_labels):
+        y0 = grid_y0 + row_idx * cell_height
+        y_center = y0 + cell_height / 2 + 6
+        svg_parts.append(
+            f'<text x="8" y="{y_center:.1f}" font-size="16" '
+            f'font-family="DejaVu Sans, Arial, sans-serif" fill="black">{escape(row_label)}</text>'
+        )
+
+    for col_boundary in range(n_cols + 1):
+        x = grid_x0 + col_boundary * cell_width
+        stroke = "rgb(220,220,220)"
+        stroke_width = 1
+        if col_boundary < n_cols and col_boundary % grid_side == 0:
+            stroke = "rgb(180,180,180)"
+            stroke_width = 2
+        svg_parts.append(
+            f'<line x1="{x}" y1="{grid_y0}" x2="{x}" y2="{grid_y0 + grid_height}" '
+            f'stroke="{stroke}" stroke-width="{stroke_width}"/>'
+        )
+    for row_boundary in range(n_rows + 1):
+        y = grid_y0 + row_boundary * cell_height
+        svg_parts.append(
+            f'<line x1="{grid_x0}" y1="{y}" x2="{grid_x0 + grid_width}" y2="{y}" '
+            'stroke="rgb(220,220,220)" stroke-width="1"/>'
+        )
+
+    dots = []
+    for query_token_idx, details in sorted(contributing_cells.items()):
+        page_token_idx = details["page_token_idx"]
+        patch_idx = page_token_idx - extra_tokens if nonspatial_token_position == "prefix" else page_token_idx
+        if not (0 <= patch_idx < n_cols):
+            continue
+        x0 = left_margin + patch_idx * cell_width
+        y0 = top_margin + query_token_idx * cell_height
+        cx = x0 + cell_width / 2
+        cy = y0 + cell_height / 2
+        svg_parts.append(
+            f'<circle cx="{cx:.2f}" cy="{cy:.2f}" r="{dot_radius}" fill="rgb(220,20,20)"/>'
+        )
+        dots.append(
+            {
+                "query_token_idx": query_token_idx,
+                "query_token": query_token_labels[query_token_idx],
+                "page_token_idx": page_token_idx,
+                "patch_idx": patch_idx,
+                "grid_row": patch_idx // grid_side,
+                "grid_col": patch_idx % grid_side,
+                "score": float(details["score"]),
+            }
+        )
+
+    tick_y = top_margin + n_rows * cell_height + 8
+    for patch_idx in range(0, n_cols, patch_tick_step):
+        label = str(patch_idx)
+        x0 = left_margin + patch_idx * cell_width
+        bbox = probe_draw.textbbox((0, 0), label, font=tick_font)
+        text_width = bbox[2] - bbox[0]
+        label_x = x0 + max(0, (cell_width - text_width) // 2)
+        svg_parts.append(
+            f'<text x="{label_x}" y="{tick_y + 14}" font-size="14" '
+            f'font-family="DejaVu Sans, Arial, sans-serif" fill="black">{escape(label)}</text>'
+        )
+
+    axis_label = "x-axis: all spatial page patches (row-major patch index)"
+    axis_bbox = probe_draw.textbbox((0, 0), axis_label, font=tick_font)
+    axis_width = axis_bbox[2] - axis_bbox[0]
+    axis_x = left_margin + max(0, (n_cols * cell_width - axis_width) // 2)
+    svg_parts.append(
+        f'<text x="{axis_x}" y="{tick_y + 32}" font-size="14" '
+        f'font-family="DejaVu Sans, Arial, sans-serif" fill="black">{escape(axis_label)}</text>'
+    )
+
+    if non_spatial_items:
+        non_spatial_text = "Non-spatial contributors not plotted: " + "; ".join(
+            f'q{item["query_token_idx"]} "{item["query_token"][:16]}" tok={item["page_token_idx"]} score={item["score"]:.4f}'
+            for item in sorted(non_spatial_items, key=lambda x: x["score"], reverse=True)
+        )
+        non_spatial_lines = wrap_text_lines(probe_draw, non_spatial_text, font=tick_font, max_width=width - 20)
+        svg_parts.extend(text_block_lines(10, tick_y + 38, non_spatial_lines, 14, tick_line_height))
+
+    svg_parts.append("</svg>")
+    return "\n".join(svg_parts), dots, non_spatial_items, extra_tokens, grid_side
+
+
 def make_page_payload(
     *,
     qid: str | None,
@@ -314,6 +495,8 @@ def make_page_payload(
         "grid_side": grid_side,
         "extra_tokens": extra_tokens,
         "n_spatial_patches": grid_side * grid_side,
+        "n_dots": len(dots),
+        "n_non_spatial_contributors": len(non_spatial_items),
         "dots": dots,
         "non_spatial_contributors": [
             {
@@ -492,12 +675,29 @@ def main() -> None:
             patch_tick_step=args.patch_tick_step,
             dot_radius=args.dot_radius,
         )
+        svg_text, _svg_dots, _svg_non_spatial_items, _svg_extra_tokens, _svg_grid_side = build_dot_matrix_svg(
+            query_token_labels=query_token_labels,
+            page_uid=page_title,
+            page_score=page_score,
+            page_token_count=page_emb.shape[0],
+            contributing_cells=contributing_cells,
+            query_token_filter=args.query_token_filter,
+            nonspatial_token_position=args.nonspatial_token_position,
+            cell_width=args.cell_width,
+            cell_height=args.cell_height,
+            patch_tick_step=args.patch_tick_step,
+            dot_radius=args.dot_radius,
+        )
+        if len(_svg_dots) != len(dots) or len(_svg_non_spatial_items) != len(non_spatial_items):
+            raise RuntimeError("PNG and SVG dot-grid builders diverged on contributor counts.")
 
         stem_prefix = f"rank_{rank:04d}" if rank is not None else f"explicit_{selected_idx:04d}"
         stem = f"{stem_prefix}_{page_uid}"
         png_path = output_dir / f"{stem}_patch_dots.png"
+        svg_path = output_dir / f"{stem}_patch_dots.svg"
         json_path = output_dir / f"{stem}_patch_dots.json"
         image.save(png_path)
+        svg_path.write_text(svg_text, encoding="utf-8")
 
         payload = make_page_payload(
             qid=args.qid,
@@ -527,7 +727,10 @@ def main() -> None:
                 "selected_index": selected_idx,
                 "page_uid": page_uid,
                 "png": str(png_path),
+                "svg": str(svg_path),
                 "json": str(json_path),
+                "n_dots": len(dots),
+                "n_non_spatial_contributors": len(non_spatial_items),
             }
         )
 
