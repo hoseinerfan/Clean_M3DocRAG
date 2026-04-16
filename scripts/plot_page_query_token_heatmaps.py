@@ -239,6 +239,75 @@ def load_font(size: int) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
+def wrap_text_lines(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font: ImageFont.ImageFont,
+    max_width: int,
+) -> list[str]:
+    if not text:
+        return [""]
+
+    def text_width(value: str) -> int:
+        bbox = draw.textbbox((0, 0), value, font=font)
+        return bbox[2] - bbox[0]
+
+    def split_long_word(word: str) -> list[str]:
+        if text_width(word) <= max_width:
+            return [word]
+        parts: list[str] = []
+        current = ""
+        for ch in word:
+            candidate = current + ch
+            if current and text_width(candidate) > max_width:
+                parts.append(current)
+                current = ch
+            else:
+                current = candidate
+        if current:
+            parts.append(current)
+        return parts
+
+    lines: list[str] = []
+    current = ""
+    for word in text.split():
+        parts = split_long_word(word)
+        for idx, part in enumerate(parts):
+            if not current:
+                current = part
+            else:
+                candidate = f"{current} {part}" if idx == 0 else part
+                if idx == 0 and text_width(candidate) <= max_width:
+                    current = candidate
+                else:
+                    lines.append(current)
+                    current = part
+            if idx < len(parts) - 1:
+                lines.append(current)
+                current = ""
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
+def draw_wrapped_text_block(
+    draw: ImageDraw.ImageDraw,
+    x: int,
+    y: int,
+    text: str,
+    font: ImageFont.ImageFont,
+    max_width: int,
+    fill: str | tuple[int, int, int] = "black",
+    line_gap: int = 4,
+) -> int:
+    for line in wrap_text_lines(draw, text, font=font, max_width=max_width):
+        bbox = draw.textbbox((0, 0), line, font=font)
+        line_height = bbox[3] - bbox[1]
+        draw.text((x, y), line, fill=fill, font=font)
+        y += line_height + line_gap
+    return y
+
+
 def compute_page_contributions(
     query_emb: np.ndarray,
     index,
@@ -339,22 +408,30 @@ def build_page_heatmap_image(
     n_page_tokens, n_query_tokens = score_matrix.shape
 
     left_margin = 20
-    top_margin = 40
     right_margin = 20
     bottom_margin = 170
+    font = load_font(14)
     width = left_margin + n_query_tokens * cell_width + right_margin
+
+    probe = Image.new("RGB", (1, 1), "white")
+    probe_draw = ImageDraw.Draw(probe)
+    title = f"{page_title} | final_page_score={page_score:.4f}"
+    subtitle = "Cell = exact dot product(query token, page token). Black box = actual contributing token used in page score."
+    title_lines = wrap_text_lines(probe_draw, title, font=font, max_width=width - 20)
+    subtitle_lines = wrap_text_lines(probe_draw, subtitle, font=font, max_width=width - 20)
+    title_height = sum(probe_draw.textbbox((0, 0), line, font=font)[3] - probe_draw.textbbox((0, 0), line, font=font)[1] + 4 for line in title_lines)
+    subtitle_height = sum(probe_draw.textbbox((0, 0), line, font=font)[3] - probe_draw.textbbox((0, 0), line, font=font)[1] + 4 for line in subtitle_lines)
+    top_margin = 16 + title_height + subtitle_height + 8
     height = top_margin + n_page_tokens * cell_height + bottom_margin
 
     img = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(img)
-    font = load_font(14)
 
     max_abs = float(np.max(np.abs(score_matrix))) if score_matrix.size else 0.0
 
-    title = f"{page_title} | final_page_score={page_score:.4f}"
-    draw.text((10, 12), title, fill="black", font=font)
-    subtitle = "Cell = exact dot product(query token, page token). Black box = actual contributing token used in page score."
-    draw.text((10, 26), subtitle, fill="black", font=font)
+    text_y = 10
+    text_y = draw_wrapped_text_block(draw, 10, text_y, title, font=font, max_width=width - 20, line_gap=4)
+    draw_wrapped_text_block(draw, 10, text_y, subtitle, font=font, max_width=width - 20, line_gap=4)
 
     for page_token_idx in range(n_page_tokens):
         y0 = top_margin + page_token_idx * cell_height
@@ -445,21 +522,28 @@ def build_sparse_contrib_image(
             bbox = probe_draw.textbbox((0, 0), label, font=font)
             max_row_label_width = max(max_row_label_width, bbox[2] - bbox[0])
         left_margin = max(88, max_row_label_width + 16)
-        top_margin = 40
         right_margin = 20
         bottom_margin = 70
         width = left_margin + n_cols * cell_width + right_margin
-        height = top_margin + n_rows * max(cell_height, 32) + bottom_margin
-
-        img = Image.new("RGB", (width, height), "white")
-        draw = ImageDraw.Draw(img)
         title = f"{page_uid} | final_page_score={page_score:.4f}"
         subtitle = (
             "Only contributing pairs. Columns = unique contributing page tokens; "
             "rows = query tokens. Overlay boxes group these by spatial patch."
         )
-        draw.text((10, 10), title, fill="black", font=font)
-        draw.text((10, 24), subtitle, fill="black", font=font)
+        probe = Image.new("RGB", (1, 1), "white")
+        probe_draw = ImageDraw.Draw(probe)
+        title_lines = wrap_text_lines(probe_draw, title, font=font, max_width=width - 20)
+        subtitle_lines = wrap_text_lines(probe_draw, subtitle, font=font, max_width=width - 20)
+        title_height = sum(probe_draw.textbbox((0, 0), line, font=font)[3] - probe_draw.textbbox((0, 0), line, font=font)[1] + 4 for line in title_lines)
+        subtitle_height = sum(probe_draw.textbbox((0, 0), line, font=font)[3] - probe_draw.textbbox((0, 0), line, font=font)[1] + 4 for line in subtitle_lines)
+        top_margin = 16 + title_height + subtitle_height + 8
+        height = top_margin + n_rows * max(cell_height, 32) + bottom_margin
+
+        img = Image.new("RGB", (width, height), "white")
+        draw = ImageDraw.Draw(img)
+        text_y = 10
+        text_y = draw_wrapped_text_block(draw, 10, text_y, title, font=font, max_width=width - 20, line_gap=4)
+        draw_wrapped_text_block(draw, 10, text_y, subtitle, font=font, max_width=width - 20, line_gap=4)
 
         for row_idx, label in enumerate(row_labels):
             y0 = top_margin + row_idx * max(cell_height, 32)
@@ -501,18 +585,25 @@ def build_sparse_contrib_image(
     n_rows = len(row_labels)
     n_cols = len(col_labels)
     left_margin = 20
-    top_margin = 40
+    title = f"{page_uid} | final_page_score={page_score:.4f}"
+    subtitle = "Only contributing pairs. x=query token, y=page token idx. Cell text = exact dot product."
     right_margin = 20
     bottom_margin = 170
     width = left_margin + n_cols * cell_width + right_margin
+    probe = Image.new("RGB", (1, 1), "white")
+    probe_draw = ImageDraw.Draw(probe)
+    title_lines = wrap_text_lines(probe_draw, title, font=font, max_width=width - 20)
+    subtitle_lines = wrap_text_lines(probe_draw, subtitle, font=font, max_width=width - 20)
+    title_height = sum(probe_draw.textbbox((0, 0), line, font=font)[3] - probe_draw.textbbox((0, 0), line, font=font)[1] + 4 for line in title_lines)
+    subtitle_height = sum(probe_draw.textbbox((0, 0), line, font=font)[3] - probe_draw.textbbox((0, 0), line, font=font)[1] + 4 for line in subtitle_lines)
+    top_margin = 16 + title_height + subtitle_height + 8
     height = top_margin + n_rows * max(cell_height, 18) + bottom_margin
 
     img = Image.new("RGB", (width, height), "white")
     draw = ImageDraw.Draw(img)
-    title = f"{page_uid} | final_page_score={page_score:.4f}"
-    subtitle = "Only contributing pairs. x=query token, y=page token idx. Cell text = exact dot product."
-    draw.text((10, 10), title, fill="black", font=font)
-    draw.text((10, 24), subtitle, fill="black", font=font)
+    text_y = 10
+    text_y = draw_wrapped_text_block(draw, 10, text_y, title, font=font, max_width=width - 20, line_gap=4)
+    draw_wrapped_text_block(draw, 10, text_y, subtitle, font=font, max_width=width - 20, line_gap=4)
 
     for row_idx, label in enumerate(row_labels):
         y0 = top_margin + row_idx * max(cell_height, 18)
@@ -669,26 +760,6 @@ def build_overlay_image(
     panel_width = 560
     panel_padding = 14
 
-    def wrap_text_to_panel(text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
-        words = text.split()
-        if not words:
-            return [""]
-
-        probe = Image.new("RGB", (1, 1), "white")
-        probe_draw = ImageDraw.Draw(probe)
-        lines: list[str] = []
-        current = words[0]
-        for word in words[1:]:
-            candidate = f"{current} {word}"
-            bbox = probe_draw.textbbox((0, 0), candidate, font=font)
-            if (bbox[2] - bbox[0]) <= max_width:
-                current = candidate
-            else:
-                lines.append(current)
-                current = word
-        lines.append(current)
-        return lines
-
     header_lines = [
         f"{page_uid} | final_page_score={page_score:.4f}",
         (
@@ -730,7 +801,7 @@ def build_overlay_image(
     max_text_width = panel_width - 2 * panel_padding
     for idx, line in enumerate(header_lines):
         font = title_font if idx == 0 else meta_font
-        wrapped_lines = wrap_text_to_panel(line, font=font, max_width=max_text_width)
+        wrapped_lines = wrap_text_lines(draw, line, font=font, max_width=max_text_width)
         for wrapped_line in wrapped_lines:
             bbox = draw.textbbox((0, 0), wrapped_line, font=font)
             line_height = bbox[3] - bbox[1]
