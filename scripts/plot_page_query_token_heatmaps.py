@@ -156,7 +156,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--save-patch-crops",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Also save the winning original-page patch crops for contributing page tokens.",
     )
     return parser.parse_args()
@@ -338,7 +338,7 @@ def build_page_heatmap_image(
 ) -> Image.Image:
     n_page_tokens, n_query_tokens = score_matrix.shape
 
-    left_margin = 76
+    left_margin = 20
     top_margin = 40
     right_margin = 20
     bottom_margin = 170
@@ -359,9 +359,6 @@ def build_page_heatmap_image(
     for page_token_idx in range(n_page_tokens):
         y0 = top_margin + page_token_idx * cell_height
         y1 = y0 + cell_height
-        if page_token_idx % page_token_tick_step == 0:
-            draw.text((8, y0 - 3), str(page_token_idx), fill="black", font=font)
-            draw.line([(left_margin - 4, y0), (left_margin, y0)], fill=(80, 80, 80), width=1)
         for query_token_idx in range(n_query_tokens):
             x0 = left_margin + query_token_idx * cell_width
             x1 = x0 + cell_width
@@ -438,13 +435,12 @@ def build_sparse_contrib_image(
 
     if swap_axes:
         row_labels = [f"{item['query_token_idx']}: {item['query_token'][:28]}" for item in contrib_items]
-        col_labels = [str(idx) for idx in unique_page_token_indices]
         n_rows = len(row_labels)
-        n_cols = len(col_labels)
+        n_cols = len(unique_page_token_indices)
         left_margin = 200
         top_margin = 40
         right_margin = 20
-        bottom_margin = 120
+        bottom_margin = 24
         width = left_margin + n_cols * cell_width + right_margin
         height = top_margin + n_rows * max(cell_height, 24) + bottom_margin
 
@@ -473,23 +469,13 @@ def build_sparse_contrib_image(
             draw.rectangle([x0, y0, x1, y1], outline="black", width=2, fill="white")
             draw.text((x0 + 4, y0 + 6), f"{item['score']:.2f}", fill="black", font=font)
 
-        for col_idx, label in enumerate(col_labels):
-            token_img = Image.new("RGBA", (140, 24), (255, 255, 255, 0))
-            token_draw = ImageDraw.Draw(token_img)
-            token_draw.text((0, 0), label, fill="black", font=font)
-            rotated = token_img.rotate(90, expand=True)
-            x = left_margin + col_idx * cell_width + max(0, (cell_width - rotated.width) // 2)
-            y = top_margin + n_rows * max(cell_height, 24) + 6
-            img.paste(rotated, (x, y), rotated)
-
-        draw.text((left_margin, height - 18), "page token indices", fill="black", font=font)
         return img
 
-    row_labels = [str(idx) for idx in unique_page_token_indices]
+    row_labels = [""] * len(unique_page_token_indices)
     col_labels = [f"{item['query_token_idx']}: {item['query_token'][:18]}" for item in contrib_items]
     n_rows = len(row_labels)
     n_cols = len(col_labels)
-    left_margin = 76
+    left_margin = 20
     top_margin = 40
     right_margin = 20
     bottom_margin = 170
@@ -778,13 +764,14 @@ def build_selected_pages(
     args: argparse.Namespace,
     contribution_output: dict,
     docid2embs: dict[str, torch.Tensor],
-) -> list[dict]:
+) -> tuple[list[dict], list[str]]:
     sorted_pages = contribution_output["sorted_pages"]
     rank_map = {page_uid: rank for rank, (page_uid, _score) in enumerate(sorted_pages, start=1)}
     score_map = contribution_output["final_page2scores"]
 
     if args.page_uid:
         selected_pages = []
+        skipped_page_uids = []
         for page_uid in args.page_uid:
             doc_id, page_idx = page_uid_to_doc_page(page_uid)
             if doc_id not in docid2embs:
@@ -793,9 +780,13 @@ def build_selected_pages(
                 raise IndexError(
                     f"Explicit page index out of range for {doc_id}: {page_idx} not in [0, {len(docid2embs[doc_id]) - 1}]"
                 )
+            page_rank = rank_map.get(page_uid)
+            if args.explicit_page_mode == "retrieved_contrib" and page_rank is None:
+                skipped_page_uids.append(page_uid)
+                continue
             selected_pages.append(
                 {
-                    "rank": rank_map.get(page_uid),
+                    "rank": page_rank,
                     "page_uid": page_uid,
                     "final_page_score": float(score_map.get(page_uid, 0.0)),
                     "selected_via": (
@@ -805,7 +796,7 @@ def build_selected_pages(
                     ),
                 }
             )
-        return selected_pages
+        return selected_pages, skipped_page_uids
 
     plot_rank_start = max(1, args.plot_rank_start)
     if args.plot_rank_count <= 0:
@@ -829,7 +820,7 @@ def build_selected_pages(
             f"No retrieved pages available for requested plot window start={plot_rank_start}, "
             f"count={args.plot_rank_count}, total={len(sorted_pages)}"
         )
-    return selected_pages
+    return selected_pages, []
 
 
 def build_patch_crop_records(
@@ -1009,6 +1000,7 @@ def main() -> None:
         )
 
     plot_rank_start = max(1, args.plot_rank_start)
+    skipped_explicit_page_uids = []
     if args.page_uid and args.explicit_page_mode == "direct_page_maxsim":
         selected_pages = []
         for page_uid in args.page_uid:
@@ -1028,7 +1020,7 @@ def main() -> None:
                 }
             )
     else:
-        selected_pages = build_selected_pages(
+        selected_pages, skipped_explicit_page_uids = build_selected_pages(
             args=args,
             contribution_output=contribution_output,
             docid2embs=docid2embs,
@@ -1047,9 +1039,20 @@ def main() -> None:
         "plot_rank_start": plot_rank_start if not args.page_uid else None,
         "plot_rank_count": len(selected_pages),
         "explicit_page_uids": args.page_uid,
+        "skipped_explicit_page_uids": skipped_explicit_page_uids,
         "retrieved_pages": selected_pages,
         "files": [],
     }
+
+    if not selected_pages:
+        summary_path = output_dir / "summary.json"
+        summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+        print(f"Saved summary to {summary_path}")
+        print(
+            "No pages received retrieval contributions for the requested selection. "
+            "See skipped_explicit_page_uids in summary.json or use --explicit-page-mode direct_page_maxsim."
+        )
+        return
 
     for selected_idx, item in enumerate(selected_pages, start=1):
         page_uid = item["page_uid"]
