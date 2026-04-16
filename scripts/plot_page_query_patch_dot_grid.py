@@ -304,10 +304,10 @@ def axis_class_counts(axis_classes: list[str]) -> dict[str, int]:
 
 def axis_class_fill(axis_class: str) -> str:
     if axis_class == "visual":
-        return "rgb(248,204,204)"
+        return "rgb(255,170,170)"
     if axis_class == "non_visual":
-        return "rgb(217,234,248)"
-    return "rgb(245,245,245)"
+        return "rgb(180,220,255)"
+    return "rgb(255,255,255)"
 
 
 def axis_class_text_fill(axis_class: str) -> str:
@@ -435,7 +435,7 @@ def build_dot_matrix_svg(
             x0 = grid_x0 + patch_idx * cell_width
             svg_parts.append(
                 f'<rect x="{x0}" y="{grid_y0}" width="{cell_width}" height="{grid_height}" '
-                f'fill="{axis_class_fill(patch_class)}" fill-opacity="0.35" stroke="none"/>'
+                f'fill="{axis_class_fill(patch_class)}" fill-opacity="0.60" stroke="none"/>'
             )
 
     for row_idx, row_label in enumerate(row_labels):
@@ -445,7 +445,7 @@ def build_dot_matrix_svg(
         if query_axis_classes:
             svg_parts.append(
                 f'<rect x="{grid_x0}" y="{y0}" width="{grid_width}" height="{cell_height}" '
-                f'fill="{axis_class_fill(row_class)}" fill-opacity="0.22" stroke="none"/>'
+                f'fill="{axis_class_fill(row_class)}" fill-opacity="0.45" stroke="none"/>'
             )
         svg_parts.append(
             f'<text x="8" y="{y_center:.1f}" font-size="16" '
