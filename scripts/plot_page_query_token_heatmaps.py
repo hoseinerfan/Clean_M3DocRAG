@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import textwrap
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -135,7 +134,7 @@ def parse_args() -> argparse.Namespace:
         "--overlay-clean",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="Hide numeric labels inside red boxes. Metadata is shown in a top banner.",
+        help="Hide numeric labels inside red boxes. Metadata is shown in a fixed right-side panel.",
     )
     parser.add_argument(
         "--nonspatial-token-position",
@@ -642,6 +641,28 @@ def build_overlay_image(
 
     title_font = load_font(24)
     meta_font = load_font(18)
+    panel_width = 460
+    panel_padding = 14
+
+    def wrap_text_to_panel(text: str, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+        words = text.split()
+        if not words:
+            return [""]
+
+        probe = Image.new("RGB", (1, 1), "white")
+        probe_draw = ImageDraw.Draw(probe)
+        lines: list[str] = []
+        current = words[0]
+        for word in words[1:]:
+            candidate = f"{current} {word}"
+            bbox = probe_draw.textbbox((0, 0), candidate, font=font)
+            if (bbox[2] - bbox[0]) <= max_width:
+                current = candidate
+            else:
+                lines.append(current)
+                current = word
+        lines.append(current)
+        return lines
 
     header_lines = [
         f"{page_uid} | final_page_score={page_score:.4f}",
@@ -658,11 +679,8 @@ def build_overlay_image(
                 for item in patch_record["items"]
             ]
         )
-        header_lines.extend(
-            textwrap.wrap(
-                f"#{overlay_id} patch={patch_record['patch_idx']} grid=({patch_record['grid_row']},{patch_record['grid_col']}) | {contributors}",
-                width=120,
-            )
+        header_lines.append(
+            f"#{overlay_id} patch={patch_record['patch_idx']} grid=({patch_record['grid_row']},{patch_record['grid_col']}) | {contributors}"
         )
     if non_spatial_items:
         non_spatial_summary = "; ".join(
@@ -671,33 +689,33 @@ def build_overlay_image(
                 for item in sorted(non_spatial_items, key=lambda x: x["score"], reverse=True)
             ]
         )
-        header_lines.extend(textwrap.wrap(f"Non-spatial | {non_spatial_summary}", width=120))
+        header_lines.append(f"Non-spatial | {non_spatial_summary}")
 
-    measure_image = Image.new("RGB", (1, 1), "white")
-    measure_draw = ImageDraw.Draw(measure_image)
-    header_width = 0
-    header_height = 12
-    for idx, line in enumerate(header_lines):
-        font = title_font if idx == 0 else meta_font
-        bbox = measure_draw.textbbox((0, 0), line, font=font)
-        header_width = max(header_width, bbox[2] - bbox[0])
-        header_height += (bbox[3] - bbox[1]) + (8 if idx == 0 else 6)
-
-    side_padding = 10
-    canvas_width = max(display_image.width + 2 * side_padding, header_width + 2 * side_padding)
-    canvas_height = header_height + display_image.height + side_padding
+    canvas_width = display_image.width + panel_width
+    canvas_height = display_image.height
     canvas = Image.new("RGB", (canvas_width, canvas_height), "white")
-    page_x = max(side_padding, (canvas_width - display_image.width) // 2)
-    top_margin = header_height
+    page_x = 0
+    top_margin = 0
     canvas.paste(display_image, (page_x, top_margin))
     draw = ImageDraw.Draw(canvas)
+    panel_x0 = display_image.width
+    draw.line([(panel_x0, 0), (panel_x0, canvas_height)], fill=(180, 180, 180), width=2)
 
-    text_y = 8
+    text_y = panel_padding
+    max_text_width = panel_width - 2 * panel_padding
     for idx, line in enumerate(header_lines):
         font = title_font if idx == 0 else meta_font
-        draw.text((side_padding, text_y), line, fill="black", font=font)
-        bbox = draw.textbbox((side_padding, text_y), line, font=font)
-        text_y = bbox[3] + (8 if idx == 0 else 6)
+        wrapped_lines = wrap_text_to_panel(line, font=font, max_width=max_text_width)
+        for wrapped_line in wrapped_lines:
+            bbox = draw.textbbox((0, 0), wrapped_line, font=font)
+            line_height = bbox[3] - bbox[1]
+            if text_y + line_height > canvas_height - panel_padding:
+                break
+            draw.text((panel_x0 + panel_padding, text_y), wrapped_line, fill="black", font=font)
+            text_y += line_height + (8 if idx == 0 else 5)
+        if text_y > canvas_height - panel_padding:
+            break
+        text_y += 4 if idx == 0 else 2
 
     for overlay_id, patch_record in enumerate(sorted_patch_records, start=1):
         patch_idx = patch_record["patch_idx"]
