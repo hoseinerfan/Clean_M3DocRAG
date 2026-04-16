@@ -68,6 +68,11 @@ def parse_args() -> argparse.Namespace:
         help="Explicit page_uid to render, e.g. <doc_id>_page<idx>. Can be passed multiple times.",
     )
     parser.add_argument(
+        "--gold-doc-pages",
+        action="store_true",
+        help="When used with --qid, expand all pages from the qid's gold supporting docs into explicit page_uids.",
+    )
+    parser.add_argument(
         "--explicit-page-mode",
         default="direct_page_maxsim",
         choices=["direct_page_maxsim", "retrieved_contrib"],
@@ -96,12 +101,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--contrib-only",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Plot only the actual contributing query-token/page-token pairs",
     )
     parser.add_argument(
         "--swap-axes",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Swap axes so x=page tokens and y=query tokens",
     )
     parser.add_argument(
@@ -111,7 +118,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--overlay-on-page",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Also render contributing page patches directly on the page image with a score legend",
     )
     parser.add_argument(
@@ -133,7 +141,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--overlay-clean",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Hide numeric labels inside red boxes. Metadata is shown in a fixed right-side panel.",
     )
     parser.add_argument(
@@ -147,7 +155,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--save-patch-crops",
-        action="store_true",
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help="Also save the winning original-page patch crops for contributing page tokens.",
     )
     return parser.parse_args()
@@ -180,6 +189,10 @@ def make_dataset_args(cli_args: argparse.Namespace) -> SimpleNamespace:
 
 
 def load_query_from_qid(args: argparse.Namespace) -> str:
+    return load_gold_row_from_qid(args)["question"]
+
+
+def load_gold_row_from_qid(args: argparse.Namespace) -> dict:
     gold_path = Path(args.gold) if args.gold else (
         Path(LOCAL_DATA_DIR) / args.data_name / "multimodalqa" / f"MMQA_{args.split}.jsonl"
     )
@@ -187,7 +200,7 @@ def load_query_from_qid(args: argparse.Namespace) -> str:
         for line in f:
             obj = json.loads(line)
             if obj["qid"] == args.qid:
-                return obj["question"]
+                return obj
     raise KeyError(f"QID not found in gold file: {args.qid}")
 
 
@@ -929,7 +942,10 @@ def make_page_payload(
 
 def main() -> None:
     args = parse_args()
-    query = args.query if args.query is not None else load_query_from_qid(args)
+    gold_row = None
+    if args.qid is not None:
+        gold_row = load_gold_row_from_qid(args)
+    query = args.query if args.query is not None else gold_row["question"]
 
     local_model_dir = Path(LOCAL_MODEL_DIR)
     local_embedding_dir = Path(LOCAL_EMBEDDINGS_DIR)
@@ -950,6 +966,23 @@ def main() -> None:
     retrieval_model.model = accelerator.prepare(retrieval_model.model)
 
     dataset = M3DocVQADataset(make_dataset_args(args))
+
+    if args.gold_doc_pages:
+        if args.qid is None:
+            raise ValueError("--gold-doc-pages requires --qid")
+        gold_doc_ids = []
+        seen_doc_ids: set[str] = set()
+        for obj in gold_row.get("supporting_context", []):
+            doc_id = obj["doc_id"]
+            if doc_id not in seen_doc_ids:
+                seen_doc_ids.add(doc_id)
+                gold_doc_ids.append(doc_id)
+        expanded_page_uids = []
+        for doc_id in gold_doc_ids:
+            page_images = dataset.get_images_from_doc_id(doc_id)
+            for page_idx in range(len(page_images)):
+                expanded_page_uids.append(f"{doc_id}_page{page_idx}")
+        args.page_uid = expanded_page_uids
     docid2embs = dataset.load_all_embeddings()
 
     query_meta = retrieval_model.encode_query_with_metadata(
