@@ -435,12 +435,19 @@ def build_sparse_contrib_image(
 
     if swap_axes:
         row_labels = [f"{item['query_token_idx']}: {item['query_token'][:28]}" for item in contrib_items]
+        col_labels = [str(idx) for idx in unique_page_token_indices]
         n_rows = len(row_labels)
         n_cols = len(unique_page_token_indices)
-        left_margin = 200
+        probe = Image.new("RGB", (1, 1), "white")
+        probe_draw = ImageDraw.Draw(probe)
+        max_row_label_width = 0
+        for label in row_labels:
+            bbox = probe_draw.textbbox((0, 0), label, font=font)
+            max_row_label_width = max(max_row_label_width, bbox[2] - bbox[0])
+        left_margin = max(88, max_row_label_width + 16)
         top_margin = 40
         right_margin = 20
-        bottom_margin = 44
+        bottom_margin = 70
         width = left_margin + n_cols * cell_width + right_margin
         height = top_margin + n_rows * max(cell_height, 24) + bottom_margin
 
@@ -472,11 +479,19 @@ def build_sparse_contrib_image(
             draw.rectangle([x0, y0, x1, y1], outline="black", width=2, fill="white")
             draw.text((x0 + 4, y0 + 6), f"{item['score']:.2f}", fill="black", font=font)
 
-        axis_label = "x-axis: unique contributing page token indices"
+        col_label_y = top_margin + n_rows * max(cell_height, 24) + 6
+        for col_idx, label in enumerate(col_labels):
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_width = bbox[2] - bbox[0]
+            x0 = left_margin + col_idx * cell_width
+            label_x = x0 + max(0, (cell_width - text_width) // 2)
+            draw.text((label_x, col_label_y), label, fill="black", font=font)
+
+        axis_label = "x-axis: contributing page token indices"
         axis_bbox = draw.textbbox((0, 0), axis_label, font=font)
         axis_width = axis_bbox[2] - axis_bbox[0]
         axis_x = left_margin + max(0, (n_cols * cell_width - axis_width) // 2)
-        axis_y = top_margin + n_rows * max(cell_height, 24) + 10
+        axis_y = col_label_y + 18
         draw.text((axis_x, axis_y), axis_label, fill="black", font=font)
 
         return img
