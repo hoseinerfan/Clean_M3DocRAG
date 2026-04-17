@@ -85,6 +85,7 @@ def run_model(
         token2pageuid=token2pageuid,
         all_token_embeddings=all_token_embeddings,
         n_return_pages=n_return_pages,
+        ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
         show_progress=True,
     )
     logger.info(top_n_page_retrieval_results)
@@ -395,15 +396,16 @@ def main():
         ret_name = args.retrieval_adapter_model_name_or_path
     else:
         ret_name = args.retrieval_model_name_or_path
+    rerank_suffix = "_ignorepadscore" if args.ignore_pad_scores_in_final_ranking else ""
 
     if args.retrieval_only:
         pred_save_fname = (
-            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}"
+            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}{rerank_suffix}"
             f"_{experiment_date}.json"
         )
     else:
         pred_save_fname = (
-            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}"
+            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}{rerank_suffix}"
             f"_{args.model_name_or_path}_{experiment_date}.json"
         )
     results_file = save_dir / pred_save_fname
@@ -419,12 +421,12 @@ def main():
     )
     if args.retrieval_only:
         eval_save_fname = (
-            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}"
+            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}{rerank_suffix}"
             f"_{experiment_date}_eval_results.json"
         )
     else:
         eval_save_fname = (
-            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}"
+            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}{rerank_suffix}"
             f"_{args.model_name_or_path}_{experiment_date}_eval_results.json"
         )
     results_file = save_dir / eval_save_fname

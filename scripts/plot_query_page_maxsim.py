@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         help="Match the real retrieval ablation mode when recomputing scores.",
     )
     parser.add_argument(
+        "--ignore-pad-scores-in-final-ranking",
+        action="store_true",
+        help="Keep PAD tokens in ANN search but exclude their scores from the final page-score sum used for reranking.",
+    )
+    parser.add_argument(
         "--plot-rank-start",
         type=int,
         default=1,
@@ -145,15 +150,18 @@ def clean_token_label(token: str) -> str:
 
 def compute_page_contributions(
     query_emb: np.ndarray,
+    query_raw_tokens: list[str] | None,
     index,
     token2pageuid: list[str],
     all_token_embeddings_np: np.ndarray,
     n_retrieval_pages: int,
+    ignore_pad_scores_in_final_ranking: bool = False,
 ) -> dict:
     distances, indices = index.search(query_emb, n_retrieval_pages)
 
     final_page2scores: dict[str, float] = {}
     query_token_page_details: list[dict[str, dict]] = []
+    ignored_query_token_indices: list[int] = []
 
     for q_idx, query_token_emb in enumerate(query_emb):
         current_q_page2details: dict[str, dict] = {}
@@ -172,6 +180,16 @@ def compute_page_contributions(
                     "nn_rank_for_query_token": nn_idx + 1,
                 }
 
+        if (
+            ignore_pad_scores_in_final_ranking
+            and query_raw_tokens is not None
+            and q_idx < len(query_raw_tokens)
+            and query_raw_tokens[q_idx] == "<pad>"
+        ):
+            ignored_query_token_indices.append(q_idx)
+            query_token_page_details.append(current_q_page2details)
+            continue
+
         for page_uid, details in current_q_page2details.items():
             final_page2scores[page_uid] = final_page2scores.get(page_uid, 0.0) + details["score"]
 
@@ -184,6 +202,7 @@ def compute_page_contributions(
         "query_emb": query_emb,
         "top_pages": top_pages,
         "query_token_page_details": query_token_page_details,
+        "ignored_query_token_indices": ignored_query_token_indices,
     }
 
 
@@ -298,6 +317,7 @@ def build_json_payload(
     query: str,
     qid: str | None,
     query_token_filter: str,
+    ignore_pad_scores_in_final_ranking: bool,
     query_token_labels: list[str],
     plotted_pages: list[dict],
     query_token_page_details: list[dict[str, dict]],
@@ -341,6 +361,7 @@ def build_json_payload(
         "qid": qid,
         "query": query,
         "query_token_filter": query_token_filter,
+        "ignore_pad_scores_in_final_ranking": ignore_pad_scores_in_final_ranking,
         "full_retrieved_page_count": full_retrieved_page_count,
         "plotted_rank_start": plot_rank_start,
         "plotted_rank_count": plot_rank_count,
@@ -390,10 +411,12 @@ def main() -> None:
 
     contribution_output = compute_page_contributions(
         query_emb=query_emb,
+        query_raw_tokens=query_meta["raw_tokens"],
         index=index,
         token2pageuid=token2pageuid,
         all_token_embeddings_np=all_token_embeddings_np,
         n_retrieval_pages=args.n_retrieval_pages,
+        ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
     )
 
     plot_rank_start = max(1, args.plot_rank_start)
@@ -424,6 +447,7 @@ def main() -> None:
         query=query,
         qid=args.qid,
         query_token_filter=args.query_token_filter,
+        ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
         query_token_labels=query_token_labels,
         plotted_pages=plotted_pages,
         query_token_page_details=contribution_output["query_token_page_details"],

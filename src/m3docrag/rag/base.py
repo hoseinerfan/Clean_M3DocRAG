@@ -60,6 +60,7 @@ class RAGModelBase:
 
         n_return_pages: int = 1,
         single_page_from_each_doc: bool = False,
+        ignore_pad_scores_in_final_ranking: bool = False,
         show_progress=False,
     ) -> List[Tuple]:
         """
@@ -89,6 +90,14 @@ class RAGModelBase:
                 to_cpu=True,
             )
             query_emb = query_meta["embeddings"].float().numpy().astype(np.float32)
+            raw_tokens = query_meta.get("raw_tokens", [])
+            score_active_query_token_mask = None
+            if ignore_pad_scores_in_final_ranking:
+                score_active_query_token_mask = [token != "<pad>" for token in raw_tokens]
+                if score_active_query_token_mask and not any(score_active_query_token_mask):
+                    raise ValueError(
+                        "Ignoring PAD scores in final ranking removed every scoring query token."
+                    )
 
             # NN search
             k = n_return_pages
@@ -118,7 +127,9 @@ class RAGModelBase:
                     else:
                         curent_q_page2scores[page_uid] = max(curent_q_page2scores[page_uid], score)
 
-            
+                if score_active_query_token_mask is not None and not score_active_query_token_mask[q_idx]:
+                    continue
+
                 for page_uid, score in curent_q_page2scores.items():
                     if page_uid in final_page2scores:
                         final_page2scores[page_uid] += score
@@ -150,6 +161,14 @@ class RAGModelBase:
             to_cpu=True,
         )
         filtered_query_emb = query_meta["embeddings"]
+        if ignore_pad_scores_in_final_ranking:
+            raw_tokens = query_meta.get("raw_tokens", [])
+            score_keep_mask = torch.tensor([token != "<pad>" for token in raw_tokens], dtype=torch.bool)
+            if not score_keep_mask.any():
+                raise ValueError(
+                    "Ignoring PAD scores in final ranking removed every scoring query token."
+                )
+            filtered_query_emb = filtered_query_emb[score_keep_mask]
 
         docid2scores = {}
         for doc_id, doc_embs in tqdm(

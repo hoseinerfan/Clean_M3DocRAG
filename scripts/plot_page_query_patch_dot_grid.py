@@ -65,6 +65,11 @@ def parse_args() -> argparse.Namespace:
         help="Match the retrieval ablation mode when recomputing contributions.",
     )
     parser.add_argument(
+        "--ignore-pad-scores-in-final-ranking",
+        action="store_true",
+        help="Keep PAD tokens in ANN search but exclude their scores from the final page-score sum used for reranking.",
+    )
+    parser.add_argument(
         "--plot-rank-start",
         type=int,
         default=1,
@@ -550,6 +555,7 @@ def make_page_payload(
     final_page_score: float,
     contribution_mode: str,
     query_token_filter: str,
+    ignore_pad_scores_in_final_ranking: bool,
     nonspatial_token_position: str,
     query_token_labels: list[str],
     page_token_count: int,
@@ -566,6 +572,7 @@ def make_page_payload(
         "query": query,
         "contribution_mode": contribution_mode,
         "query_token_filter": query_token_filter,
+        "ignore_pad_scores_in_final_ranking": ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": nonspatial_token_position,
         "rank": rank,
         "page_uid": page_uid,
@@ -664,11 +671,13 @@ def main() -> None:
         all_token_embeddings_np = all_token_embeddings.float().numpy()
         contribution_output = compute_page_contributions(
             query_emb=query_emb,
+            query_raw_tokens=query_meta["raw_tokens"],
             index=index,
             token2pageuid=token2pageuid,
             token2localidx=token2localidx,
             all_token_embeddings_np=all_token_embeddings_np,
             n_retrieval_pages=args.n_retrieval_pages,
+            ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
         )
 
     plot_rank_start = max(1, args.plot_rank_start)
@@ -707,6 +716,7 @@ def main() -> None:
         "n_retrieval_pages": args.n_retrieval_pages,
         "explicit_page_mode": args.explicit_page_mode if args.page_uid else None,
         "query_token_filter": args.query_token_filter,
+        "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
         "splice_query_token_labels": args.splice_query_token_labels,
@@ -804,6 +814,7 @@ def main() -> None:
                 else "retrieved_contrib"
             ),
             query_token_filter=args.query_token_filter,
+            ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
             nonspatial_token_position=args.nonspatial_token_position,
             query_token_labels=query_token_labels,
             page_token_count=page_emb.shape[0],

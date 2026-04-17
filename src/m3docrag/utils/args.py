@@ -41,6 +41,10 @@ class TrainingArguments(transformers.TrainingArguments):
     loop_unique_doc_ids: bool = field(default=False, metadata={"help": "if true, apply retrieval only on unique doc ids"})
 
     n_retrieval_pages: int = 1
+    ignore_pad_scores_in_final_ranking: bool = field(
+        default=False,
+        metadata={"help": "if true, keep PAD-like query tokens in ANN search but exclude their scores from the final page-score sum used for reranking."},
+    )
 
 
     # Embedding indexing settings

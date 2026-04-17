@@ -15,7 +15,7 @@ from m3docrag.datasets.m3_docvqa import M3DocVQADataset
 from m3docrag.rag import MultimodalRAGModel
 from m3docrag.retrieval import ColPaliRetrievalModel
 from m3docrag.utils.distributed import supports_flash_attention
-from m3docrag.utils.paths import LOCAL_EMBEDDINGS_DIR, LOCAL_MODEL_DIR
+from m3docrag.utils.paths import LOCAL_DATA_DIR, LOCAL_EMBEDDINGS_DIR, LOCAL_MODEL_DIR
 from m3docrag.utils.prompts import short_answer_template
 from m3docrag.vqa import VQAModel
 
@@ -26,9 +26,12 @@ def parse_args() -> argparse.Namespace:
             "Run M3DocRAG on a free-form question against an existing M3DocVQA-style PDF corpus."
         )
     )
-    parser.add_argument("--query", required=True, help="Free-form question text")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--query", help="Free-form question text")
+    group.add_argument("--qid", help="Benchmark qid to load from MMQA_<split>.jsonl")
     parser.add_argument("--data_name", default="m3-docvqa")
     parser.add_argument("--split", default="dev")
+    parser.add_argument("--gold", help="Optional MMQA_<split>.jsonl override for --qid mode")
     parser.add_argument("--embedding_name", default="colpali-v1.2_m3-docvqa_dev")
     parser.add_argument(
         "--faiss_index_type",
@@ -41,6 +44,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model_name_or_path", default="Qwen2-VL-7B-Instruct")
     parser.add_argument("--bits", type=int, default=16)
     parser.add_argument("--n_retrieval_pages", type=int, default=4)
+    parser.add_argument(
+        "--ignore-pad-scores-in-final-ranking",
+        action="store_true",
+        help="Keep PAD tokens in ANN search but exclude their scores from the final page-score sum used for reranking.",
+    )
     parser.add_argument("--retrieval_only", action="store_true")
     parser.add_argument("--output", help="Optional JSON output path")
     return parser.parse_args()
@@ -59,6 +67,18 @@ def infer_vqa_model_type(model_name_or_path: str) -> str:
     if "qwen2" in lowered:
         return "qwen2"
     raise KeyError(f"Unknown model type for {model_name_or_path}")
+
+
+def load_query_from_qid(cli_args: argparse.Namespace) -> str:
+    gold_path = Path(cli_args.gold) if cli_args.gold else (
+        Path(LOCAL_DATA_DIR) / cli_args.data_name / "multimodalqa" / f"MMQA_{cli_args.split}.jsonl"
+    )
+    with open(gold_path, "r", encoding="utf-8") as f:
+        for line in f:
+            obj = json.loads(line)
+            if obj["qid"] == cli_args.qid:
+                return obj["question"]
+    raise KeyError(f"QID not found in gold file: {cli_args.qid}")
 
 
 def make_dataset_args(cli_args: argparse.Namespace) -> SimpleNamespace:
@@ -102,6 +122,8 @@ def build_flattened_index_inputs(docid2embs: dict[str, torch.Tensor]) -> tuple[l
 
 def main() -> None:
     args = parse_args()
+    if args.qid and not args.query:
+        args.query = load_query_from_qid(args)
 
     local_model_dir = Path(LOCAL_MODEL_DIR)
     local_embedding_dir = Path(LOCAL_EMBEDDINGS_DIR)
@@ -159,16 +181,19 @@ def main() -> None:
         token2pageuid=token2pageuid,
         all_token_embeddings=all_token_embeddings_np,
         n_return_pages=args.n_retrieval_pages,
+        ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
         show_progress=True,
     )
 
     output = {
+        "qid": args.qid,
         "query": args.query,
         "data_name": args.data_name,
         "split": args.split,
         "embedding_name": args.embedding_name,
         "faiss_index_type": args.faiss_index_type,
         "n_retrieval_pages": args.n_retrieval_pages,
+        "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "retrieval_only": args.retrieval_only,
         "page_retrieval_results": retrieval_results,
     }
