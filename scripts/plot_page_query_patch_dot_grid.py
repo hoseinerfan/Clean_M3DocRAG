@@ -153,7 +153,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional JSON or JSONL carrying query-token visual/non-visual labels keyed by qid/query_id. "
             "Supported fields: query_token_classes, visual_token_indices, non_visual_token_indices, "
-            "visual_tokens, non_visual_tokens."
+            "visual_tokens, non_visual_tokens, plus binary visual_needed exports with "
+            "visual_needed_tokens and visual_needed_phrases."
         ),
     )
     return parser.parse_args()
@@ -204,6 +205,14 @@ def load_splice_patch_axis_classes(
     return classes
 
 
+def _query_label_record_id(record: dict) -> str:
+    for key in ("qid", "query_id", "question_id"):
+        value = str(record.get(key, "")).strip()
+        if value:
+            return value
+    return ""
+
+
 def _query_label_record_from_path(path: Path, qid: str | None) -> dict | None:
     if path.suffix.lower() == ".jsonl":
         with path.open("r", encoding="utf-8") as handle:
@@ -212,7 +221,7 @@ def _query_label_record_from_path(path: Path, qid: str | None) -> dict | None:
                 if not line:
                     continue
                 row = json.loads(line)
-                row_qid = str(row.get("qid", row.get("query_id", ""))).strip()
+                row_qid = _query_label_record_id(row)
                 if qid is not None and row_qid == qid:
                     return row
         return None
@@ -221,23 +230,233 @@ def _query_label_record_from_path(path: Path, qid: str | None) -> dict | None:
     if isinstance(payload, dict):
         if qid is not None and qid in payload and isinstance(payload[qid], dict):
             return payload[qid]
-        row_qid = str(payload.get("qid", payload.get("query_id", ""))).strip()
+        row_qid = _query_label_record_id(payload)
         if qid is not None and row_qid == qid:
             return payload
     if isinstance(payload, list):
         for row in payload:
             if not isinstance(row, dict):
                 continue
-            row_qid = str(row.get("qid", row.get("query_id", ""))).strip()
+            row_qid = _query_label_record_id(row)
             if qid is not None and row_qid == qid:
                 return row
     return None
+
+
+def _normalize_query_axis_text(value: object) -> str:
+    if value is None:
+        return ""
+    return " ".join(clean_token_label(str(value)).strip().lower().split())
+
+
+def _extract_query_axis_strings(values: object) -> list[str]:
+    extracted: list[str] = []
+
+    def visit(value: object) -> None:
+        if value is None or isinstance(value, bool):
+            return
+        if isinstance(value, str):
+            normalized = _normalize_query_axis_text(value)
+            if normalized:
+                extracted.append(normalized)
+            return
+        if isinstance(value, dict):
+            for key in ("token", "text", "value", "phrase", "label", "content", "surface_form", "matched_text"):
+                if key in value:
+                    visit(value.get(key))
+                    return
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                visit(item)
+
+    visit(values)
+    return extracted
+
+
+def _extract_query_axis_indices(values: object) -> set[int]:
+    extracted: set[int] = set()
+
+    def visit(value: object) -> None:
+        if value is None or isinstance(value, bool):
+            return
+        if isinstance(value, int):
+            extracted.add(value)
+            return
+        if isinstance(value, str):
+            candidate = value.strip()
+            if candidate.lstrip("-").isdigit():
+                extracted.add(int(candidate))
+            return
+        if isinstance(value, dict):
+            for key in ("index", "token_index", "query_token_idx", "idx"):
+                if key in value:
+                    visit(value.get(key))
+                    return
+            return
+        if isinstance(value, (list, tuple, set)):
+            for item in value:
+                visit(item)
+
+    visit(values)
+    return extracted
+
+
+def _apply_query_axis_mask(classes: list[str], values: object, axis_class: str) -> bool:
+    if not isinstance(values, list) or len(values) != len(classes):
+        return False
+
+    applied = False
+    for idx, value in enumerate(values):
+        is_positive = False
+        if isinstance(value, bool):
+            is_positive = value
+        elif isinstance(value, (int, float)):
+            is_positive = bool(value)
+        if is_positive:
+            classes[idx] = axis_class
+            applied = True
+    return applied
+
+
+def _build_query_axis_text_and_spans(
+    query_token_labels: list[str],
+    query_raw_tokens: list[str] | None = None,
+) -> tuple[str, list[tuple[int, int]]]:
+    use_raw_tokens = query_raw_tokens is not None and len(query_raw_tokens) == len(query_token_labels)
+
+    parts: list[str] = []
+    spans: list[tuple[int, int]] = []
+    cursor = 0
+    for idx, token_label in enumerate(query_token_labels):
+        token_source = query_raw_tokens[idx] if use_raw_tokens else token_label
+        token_text = _normalize_query_axis_text(token_source)
+        if not token_text:
+            spans.append((-1, -1))
+            continue
+
+        needs_space = bool(parts)
+        if use_raw_tokens:
+            needs_space = bool(parts) and str(query_raw_tokens[idx]).startswith("▁")
+        if needs_space:
+            parts.append(" ")
+            cursor += 1
+
+        start = cursor
+        parts.append(token_text)
+        cursor += len(token_text)
+        spans.append((start, cursor))
+
+    return "".join(parts), spans
+
+
+def _mark_query_axis_text_matches(
+    classes: list[str],
+    *,
+    query_text: str,
+    query_token_spans: list[tuple[int, int]],
+    texts: list[str],
+    axis_class: str,
+    overwrite_unknown_only: bool = False,
+) -> None:
+    normalized_texts = []
+    seen_texts: set[str] = set()
+    for value in texts:
+        normalized = _normalize_query_axis_text(value)
+        if normalized and normalized not in seen_texts:
+            seen_texts.add(normalized)
+            normalized_texts.append(normalized)
+
+    for text in normalized_texts:
+        target_len = len(text)
+        for start_idx, (start_char, _start_end) in enumerate(query_token_spans):
+            if start_char < 0:
+                continue
+            for end_idx in range(start_idx, len(query_token_spans)):
+                _end_start, end_char = query_token_spans[end_idx]
+                if end_char < 0:
+                    continue
+                segment = query_text[start_char:end_char]
+                if segment == text:
+                    for idx in range(start_idx, end_idx + 1):
+                        if overwrite_unknown_only and classes[idx] != "unknown":
+                            continue
+                        classes[idx] = axis_class
+                    break
+                if len(segment) >= target_len:
+                    break
+
+
+def _uses_visual_needed_schema(path: Path, record: dict | None) -> bool:
+    if "visual_needed" in path.name.lower():
+        return True
+    if record is None:
+        return False
+    return any("visual_needed" in str(key).lower() for key in record)
+
+
+def _load_visual_needed_query_axis_classes(
+    *,
+    record: dict | None,
+    query_token_labels: list[str],
+    query_raw_tokens: list[str] | None,
+) -> list[str]:
+    classes = ["non_visual"] * len(query_token_labels)
+    if record is None:
+        return classes
+
+    query_text, query_token_spans = _build_query_axis_text_and_spans(
+        query_token_labels=query_token_labels,
+        query_raw_tokens=query_raw_tokens,
+    )
+
+    for field in ("visual_needed_mask", "visual_needed_token_mask", "visual_token_mask"):
+        _apply_query_axis_mask(classes, record.get(field), "visual")
+
+    for field in ("visual_needed_token_indices", "visual_needed_indices", "visual_token_indices"):
+        for idx in _extract_query_axis_indices(record.get(field)):
+            if 0 <= idx < len(classes):
+                classes[idx] = "visual"
+
+    visual_needed_texts: list[str] = []
+    for field in (
+        "visual_needed_tokens",
+        "visual_needed_token_texts",
+        "visual_needed_words",
+        "visual_needed_terms",
+        "visual_needed",
+        "visual_tokens",
+    ):
+        visual_needed_texts.extend(_extract_query_axis_strings(record.get(field)))
+
+    for idx, token_label in enumerate(query_token_labels):
+        token_key = _normalize_query_axis_text(token_label)
+        if token_key and token_key in visual_needed_texts:
+            classes[idx] = "visual"
+
+    _mark_query_axis_text_matches(
+        classes,
+        query_text=query_text,
+        query_token_spans=query_token_spans,
+        texts=visual_needed_texts,
+        axis_class="visual",
+    )
+    _mark_query_axis_text_matches(
+        classes,
+        query_text=query_text,
+        query_token_spans=query_token_spans,
+        texts=_extract_query_axis_strings(record.get("visual_needed_phrases")),
+        axis_class="visual",
+    )
+
+    return classes
 
 
 def load_splice_query_axis_classes(
     query_labels_path: str,
     qid: str | None,
     query_token_labels: list[str],
+    query_raw_tokens: list[str] | None = None,
 ) -> list[str]:
     classes = ["unknown"] * len(query_token_labels)
     if not query_labels_path:
@@ -248,6 +467,12 @@ def load_splice_query_axis_classes(
         raise FileNotFoundError(path)
 
     record = _query_label_record_from_path(path, qid)
+    if _uses_visual_needed_schema(path, record):
+        return _load_visual_needed_query_axis_classes(
+            record=record,
+            query_token_labels=query_token_labels,
+            query_raw_tokens=query_raw_tokens,
+        )
     if record is None:
         return classes
 
@@ -296,6 +521,26 @@ def load_splice_query_axis_classes(
                 classes[idx] = "visual"
             elif token_key in non_visual_tokens and classes[idx] == "unknown":
                 classes[idx] = "non_visual"
+
+        query_text, query_token_spans = _build_query_axis_text_and_spans(
+            query_token_labels=query_token_labels,
+            query_raw_tokens=query_raw_tokens,
+        )
+        _mark_query_axis_text_matches(
+            classes,
+            query_text=query_text,
+            query_token_spans=query_token_spans,
+            texts=list(visual_tokens),
+            axis_class="visual",
+        )
+        _mark_query_axis_text_matches(
+            classes,
+            query_text=query_text,
+            query_token_spans=query_token_spans,
+            texts=list(non_visual_tokens),
+            axis_class="non_visual",
+            overwrite_unknown_only=True,
+        )
 
     return classes
 
@@ -762,6 +1007,7 @@ def main() -> None:
             query_labels_path=args.splice_query_token_labels,
             qid=args.qid,
             query_token_labels=query_token_labels,
+            query_raw_tokens=query_meta["raw_tokens"],
         )
         _tmp_extra_tokens, tmp_grid_side, _tmp_patch_records, _tmp_non_spatial = collect_spatial_patch_records(
             page_token_count=page_emb.shape[0],
