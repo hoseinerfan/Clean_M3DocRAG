@@ -22,6 +22,7 @@ SPLIT="${SPLIT:-dev}"
 BITS="${BITS:-16}"
 N_RETRIEVAL_PAGES="${N_RETRIEVAL_PAGES:-1}"
 RETRIEVAL_ONLY="${RETRIEVAL_ONLY:-False}"
+IGNORE_PAD_SCORES_IN_FINAL_RANKING="${IGNORE_PAD_SCORES_IN_FINAL_RANKING:-False}"
 NUM_PROCESSES="${NUM_PROCESSES:-1}"
 MIXED_PRECISION="${MIXED_PRECISION:-bf16}"
 DATA_LEN="${DATA_LEN:-}"
@@ -66,6 +67,7 @@ echo "SPLIT=$SPLIT"
 echo "EMBEDDING_NAME=$EMBEDDING_NAME"
 echo "INDEX_NAME=$INDEX_NAME"
 echo "RETRIEVAL_ONLY=$RETRIEVAL_ONLY"
+echo "IGNORE_PAD_SCORES_IN_FINAL_RANKING=$IGNORE_PAD_SCORES_IN_FINAL_RANKING"
 echo "RAG_OUTPUT_DIR=$RAG_OUTPUT_DIR"
 
 python --version
@@ -121,6 +123,10 @@ run_rag() {
 
   if [[ -n "$DATA_LEN" ]]; then
     rag_cmd+=(--data_len="$DATA_LEN")
+  fi
+
+  if [[ "${IGNORE_PAD_SCORES_IN_FINAL_RANKING,,}" == "true" ]]; then
+    rag_cmd+=(--ignore_pad_scores_in_final_ranking=True)
   fi
 
   "${rag_cmd[@]}"
