@@ -447,9 +447,9 @@ def _collect_binary_phrase_label_texts(record: dict, axis_class: str) -> list[st
             _extract_query_axis_strings(
                 [
                     item.get("norm_phrase"),
+                    item.get("raw_examples"),
+                    item.get("norm_tokens"),
                     item.get("phrase"),
-                    item.get("text"),
-                    item.get("matched_text"),
                 ]
             )
         )
