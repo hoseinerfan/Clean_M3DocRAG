@@ -261,7 +261,20 @@ def _extract_query_axis_strings(values: object) -> list[str]:
                 extracted.append(normalized)
             return
         if isinstance(value, dict):
-            for key in ("token", "text", "value", "phrase", "label", "content", "surface_form", "matched_text"):
+            for key in (
+                "token",
+                "text",
+                "value",
+                "phrase",
+                "label",
+                "content",
+                "surface_form",
+                "matched_text",
+                "norm",
+                "norm_phrase",
+                "token_text",
+                "raw_text",
+            ):
                 if key in value:
                     visit(value.get(key))
                     return
@@ -395,6 +408,124 @@ def _uses_visual_needed_schema(path: Path, record: dict | None) -> bool:
     return any("visual_needed" in str(key).lower() for key in record)
 
 
+def _uses_binary_token_label_schema(record: dict | None) -> bool:
+    if record is None:
+        return False
+    return any(key in record for key in ("token_labels", "phrase_labels", "visual_token_count", "non_visual_token_count"))
+
+
+def _binary_label_to_axis_class(value: object) -> str:
+    text = str(value or "").strip().lower().replace("-", "_")
+    if text.startswith("visual"):
+        return "visual"
+    if text.startswith("non_visual"):
+        return "non_visual"
+    if text == "neutral":
+        return "unknown"
+    return "unknown"
+
+
+def _collect_binary_token_label_texts(record: dict, axis_class: str) -> list[str]:
+    texts: list[str] = []
+    for item in record.get("token_labels", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if _binary_label_to_axis_class(item.get("label")) != axis_class:
+            continue
+        texts.extend(_extract_query_axis_strings([item.get("norm"), item.get("token"), item.get("token_text")]))
+    return texts
+
+
+def _collect_binary_phrase_label_texts(record: dict, axis_class: str) -> list[str]:
+    texts: list[str] = []
+    for item in record.get("phrase_labels", []) or []:
+        if not isinstance(item, dict):
+            continue
+        if _binary_label_to_axis_class(item.get("label")) != axis_class:
+            continue
+        texts.extend(
+            _extract_query_axis_strings(
+                [
+                    item.get("norm_phrase"),
+                    item.get("raw_examples"),
+                    item.get("norm_tokens"),
+                    item.get("phrase"),
+                ]
+            )
+        )
+    return texts
+
+
+def _load_binary_token_label_query_axis_classes(
+    *,
+    record: dict | None,
+    query_token_labels: list[str],
+    query_raw_tokens: list[str] | None,
+) -> list[str]:
+    classes = ["non_visual"] * len(query_token_labels)
+    if record is None:
+        return classes
+
+    query_text, query_token_spans = _build_query_axis_text_and_spans(
+        query_token_labels=query_token_labels,
+        query_raw_tokens=query_raw_tokens,
+    )
+
+    visual_token_texts = _collect_binary_token_label_texts(record, "visual")
+    non_visual_token_texts = _collect_binary_token_label_texts(record, "non_visual")
+    visual_phrase_texts = _collect_binary_phrase_label_texts(record, "visual")
+
+    # If tokenization happens to align exactly, preserve the explicit token labels by index.
+    token_labels = record.get("token_labels", []) or []
+    if isinstance(token_labels, list) and len(token_labels) == len(query_token_labels):
+        for idx, item in enumerate(token_labels):
+            if not isinstance(item, dict):
+                continue
+            axis_class = _binary_label_to_axis_class(item.get("label"))
+            if axis_class == "visual":
+                classes[idx] = "visual"
+            elif axis_class == "non_visual" and classes[idx] != "visual":
+                classes[idx] = "non_visual"
+
+    # Only trust direct indices when the source tokenization length matches the plotted tokenization.
+    if isinstance(token_labels, list) and len(token_labels) == len(query_token_labels):
+        visual_token_indices = {int(x) for x in record.get("visual_token_indices", [])}
+        non_visual_token_indices = {int(x) for x in record.get("non_visual_token_indices", [])}
+
+        for idx in visual_token_indices:
+            if 0 <= idx < len(classes):
+                classes[idx] = "visual"
+        for idx in non_visual_token_indices:
+            if 0 <= idx < len(classes) and classes[idx] != "visual":
+                classes[idx] = "non_visual"
+
+    visual_token_text_set = set(visual_token_texts)
+    non_visual_token_text_set = set(non_visual_token_texts)
+    for idx, token_label in enumerate(query_token_labels):
+        token_key = _normalize_query_axis_text(token_label)
+        if token_key and token_key in visual_token_text_set:
+            classes[idx] = "visual"
+        elif token_key and token_key in non_visual_token_text_set and classes[idx] != "visual":
+            classes[idx] = "non_visual"
+
+    _mark_query_axis_text_matches(
+        classes,
+        query_text=query_text,
+        query_token_spans=query_token_spans,
+        texts=visual_token_texts,
+        axis_class="visual",
+    )
+    _mark_query_axis_text_matches(
+        classes,
+        query_text=query_text,
+        query_token_spans=query_token_spans,
+        texts=visual_phrase_texts,
+        axis_class="visual",
+    )
+
+    return classes
+
+
 def _load_visual_needed_query_axis_classes(
     *,
     record: dict | None,
@@ -469,6 +600,12 @@ def load_splice_query_axis_classes(
     record = _query_label_record_from_path(path, qid)
     if _uses_visual_needed_schema(path, record):
         return _load_visual_needed_query_axis_classes(
+            record=record,
+            query_token_labels=query_token_labels,
+            query_raw_tokens=query_raw_tokens,
+        )
+    if _uses_binary_token_label_schema(record):
+        return _load_binary_token_label_query_axis_classes(
             record=record,
             query_token_labels=query_token_labels,
             query_raw_tokens=query_raw_tokens,
