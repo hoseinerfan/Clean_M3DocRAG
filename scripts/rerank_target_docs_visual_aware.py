@@ -487,6 +487,8 @@ def make_query_score_mask(
     query_raw_tokens: list[str],
     ignore_pad_scores_in_final_ranking: bool,
 ) -> torch.Tensor:
+    import torch
+
     if not ignore_pad_scores_in_final_ranking:
         return torch.ones(len(query_raw_tokens), dtype=torch.bool)
     keep_mask = torch.tensor([token != "<pad>" for token in query_raw_tokens], dtype=torch.bool)
