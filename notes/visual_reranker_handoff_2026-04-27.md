@@ -244,12 +244,13 @@ Do not prioritize this qid for clean page-level evaluation.
 
 ## Current best transfer config
 
-Best fixed weights found on the cleanest recent useful run:
+Best fixed weights found on the strongest page-level success case so far
+(`46a4103ba65b176fba9ed85889775f8d`, targeting answer-bearing `page17`):
 
 - `base = 1.0`
-- `visual = 2.0`
-- `non_visual = 1.0`
-- `balance = 2.0`
+- `visual = 1.0`
+- `non_visual = 0.0`
+- `balance = 8.0`
 
 This is the recommended first fixed-weight transfer setting for the next qid before doing qid-specific grid search.
 
@@ -264,6 +265,7 @@ Suggested command:
 ```bash
 python scripts/rerank_target_docs_visual_aware.py \
   --qid 3444052221c1104c977a4653988d44f1 \
+  --gold /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl \
   --embedding_name colpali-v1.2_m3-docvqa_dev \
   --query_token_filter drop_pad_like \
   --splice-query-token-labels /mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/visual_needed_binary/deberta_v3_large_seed42/export/dev_query_visual_binary_labels_union_relaxed_v2.jsonl \
@@ -271,9 +273,9 @@ python scripts/rerank_target_docs_visual_aware.py \
   --baseline-pred /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/retrieval_only_dev_ret1000full_drop_pad_like/colpali-v1.2_ivfflat_ret1000_qtf-drop_pad_like_2026-04-16_07-21-44.json \
   --from-baseline-top-pages 1000 \
   --weight-base 1.0 \
-  --weight-visual 2.0 \
-  --weight-non-visual 1.0 \
-  --weight-balance 2.0 \
+  --weight-visual 1.0 \
+  --weight-non-visual 0.0 \
+  --weight-balance 8.0 \
   --output-json /mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/34440522_rerank_fixed_best46a4103b.json \
   --output-prediction-json /mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/34440522_rerank_fixed_best46a4103b.pred.json
 ```
@@ -288,4 +290,3 @@ The reranker story is now:
 2. The new `...plus_new_3class_full.jsonl` file activates meaningful visual/nonvisual channels.
 3. With page-level supervision, the helper can substantially improve some true answer-bearing pages.
 4. The current linear fusion still struggles with identity-specific discrimination when multiple distractor portrait pages share the same generic cue.
-
