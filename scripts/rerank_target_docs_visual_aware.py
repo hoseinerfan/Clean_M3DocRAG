@@ -507,6 +507,8 @@ def compute_page_feature(
     doc_id: str,
     page_idx: int,
 ) -> PageFeature:
+    import torch
+
     score_matrix = page_emb @ query_emb.T
     full_best_scores, full_best_indices = score_matrix.max(dim=0)
     active_best_scores = full_best_scores[query_score_mask.to(full_best_scores.device)]
