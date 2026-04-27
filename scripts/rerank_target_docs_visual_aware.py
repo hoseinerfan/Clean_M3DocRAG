@@ -62,9 +62,23 @@ def parse_float_list(raw: str) -> list[float]:
 def load_gold_row_from_qid(args: argparse.Namespace) -> dict:
     from m3docrag.utils.paths import LOCAL_DATA_DIR
 
-    gold_path = Path(args.gold) if args.gold else (
-        Path(LOCAL_DATA_DIR) / args.data_name / "multimodalqa" / f"MMQA_{args.split}.jsonl"
-    )
+    if args.gold:
+        candidate_paths = [Path(args.gold)]
+    else:
+        candidate_paths = [
+            Path(LOCAL_DATA_DIR) / args.data_name / "multimodalqa" / f"MMQA_{args.split}.jsonl",
+            REPO_ROOT / "data" / args.data_name / "multimodalqa" / f"MMQA_{args.split}.jsonl",
+        ]
+
+    gold_path = next((path for path in candidate_paths if path.exists()), None)
+    if gold_path is None:
+        searched = "\n".join(str(path) for path in candidate_paths)
+        raise FileNotFoundError(
+            "Could not find MMQA gold file. Checked:\n"
+            f"{searched}\n"
+            "Pass --gold /path/to/MMQA_<split>.jsonl explicitly."
+        )
+
     with open(gold_path, "r", encoding="utf-8") as handle:
         for line in handle:
             obj = json.loads(line)
