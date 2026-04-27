@@ -166,6 +166,15 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="Optional gold doc_id override(s). If omitted in --qid mode, uses supporting_context doc_ids.",
     )
+    parser.add_argument(
+        "--gold-page-uid",
+        action="append",
+        default=[],
+        help=(
+            "Optional manual gold page_uid(s), e.g. <doc_id>_page<idx>. "
+            "When provided, summaries include page-level ranks and grid search optimizes page rank."
+        ),
+    )
 
     parser.add_argument("--weight-base", type=float, default=1.0)
     parser.add_argument("--weight-visual", type=float, default=0.0)
@@ -176,7 +185,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Search over weight combinations and pick the configuration that gives the "
-            "best first-gold-doc rank inside the target set."
+            "best first-gold doc/page rank inside the target set."
         ),
     )
     parser.add_argument("--grid-base-values", default="1.0")
@@ -679,18 +688,44 @@ def summarize_gold_doc_ranks(
     }
 
 
+def summarize_gold_page_ranks(
+    reranked_pages: list[dict],
+    gold_page_uids: list[str],
+) -> dict:
+    gold_page_uid_set = set(gold_page_uids)
+    gold_hits = [item for item in reranked_pages if item["page_uid"] in gold_page_uid_set]
+    first_gold_page_rank = gold_hits[0]["rank"] if gold_hits else None
+    return {
+        "gold_page_uids": gold_page_uids,
+        "first_gold_page_rank": first_gold_page_rank,
+        "gold_page_hits_at_4": sum(item["rank"] <= 4 for item in gold_hits),
+        "gold_page_hits_at_10": sum(item["rank"] <= 10 for item in gold_hits),
+        "gold_page_ranks": [
+            {
+                "page_uid": item["page_uid"],
+                "rank": item["rank"],
+                "doc_id": item["doc_id"],
+                "page_idx": item["page_idx"],
+                "fused_page_score": item["fused_page_score"],
+            }
+            for item in gold_hits
+        ],
+    }
+
+
 def grid_search_weights(
     *,
     page_features: list[PageFeature],
     baseline_doc_rank_map: dict[str, int],
     gold_doc_ids: list[str],
+    gold_page_uids: list[str],
     base_values: list[float],
     visual_values: list[float],
     non_visual_values: list[float],
     balance_values: list[float],
 ) -> tuple[WeightConfig, dict, list[dict]]:
-    if not gold_doc_ids:
-        raise ValueError("--grid-search needs gold doc ids. Use --qid or pass --gold-doc-id.")
+    if not gold_doc_ids and not gold_page_uids:
+        raise ValueError("--grid-search needs gold doc ids or gold page uids.")
 
     best_weights: WeightConfig | None = None
     best_summary: dict | None = None
@@ -710,22 +745,50 @@ def grid_search_weights(
             weights=weights,
             baseline_doc_rank_map=baseline_doc_rank_map,
         )
-        gold_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
-        first_gold_doc_rank = gold_summary["first_gold_doc_rank"]
-        rank_key = first_gold_doc_rank if first_gold_doc_rank is not None else BIG_RANK
-        objective = (
-            0 if rank_key <= 4 else 1,
-            rank_key,
-            -gold_summary["gold_doc_hits_at_4"],
-            -gold_summary["gold_doc_hits_at_10"],
-        )
-        record = {
-            "weights": asdict(weights),
-            "first_gold_doc_rank": first_gold_doc_rank,
-            "gold_doc_hits_at_4": gold_summary["gold_doc_hits_at_4"],
-            "gold_doc_hits_at_10": gold_summary["gold_doc_hits_at_10"],
-            "objective": objective,
-        }
+        gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids) if gold_doc_ids else None
+        gold_page_summary = summarize_gold_page_ranks(_reranked_pages, gold_page_uids) if gold_page_uids else None
+
+        if gold_page_summary is not None:
+            first_rank = gold_page_summary["first_gold_page_rank"]
+            hits_at_4 = gold_page_summary["gold_page_hits_at_4"]
+            hits_at_10 = gold_page_summary["gold_page_hits_at_10"]
+            rank_key = first_rank if first_rank is not None else BIG_RANK
+            objective = (
+                0 if rank_key <= 4 else 1,
+                rank_key,
+                -hits_at_4,
+                -hits_at_10,
+            )
+            record = {
+                "weights": asdict(weights),
+                "first_gold_page_rank": first_rank,
+                "gold_page_hits_at_4": hits_at_4,
+                "gold_page_hits_at_10": hits_at_10,
+                "objective": objective,
+            }
+            if gold_doc_summary is not None:
+                record["first_gold_doc_rank"] = gold_doc_summary["first_gold_doc_rank"]
+                record["gold_doc_hits_at_4"] = gold_doc_summary["gold_doc_hits_at_4"]
+                record["gold_doc_hits_at_10"] = gold_doc_summary["gold_doc_hits_at_10"]
+        else:
+            assert gold_doc_summary is not None
+            first_rank = gold_doc_summary["first_gold_doc_rank"]
+            hits_at_4 = gold_doc_summary["gold_doc_hits_at_4"]
+            hits_at_10 = gold_doc_summary["gold_doc_hits_at_10"]
+            rank_key = first_rank if first_rank is not None else BIG_RANK
+            objective = (
+                0 if rank_key <= 4 else 1,
+                rank_key,
+                -hits_at_4,
+                -hits_at_10,
+            )
+            record = {
+                "weights": asdict(weights),
+                "first_gold_doc_rank": first_rank,
+                "gold_doc_hits_at_4": hits_at_4,
+                "gold_doc_hits_at_10": hits_at_10,
+                "objective": objective,
+            }
         leaderboard.append(record)
 
         if best_summary is None or objective < tuple(best_summary["objective"]):
@@ -772,6 +835,7 @@ def main() -> None:
     from scripts.plot_page_query_token_heatmaps import clean_token_label
 
     query_text, gold_doc_ids = load_query_text_and_gold_doc_ids(args)
+    gold_page_uids = [str(value).strip() for value in args.gold_page_uid if str(value).strip()]
     candidate_doc_ids, explicit_page_uids, baseline_doc_rank_map = collect_candidate_sources(args)
     docid2embs = load_doc_embeddings_for_doc_ids(candidate_doc_ids, args.embedding_name)
     page_specs, page_meta = build_page_id_metadata(
@@ -842,6 +906,7 @@ def main() -> None:
             page_features=page_features,
             baseline_doc_rank_map=baseline_doc_rank_map,
             gold_doc_ids=gold_doc_ids,
+            gold_page_uids=gold_page_uids,
             base_values=parse_float_list(args.grid_base_values),
             visual_values=parse_float_list(args.grid_visual_values),
             non_visual_values=parse_float_list(args.grid_non_visual_values),
@@ -864,6 +929,7 @@ def main() -> None:
         baseline_doc_rank_map=baseline_doc_rank_map,
     )
     gold_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
+    gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
 
     summary = {
         "qid": args.qid,
@@ -888,6 +954,7 @@ def main() -> None:
             "leaderboard": grid_leaderboard,
         },
         "gold_summary": gold_summary,
+        "gold_page_summary": gold_page_summary,
         "top_reranked_docs": reranked_docs[: args.report_topn],
         "top_reranked_pages": reranked_pages[: args.report_topn],
     }
@@ -911,6 +978,8 @@ def main() -> None:
                 "grid_search": args.grid_search,
                 "candidate_doc_count": len(candidate_doc_ids),
                 "candidate_page_count": len(page_features),
+                "gold_doc_ids": gold_doc_ids,
+                "gold_page_uids": gold_page_uids,
             },
         )
         prediction_path = Path(args.output_prediction_json)
@@ -926,6 +995,10 @@ def main() -> None:
         print(f"gold_doc_ids: {gold_doc_ids}")
         print(f"first_gold_doc_rank: {gold_summary['first_gold_doc_rank']}")
         print(f"gold_doc_hits_at_4: {gold_summary['gold_doc_hits_at_4']}")
+    if gold_page_uids:
+        print(f"gold_page_uids: {gold_page_uids}")
+        print(f"first_gold_page_rank: {gold_page_summary['first_gold_page_rank']}")
+        print(f"gold_page_hits_at_4: {gold_page_summary['gold_page_hits_at_4']}")
     print(f"weights: {asdict(weights)}")
     print("top_reranked_docs:")
     for item in reranked_docs[: min(args.report_topn, 10)]:
