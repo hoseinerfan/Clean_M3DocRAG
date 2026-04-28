@@ -22,9 +22,11 @@ from scripts.rerank_target_docs_visual_aware import (
     build_rankings,
     clean_token_label,
     compute_page_feature,
+    grid_search_weights,
     load_patch_axis_classes_for_pages,
     load_splice_query_axis_classes,
     make_query_score_mask,
+    parse_float_list,
     resolve_model_path,
     summarize_gold_doc_ranks,
 )
@@ -91,6 +93,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-visual", type=float, default=1.0)
     parser.add_argument("--weight-non-visual", type=float, default=0.0)
     parser.add_argument("--weight-balance", type=float, default=8.0)
+    parser.add_argument(
+        "--grid-search",
+        action="store_true",
+        help="Run qid-specific grid search instead of using the fixed weights.",
+    )
+    parser.add_argument("--grid-base-values", default="1.0")
+    parser.add_argument("--grid-visual-values", default="0,0.25,0.5,1.0,2.0")
+    parser.add_argument("--grid-non-visual-values", default="0,0.25,0.5,1.0,2.0")
+    parser.add_argument("--grid-balance-values", default="0,0.25,0.5,1.0,2.0")
     parser.add_argument(
         "--max-qids",
         type=int,
@@ -226,12 +237,16 @@ def main() -> None:
         adapter_name_or_path=resolve_model_path(args.retrieval_adapter_model_name_or_path),
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    weights = WeightConfig(
+    fixed_weights = WeightConfig(
         base=args.weight_base,
         visual=args.weight_visual,
         non_visual=args.weight_non_visual,
         balance=args.weight_balance,
     )
+    grid_base_values = parse_float_list(args.grid_base_values)
+    grid_visual_values = parse_float_list(args.grid_visual_values)
+    grid_non_visual_values = parse_float_list(args.grid_non_visual_values)
+    grid_balance_values = parse_float_list(args.grid_balance_values)
 
     all_rows: list[dict] = []
     improved_doc = 0
@@ -307,6 +322,21 @@ def main() -> None:
                     )
                 )
 
+        if args.grid_search:
+            weights, best_grid_record, _grid_leaderboard = grid_search_weights(
+                page_features=page_features,
+                baseline_doc_rank_map=baseline_doc_rank_map,
+                gold_doc_ids=gold_doc_ids,
+                gold_page_uids=[],
+                base_values=grid_base_values,
+                visual_values=grid_visual_values,
+                non_visual_values=grid_non_visual_values,
+                balance_values=grid_balance_values,
+            )
+        else:
+            weights = fixed_weights
+            best_grid_record = None
+
         reranked_docs, reranked_pages = build_rankings(
             page_features=page_features,
             weights=weights,
@@ -344,6 +374,8 @@ def main() -> None:
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
             "weights": asdict(weights),
+            "grid_search_enabled": args.grid_search,
+            "grid_search_best": best_grid_record,
             "baseline_first_gold_doc_rank": baseline_first_gold_doc_rank,
             "baseline_first_gold_page_rank": baseline_first_gold_page_rank,
             "baseline_gold_page_hits_top10": baseline_page_hits[:10],
@@ -386,7 +418,12 @@ def main() -> None:
         "query_token_filter": args.query_token_filter,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
-        "weights": asdict(weights),
+        "grid_search_enabled": args.grid_search,
+        "fixed_weights": asdict(fixed_weights),
+        "grid_base_values": grid_base_values,
+        "grid_visual_values": grid_visual_values,
+        "grid_non_visual_values": grid_non_visual_values,
+        "grid_balance_values": grid_balance_values,
         "num_qids": len(all_rows),
         "baseline_top4_doc_count": baseline_top4_doc,
         "reranked_top4_doc_count": reranked_top4_doc,
