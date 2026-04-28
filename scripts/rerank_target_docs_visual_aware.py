@@ -764,7 +764,14 @@ def resolve_model_path(name_or_path: str) -> Path:
     local_candidate = Path(LOCAL_MODEL_DIR) / name_or_path
     if local_candidate.exists():
         return local_candidate
-    return candidate
+    raise FileNotFoundError(
+        "Could not resolve model path in offline mode. Checked:\n"
+        f"  explicit: {candidate}\n"
+        f"  LOCAL_MODEL_DIR: {local_candidate}\n"
+        "Set LOCAL_MODEL_DIR correctly or pass an explicit local path via "
+        "--retrieval_model_name_or_path /path/to/model and "
+        "--retrieval_adapter_model_name_or_path /path/to/adapter."
+    )
 
 
 def parse_string_list_file(path_str: str) -> list[str]:
