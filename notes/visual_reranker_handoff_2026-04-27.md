@@ -290,3 +290,248 @@ The reranker story is now:
 2. The new `...plus_new_3class_full.jsonl` file activates meaningful visual/nonvisual channels.
 3. With page-level supervision, the helper can substantially improve some true answer-bearing pages.
 4. The current linear fusion still struggles with identity-specific discrimination when multiple distractor portrait pages share the same generic cue.
+
+## Update: 2026-04-28
+
+This section supersedes the older "current best transfer config" discussion above.
+
+### Additional helper changes now on `main`
+
+More helper-only commits were added after the initial note:
+
+- `4f6b919` Add repo-local gold-file fallback
+- `21ba006` Add batch visual rerank runner
+- `c0c263a` Add qid-grid mode to the batch runner
+- `00e708f` Enforce offline-only model resolution
+- `f8320d2` Add repo/local fallback for embeddings
+- `eac3917` Remove stale plotting import from patch-label loading
+- `4e35acc` Force helper scripts to prefer local `src/`
+- `2741f3c` Add query decomposition rerank helper
+- `8697a62` Add retrieval-side token-filter control to decomposition helper
+- `49bc706` Fix decomposition helper retrieval call
+- `2bf9f07` Set the current preferred defaults
+
+For HPC runs, the stable environment setup is:
+
+```bash
+export PYTHONPATH=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/src${PYTHONPATH:+:$PYTHONPATH}
+export LOCAL_MODEL_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/model
+export LOCAL_EMBEDDINGS_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/embeddings
+```
+
+### Current preferred default
+
+After the batch comparisons below, the preferred default setting is:
+
+- `query_token_filter = full`
+- `weight_base = 1.0`
+- `weight_visual = 1.0`
+- `weight_non_visual = 0.0`
+- `weight_balance = 8.0`
+
+This is now the default in both:
+
+- `scripts/rerank_target_docs_visual_aware.py`
+- `scripts/run_visual_rerank_batch.py`
+
+### Batch result on the 83 ImageListQ failures
+
+Input set:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/rag_dev_ret4/ret4_imagelistq_failures_no_gold_doc_in_top4.jsonl`
+
+#### Fixed config on `drop_pad_like` top-1000 pool
+
+Summary:
+
+- `num_qids = 83`
+- `baseline_top4_doc_count = 7`
+- `reranked_top4_doc_count = 21`
+- `improved_doc_rank_count = 58`
+- `worsened_doc_rank_count = 13`
+- `unchanged_doc_rank_count = 4`
+- `baseline_doc_rank_median = 86.0`
+- `reranked_doc_rank_median = 14.0`
+- `baseline_page_rank_median = 96.0`
+- `reranked_page_rank_median = 18.0`
+
+Output files:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelist_ret4_no_gold_top4_rerank_fixed_balance8.jsonl`
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelist_ret4_no_gold_top4_rerank_fixed_balance8.summary.json`
+
+#### Fixed config on `full` top-1000 pool
+
+Summary:
+
+- `num_qids = 83`
+- `improved_doc_rank_count = 54`
+- `reranked_top4_doc_count = 32`
+
+Output files:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelist_ret4_no_gold_top4_rerank_full_balance8.jsonl`
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelist_ret4_no_gold_top4_rerank_full_balance8.summary.json`
+
+#### Head-to-head: `full` vs `drop_pad_like`
+
+Per-qid comparison:
+
+- `full_better_count = 32`
+- `drop_better_count = 28`
+- `tie_count = 23`
+- `both_top4 = 19`
+- `full_top4_only = 13`
+- `drop_top4_only = 2`
+
+Average gold-doc rank on the overlap where both sides are non-`None`:
+
+- `avg_drop_rank = 56.86`
+- `avg_full_rank = 45.96`
+
+Conclusion:
+
+- `full` is the better default overall
+- `drop_pad_like` improves slightly more qids in the aggregate count
+- but `full` produces many more top-4 wins, which is the more important metric here
+
+### Worsened-13 qids under qid-specific grid search
+
+The 13 qids that got worse under the fixed `drop_pad_like` setting were rerun with qid-specific grid search.
+
+Grid summary:
+
+- `num_qids = 13`
+- `improved_doc_rank_count = 3`
+- `reranked_top4_doc_count = 0`
+
+Compared against the bad fixed-config result:
+
+- `rescued_vs_fixed = 6`
+- `rescued_to_baseline_or_better = 3`
+- `top4_after_grid = 0`
+- `still_worse_than_baseline = 10`
+
+Interpretation:
+
+- weight tuning helps some of the 13 relative to the fixed bad run
+- but most of these failures are not recoverable by weight search alone
+- they are likely feature / labeling / candidate-pool problems, not just a bad global weight choice
+
+### LGBT qid update: `e783cba0b3df36372d11823e378e5437`
+
+Question:
+
+- `Which completely bald person who wears thick glasses is among the members of LGBT billionaires?`
+
+Gold doc:
+
+- `d57e56eff064047af5a6ef074a570956`
+
+#### Natural `full` top-1000 pool
+
+Using the natural `ret1000 full` baseline:
+
+- `first_gold_doc_rank = None`
+- `n_gold_page_hits = 0`
+
+So this is a recall failure under the default first-stage pool.
+
+#### Forced-page tests under the new default family
+
+Injecting gold pages into the `full` top-1000 pool and reranking with the current default family did not rescue the qid:
+
+- forced `page0` clean rerun:
+  - `first_gold_doc_rank = 77`
+- qid-specific grid search with forced `page0`:
+  - `first_gold_doc_rank = 215`
+  - `first_gold_page_rank = 252`
+  - best weights:
+    - `base = 1.0`
+    - `visual = 4.0`
+    - `non_visual = 0.0`
+    - `balance = 8.0`
+
+Interpretation:
+
+- even when the right page is forced into the pool, the current visual-aware family does not recover this qid
+
+#### Query decomposition helper results
+
+Dense-only decomposition with:
+
+- original full question
+- `LGBT billionaires`
+- `bald person thick glasses`
+- `LGBT billionaire bald glasses`
+
+did not surface the gold doc at all.
+
+Semantic-only retrieval-side decomposition did better. Per-subquery best gold-doc hits:
+
+- original question:
+  - rank `502`
+- `LGBT billionaires`:
+  - rank `37`
+- `bald person thick glasses`:
+  - rank `311`
+- `LGBT billionaire bald glasses`:
+  - no hit
+
+The best semantic subquery is clearly:
+
+- `LGBT billionaires`
+
+#### RRF over the four semantic-only subquery pools
+
+With `retrieval_query_token_filter = semantic_only`, `top-pages-per-query = 1000`, and RRF merge:
+
+- `candidate_doc_count = 1620`
+- `candidate_page_count = 3481`
+- `merged_first_gold_doc_rank = 168`
+- `reranked_first_gold_doc_rank = 723`
+
+Interpretation:
+
+- semantic decomposition improves recall
+- but the current visual-aware reranker is actively harmful on that merged pool
+
+#### Single-subquery semantic pool: `LGBT billionaires`
+
+Using only the semantic subquery:
+
+- `merged_first_gold_doc_rank = 31`
+
+Then comparing rerankers on the exact same pool:
+
+- current default visual-aware reranker:
+  - `reranked_first_gold_doc_rank = 209`
+- base-only rerank:
+  - `reranked_first_gold_doc_rank = 9`
+
+This is the strongest current result for the LGBT qid.
+
+Interpretation:
+
+- semantic/category retrieval is the right direction for this qid
+- once the right semantic pool is found, plain base-only reranking helps a lot
+- the current visual-aware extras are catastrophically harmful on that pool
+
+### Practical takeaway
+
+There is now a useful conditional narrative:
+
+1. For broad ImageListQ recovery, use:
+   - `query_token_filter = full`
+   - `base = 1.0`
+   - `visual = 1.0`
+   - `non_visual = 0.0`
+   - `balance = 8.0`
+2. For hard semantic/category-heavy cases like the LGBT qid:
+   - semantic subquery retrieval can recover the right doc neighborhood
+   - base-only reranking is safer than the current visual-aware fusion
+3. The next likely improvement is multi-source retrieval:
+   - semantic/category retrieval source
+   - dense full retrieval source
+   - possibly later sparse/title/entity retrieval
+   - followed by conditional reranking rather than one universal fusion
