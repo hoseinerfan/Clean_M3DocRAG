@@ -462,7 +462,7 @@ def main() -> None:
             query=query_text,
             index=index,
             token2pageuid=token2pageuid,
-            all_token_embeddings=all_token_embeddings_np,
+            all_token_embeddings_np=all_token_embeddings_np,
             n_return_pages=args.top_pages_per_query,
             query_token_filter=args.retrieval_query_token_filter,
             ignore_pad_scores_in_final_ranking=False,
