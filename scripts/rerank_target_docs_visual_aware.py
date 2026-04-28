@@ -921,7 +921,20 @@ def load_doc_embeddings_for_doc_ids(
 
     from m3docrag.utils.paths import LOCAL_EMBEDDINGS_DIR
 
-    emb_dir = Path(LOCAL_EMBEDDINGS_DIR) / embedding_name
+    candidate_dirs = [
+        Path(LOCAL_EMBEDDINGS_DIR) / embedding_name,
+        REPO_ROOT / "embeddings" / embedding_name,
+    ]
+    emb_dir = next((path for path in candidate_dirs if path.exists()), None)
+    if emb_dir is None:
+        searched = "\n".join(f"  {path}" for path in candidate_dirs)
+        raise FileNotFoundError(
+            "Could not resolve embedding directory in offline mode. Checked:\n"
+            f"{searched}\n"
+            "Set LOCAL_EMBEDDINGS_DIR correctly or place embeddings under "
+            "REPO_ROOT/embeddings/<embedding_name>."
+        )
+
     docid2embs: dict[str, torch.Tensor] = {}
     missing: list[str] = []
 
