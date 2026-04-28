@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(1, str(REPO_ROOT))
 
 import faiss
+import numpy as np
 import torch
 
 from m3docrag.datasets.m3_docvqa import M3DocVQADataset
@@ -71,6 +72,12 @@ def parse_args() -> argparse.Namespace:
         default="full",
         choices=QUERY_TOKEN_FILTER_CHOICES,
         help="Reranker-side query token filter for the original question.",
+    )
+    parser.add_argument(
+        "--retrieval_query_token_filter",
+        default="full",
+        choices=QUERY_TOKEN_FILTER_CHOICES,
+        help="Retrieval-side query token filter used for the original query and each subquery in FAISS search.",
     )
     parser.add_argument(
         "--ignore-pad-scores-in-final-ranking",
@@ -263,6 +270,65 @@ def build_flattened_index_inputs(docid2embs: dict[str, torch.Tensor]) -> tuple[l
     return token2pageuid, torch.cat(all_token_embeddings, dim=0)
 
 
+def retrieve_pages_from_index_with_filter(
+    *,
+    retrieval_model: ColPaliRetrievalModel,
+    query: str,
+    index,
+    token2pageuid: list[str],
+    all_token_embeddings_np: np.ndarray,
+    n_return_pages: int,
+    query_token_filter: str,
+    ignore_pad_scores_in_final_ranking: bool,
+) -> list[tuple[str, int, float]]:
+    query_meta = retrieval_model.encode_query_with_metadata(
+        query=query,
+        to_cpu=True,
+        query_token_filter=query_token_filter,
+    )
+    query_emb = query_meta["embeddings"].float().numpy().astype(np.float32)
+    raw_tokens = query_meta.get("raw_tokens", [])
+    score_active_query_token_mask = None
+    if ignore_pad_scores_in_final_ranking:
+        score_active_query_token_mask = [token != "<pad>" for token in raw_tokens]
+        if score_active_query_token_mask and not any(score_active_query_token_mask):
+            raise ValueError(
+                "Ignoring PAD scores in final ranking removed every scoring query token."
+            )
+
+    D, I = index.search(query_emb, n_return_pages)
+
+    final_page2scores: dict[str, float] = {}
+    for q_idx, query_token_emb in enumerate(query_emb):
+        current_q_page2scores: dict[str, float] = {}
+        for nn_idx in range(n_return_pages):
+            found_nearest_doc_token_idx = int(I[q_idx, nn_idx])
+            page_uid = token2pageuid[found_nearest_doc_token_idx]
+            doc_token_emb = all_token_embeddings_np[found_nearest_doc_token_idx]
+            score = float((query_token_emb * doc_token_emb).sum())
+            if page_uid not in current_q_page2scores:
+                current_q_page2scores[page_uid] = score
+            else:
+                current_q_page2scores[page_uid] = max(current_q_page2scores[page_uid], score)
+
+        if score_active_query_token_mask is not None and not score_active_query_token_mask[q_idx]:
+            continue
+
+        for page_uid, score in current_q_page2scores.items():
+            if page_uid in final_page2scores:
+                final_page2scores[page_uid] += score
+            else:
+                final_page2scores[page_uid] = score
+
+    sorted_pages = sorted(final_page2scores.items(), key=lambda x: x[1], reverse=True)
+    top_k_pages = sorted_pages[:n_return_pages]
+
+    return [
+        (page_uid.split("_page")[0], int(page_uid.split("_page")[-1]), score)
+        for page_uid, score in top_k_pages
+    ]
+
+
 def merge_page_rows(
     per_query_rows: dict[str, list[tuple[str, int, float]]],
     *,
@@ -391,15 +457,15 @@ def main() -> None:
 
     per_query_rows: dict[str, list[tuple[str, int, float]]] = {}
     for query_label, query_text in retrieval_queries:
-        rows = rag_model.retrieve_pages_from_docs(
+        rows = retrieve_pages_from_index_with_filter(
+            retrieval_model=retrieval_model,
             query=query_text,
-            docid2embs=docid2embs,
             index=index,
             token2pageuid=token2pageuid,
             all_token_embeddings=all_token_embeddings_np,
             n_return_pages=args.top_pages_per_query,
+            query_token_filter=args.retrieval_query_token_filter,
             ignore_pad_scores_in_final_ranking=False,
-            show_progress=False,
         )
         per_query_rows[query_label] = rows
 
@@ -517,6 +583,7 @@ def main() -> None:
         "embedding_name": args.embedding_name,
         "faiss_index_type": args.faiss_index_type,
         "query_token_filter": args.query_token_filter,
+        "retrieval_query_token_filter": args.retrieval_query_token_filter,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "candidate_doc_count": len(merged_candidate_doc_ids),
         "candidate_page_count": len(page_features),
@@ -577,6 +644,7 @@ def main() -> None:
         prediction_path.write_text(json.dumps(prediction_payload, indent=2) + "\n", encoding="utf-8")
 
     print(f"query_token_filter: {args.query_token_filter}")
+    print(f"retrieval_query_token_filter: {args.retrieval_query_token_filter}")
     print(f"merge_method: {args.merge_method}")
     print(f"candidate_doc_count: {len(merged_candidate_doc_ids)}")
     print(f"candidate_page_count: {len(page_features)}")
