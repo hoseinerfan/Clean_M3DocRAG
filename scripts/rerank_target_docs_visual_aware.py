@@ -725,9 +725,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--weight-base", type=float, default=1.0)
-    parser.add_argument("--weight-visual", type=float, default=0.0)
+    parser.add_argument("--weight-visual", type=float, default=1.0)
     parser.add_argument("--weight-non-visual", type=float, default=0.0)
-    parser.add_argument("--weight-balance", type=float, default=0.0)
+    parser.add_argument("--weight-balance", type=float, default=8.0)
     parser.add_argument(
         "--grid-search",
         action="store_true",
