@@ -1009,8 +1009,6 @@ def load_patch_axis_classes_for_pages(
     labels_jsonl: str,
     page_meta: dict[str, dict],
 ) -> dict[str, list[str]]:
-    from scripts.plot_page_query_patch_dot_grid import classify_patch_from_splice_row
-
     page_id_to_uid = {meta["page_id"]: page_uid for page_uid, meta in page_meta.items()}
     classes_by_uid = {
         page_uid: ["unknown"] * meta["n_spatial_patches"]
