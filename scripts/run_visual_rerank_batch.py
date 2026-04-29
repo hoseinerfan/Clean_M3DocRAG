@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(1, str(REPO_ROOT))
 
 from scripts.rerank_target_docs_visual_aware import (
+    BASE_SCORE_SOURCE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
     WeightConfig,
     axis_class_counts,
@@ -61,6 +62,16 @@ def parse_args() -> argparse.Namespace:
         "--query_token_filter",
         default="full",
         choices=QUERY_TOKEN_FILTER_CHOICES,
+    )
+    parser.add_argument(
+        "--base-score-source",
+        default="exact_page_maxsim",
+        choices=BASE_SCORE_SOURCE_CHOICES,
+        help=(
+            "Source used for the base term in the fusion. "
+            "'exact_page_maxsim' recomputes page-local MaxSim on the fixed pool; "
+            "'baseline_pred' reuses the page score stored in --baseline-pred."
+        ),
     )
     parser.add_argument(
         "--ignore-pad-scores-in-final-ranking",
@@ -168,16 +179,18 @@ def load_baseline_payload(path: Path, qids: set[str]) -> dict[str, dict]:
 def build_baseline_pool(
     rows: list[list[object]],
     top_pages: int,
-) -> tuple[list[str], list[str], dict[str, int], list[str]]:
+) -> tuple[list[str], list[str], dict[str, int], list[str], dict[str, float]]:
     baseline_page_uids: list[str] = []
     candidate_doc_ids: list[str] = []
     baseline_doc_rank_map: dict[str, int] = {}
+    baseline_page_score_map: dict[str, float] = {}
     seen_docs: set[str] = set()
 
     for row_rank, row in enumerate(rows, start=1):
         doc_id = str(row[0]).strip()
         page_idx = int(row[1])
         page_uid = f"{doc_id}_page{page_idx}"
+        baseline_page_score_map[page_uid] = float(row[2])
         if row_rank <= top_pages:
             baseline_page_uids.append(page_uid)
             if doc_id not in seen_docs:
@@ -186,7 +199,13 @@ def build_baseline_pool(
         if doc_id and doc_id not in baseline_doc_rank_map:
             baseline_doc_rank_map[doc_id] = len(baseline_doc_rank_map) + 1
 
-    return candidate_doc_ids, baseline_page_uids, baseline_doc_rank_map, [str(x.split("_page")[0]) for x in baseline_page_uids]
+    return (
+        candidate_doc_ids,
+        baseline_page_uids,
+        baseline_doc_rank_map,
+        [str(x.split("_page")[0]) for x in baseline_page_uids],
+        baseline_page_score_map,
+    )
 
 
 def baseline_gold_page_hits(
@@ -264,7 +283,7 @@ def main() -> None:
         gold_doc_id_set = set(gold_doc_ids)
 
         baseline_rows = baseline_payload[qid].get("page_retrieval_results", [])
-        candidate_doc_ids, baseline_page_uids, baseline_doc_rank_map, _ = build_baseline_pool(
+        candidate_doc_ids, baseline_page_uids, baseline_doc_rank_map, _, baseline_page_score_map = build_baseline_pool(
             baseline_rows,
             args.from_baseline_top_pages,
         )
@@ -322,6 +341,11 @@ def main() -> None:
                         page_token_classes=page_token_classes,
                         doc_id=doc_id,
                         page_idx=page_idx,
+                        base_score_override=(
+                            baseline_page_score_map.get(page_uid)
+                            if args.base_score_source == "baseline_pred"
+                            else None
+                        ),
                     )
                 )
 
@@ -376,6 +400,7 @@ def main() -> None:
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
+            "base_score_source": args.base_score_source,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
@@ -419,6 +444,7 @@ def main() -> None:
         "from_baseline_top_pages": args.from_baseline_top_pages,
         "embedding_name": args.embedding_name,
         "query_token_filter": args.query_token_filter,
+        "base_score_source": args.base_score_source,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
         "grid_search_enabled": args.grid_search,

@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(1, str(REPO_ROOT))
 
 QUERY_TOKEN_FILTER_CHOICES = ("full", "drop_pad_like", "semantic_only")
+BASE_SCORE_SOURCE_CHOICES = ("exact_page_maxsim", "baseline_pred")
 BIG_RANK = 10**12
 
 
@@ -635,6 +636,16 @@ def parse_args() -> argparse.Namespace:
         help="Keep PAD tokens in the encoded query but exclude them from the final page-score sum.",
     )
     parser.add_argument(
+        "--base-score-source",
+        default="exact_page_maxsim",
+        choices=BASE_SCORE_SOURCE_CHOICES,
+        help=(
+            "Source used for the base term in the fusion. "
+            "'exact_page_maxsim' recomputes page-local MaxSim on the fixed candidate pool. "
+            "'baseline_pred' reuses the page score already stored in --baseline-pred."
+        ),
+    )
+    parser.add_argument(
         "--nonspatial-token-position",
         default="suffix",
         choices=["prefix", "suffix"],
@@ -810,13 +821,13 @@ def load_baseline_candidate_pool(
     qid: str | None,
     top_unique_docs: int,
     top_pages: int,
-) -> tuple[list[str], list[str], dict[str, int]]:
+) -> tuple[list[str], list[str], dict[str, int], dict[str, float]]:
     if not pred_path:
-        return [], [], {}
+        return [], [], {}, {}
     if qid is None:
         raise ValueError("--baseline-pred requires --qid so the helper can select one query.")
     if top_unique_docs <= 0 and top_pages <= 0:
-        return [], [], {}
+        return [], [], {}, {}
 
     payload = json.loads(Path(pred_path).read_text(encoding="utf-8"))
     if qid not in payload:
@@ -826,10 +837,12 @@ def load_baseline_candidate_pool(
     baseline_page_uids: list[str] = []
     ordered_doc_ids: list[str] = []
     doc_rank_map: dict[str, int] = {}
+    page_score_map: dict[str, float] = {}
     for row_idx, row in enumerate(rows, start=1):
         doc_id = str(row[0]).strip()
         page_idx = int(row[1])
         page_uid = f"{doc_id}_page{page_idx}"
+        page_score_map[page_uid] = float(row[2])
         if top_pages > 0 and row_idx <= top_pages:
             baseline_page_uids.append(page_uid)
         if not doc_id or doc_id in doc_rank_map:
@@ -838,7 +851,12 @@ def load_baseline_candidate_pool(
         ordered_doc_ids.append(doc_id)
         if top_unique_docs > 0 and len(ordered_doc_ids) >= top_unique_docs and (top_pages <= 0 or row_idx >= top_pages):
             break
-    return ordered_doc_ids[:top_unique_docs] if top_unique_docs > 0 else [], baseline_page_uids, doc_rank_map
+    return (
+        ordered_doc_ids[:top_unique_docs] if top_unique_docs > 0 else [],
+        baseline_page_uids,
+        doc_rank_map,
+        page_score_map,
+    )
 
 
 def apply_page_pool_replacements(
@@ -863,7 +881,7 @@ def apply_page_pool_replacements(
     return page_uids
 
 
-def collect_candidate_sources(args: argparse.Namespace) -> tuple[list[str], set[str], dict[str, int]]:
+def collect_candidate_sources(args: argparse.Namespace) -> tuple[list[str], set[str], dict[str, int], dict[str, float]]:
     doc_ids: list[str] = []
     explicit_page_uids: set[str] = set()
 
@@ -888,7 +906,7 @@ def collect_candidate_sources(args: argparse.Namespace) -> tuple[list[str], set[
             explicit_page_uids.add(value)
             add_doc_id(value.split("_page")[0])
 
-    baseline_doc_ids, baseline_page_uids, baseline_doc_rank_map = load_baseline_candidate_pool(
+    baseline_doc_ids, baseline_page_uids, baseline_doc_rank_map, baseline_page_score_map = load_baseline_candidate_pool(
         pred_path=args.baseline_pred,
         qid=args.qid,
         top_unique_docs=args.from_baseline_top_unique_docs,
@@ -912,7 +930,7 @@ def collect_candidate_sources(args: argparse.Namespace) -> tuple[list[str], set[
             "or --baseline-pred with --from-baseline-top-unique-docs / --from-baseline-top-pages."
         )
 
-    return doc_ids, explicit_page_uids, baseline_doc_rank_map
+    return doc_ids, explicit_page_uids, baseline_doc_rank_map, baseline_page_score_map
 
 
 def load_doc_embeddings_for_doc_ids(
@@ -1077,13 +1095,15 @@ def compute_page_feature(
     page_token_classes: list[str],
     doc_id: str,
     page_idx: int,
+    base_score_override: float | None = None,
 ) -> PageFeature:
     import torch
 
     score_matrix = page_emb @ query_emb.T
     full_best_scores, full_best_indices = score_matrix.max(dim=0)
     active_best_scores = full_best_scores[query_score_mask.to(full_best_scores.device)]
-    base_page_score = float(active_best_scores.sum().item())
+    exact_base_page_score = float(active_best_scores.sum().item())
+    base_page_score = exact_base_page_score if base_score_override is None else float(base_score_override)
 
     visual_query_indices = [
         idx for idx, axis_class in enumerate(query_axis_classes)
@@ -1396,7 +1416,7 @@ def main() -> None:
 
     query_text, gold_doc_ids = load_query_text_and_gold_doc_ids(args)
     gold_page_uids = [str(value).strip() for value in args.gold_page_uid if str(value).strip()]
-    candidate_doc_ids, explicit_page_uids, baseline_doc_rank_map = collect_candidate_sources(args)
+    candidate_doc_ids, explicit_page_uids, baseline_doc_rank_map, baseline_page_score_map = collect_candidate_sources(args)
     docid2embs = load_doc_embeddings_for_doc_ids(candidate_doc_ids, args.embedding_name)
     page_specs, page_meta = build_page_id_metadata(
         docid2embs=docid2embs,
@@ -1455,6 +1475,11 @@ def main() -> None:
                     page_token_classes=page_token_classes,
                     doc_id=doc_id,
                     page_idx=page_idx,
+                    base_score_override=(
+                        baseline_page_score_map.get(page_uid)
+                        if args.base_score_source == "baseline_pred"
+                        else None
+                    ),
                 )
             )
 
@@ -1496,6 +1521,7 @@ def main() -> None:
         "query": query_text,
         "embedding_name": args.embedding_name,
         "query_token_filter": args.query_token_filter,
+        "base_score_source": args.base_score_source,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
@@ -1532,6 +1558,7 @@ def main() -> None:
             metadata={
                 "weights": asdict(weights),
                 "query_token_filter": args.query_token_filter,
+                "base_score_source": args.base_score_source,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
                 "patch_label_path": args.splice_patch_labels_jsonl,
@@ -1547,6 +1574,7 @@ def main() -> None:
         prediction_path.write_text(json.dumps(prediction_payload, indent=2) + "\n", encoding="utf-8")
 
     print(f"query_token_filter: {args.query_token_filter}")
+    print(f"base_score_source: {args.base_score_source}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")
     print(f"candidate_page_count: {len(page_features)}")
