@@ -14,6 +14,7 @@ from accelerate import Accelerator
 from m3docrag.datasets.m3_docvqa import M3DocVQADataset
 from m3docrag.rag import MultimodalRAGModel
 from m3docrag.retrieval import ColPaliRetrievalModel
+from m3docrag.retrieval.colpali import QUERY_TOKEN_FILTER_CHOICES
 from m3docrag.utils.distributed import supports_flash_attention
 from m3docrag.utils.paths import LOCAL_DATA_DIR, LOCAL_EMBEDDINGS_DIR, LOCAL_MODEL_DIR
 from m3docrag.utils.prompts import short_answer_template
@@ -45,9 +46,32 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--bits", type=int, default=16)
     parser.add_argument("--n_retrieval_pages", type=int, default=4)
     parser.add_argument(
+        "--query_token_filter",
+        default="full",
+        choices=QUERY_TOKEN_FILTER_CHOICES,
+        help="Query-token filter used for the final scoring/reranking stage.",
+    )
+    parser.add_argument(
         "--ignore-pad-scores-in-final-ranking",
         action="store_true",
         help="Keep PAD tokens in ANN search but exclude their scores from the final page-score sum used for reranking.",
+    )
+    parser.add_argument(
+        "--candidate_n_pages",
+        type=int,
+        help="Optional two-stage candidate pool size. If set, retrieve this many candidate pages first, then rerank them with the final query-token scoring config.",
+    )
+    parser.add_argument(
+        "--candidate_query_token_filter",
+        default="full",
+        choices=QUERY_TOKEN_FILTER_CHOICES,
+        help="Query-token filter used only for two-stage candidate generation.",
+    )
+    parser.add_argument(
+        "--candidate_rerank_batch_size",
+        type=int,
+        default=128,
+        help="Batch size for exact reranking over candidate pages in two-stage mode.",
     )
     parser.add_argument("--retrieval_only", action="store_true")
     parser.add_argument("--output", help="Optional JSON output path")
@@ -181,7 +205,11 @@ def main() -> None:
         token2pageuid=token2pageuid,
         all_token_embeddings=all_token_embeddings_np,
         n_return_pages=args.n_retrieval_pages,
+        query_token_filter=args.query_token_filter,
         ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
+        candidate_n_pages=args.candidate_n_pages,
+        candidate_query_token_filter=args.candidate_query_token_filter,
+        candidate_rerank_batch_size=args.candidate_rerank_batch_size,
         show_progress=True,
     )
 
@@ -193,7 +221,11 @@ def main() -> None:
         "embedding_name": args.embedding_name,
         "faiss_index_type": args.faiss_index_type,
         "n_retrieval_pages": args.n_retrieval_pages,
+        "query_token_filter": args.query_token_filter,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
+        "candidate_n_pages": args.candidate_n_pages,
+        "candidate_query_token_filter": args.candidate_query_token_filter,
+        "candidate_rerank_batch_size": args.candidate_rerank_batch_size,
         "retrieval_only": args.retrieval_only,
         "page_retrieval_results": retrieval_results,
     }
