@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.rerank_target_docs_visual_aware import (
     APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
+    APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES,
     BASE_SCORE_SOURCE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
     WeightConfig,
@@ -100,6 +101,25 @@ def parse_args() -> argparse.Namespace:
             "approx_page_maxsim_topk mode. 'query_mean' is the original fast mean-query scorer; "
             "'query_token_max' uses per-page-token max similarity over query tokens and is usually "
             "stronger but less efficient."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-selector",
+        default="global_topk",
+        choices=APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES,
+        help=(
+            "Token-selection strategy used before top-K approximate MaxSim pruning. "
+            "'global_topk' is the current global-only selection. "
+            "'spatial_quadrant_mix' reserves part of the token budget across page quadrants."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-spatial-reserve",
+        type=int,
+        default=64,
+        help=(
+            "When --approx-base-page-token-selector=spatial_quadrant_mix, reserve this many "
+            "token slots across spatial quadrants before filling the rest globally."
         ),
     )
     parser.add_argument(
@@ -307,6 +327,22 @@ def main() -> None:
             "--approx-base-page-token-scorer is only valid with "
             "--base-score-source=approx_page_maxsim_topk or two_stage_page_maxsim."
         )
+    if (
+        args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
+        and args.approx_base_page_token_selector != "global_topk"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-selector is only valid with "
+            "--base-score-source=approx_page_maxsim_topk or two_stage_page_maxsim."
+        )
+    if (
+        args.approx_base_page_token_selector != "spatial_quadrant_mix"
+        and args.approx_base_page_token_spatial_reserve != 64
+    ):
+        raise ValueError(
+            "--approx-base-page-token-spatial-reserve is only valid with "
+            "--approx-base-page-token-selector=spatial_quadrant_mix."
+        )
     if args.base_score_source == "two_stage_page_maxsim" and args.two_stage_exact_top_pages <= 0:
         raise ValueError(
             "--base-score-source=two_stage_page_maxsim requires "
@@ -455,6 +491,8 @@ def main() -> None:
                                     else 0
                                 ),
                                 approx_page_token_scorer=args.approx_base_page_token_scorer,
+                                approx_page_token_selector=args.approx_base_page_token_selector,
+                                approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
                             )
                         )
                     else:
@@ -542,6 +580,8 @@ def main() -> None:
             "base_score_source": args.base_score_source,
             "approx_base_page_token_topk": args.approx_base_page_token_topk,
             "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+            "approx_base_page_token_selector": args.approx_base_page_token_selector,
+            "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
@@ -589,6 +629,8 @@ def main() -> None:
         "base_score_source": args.base_score_source,
         "approx_base_page_token_topk": args.approx_base_page_token_topk,
         "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+        "approx_base_page_token_selector": args.approx_base_page_token_selector,
+        "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
