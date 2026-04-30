@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(1, str(REPO_ROOT))
 
 from scripts.rerank_target_docs_visual_aware import (
+    APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
     BASE_SCORE_SOURCE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
     WeightConfig,
@@ -85,6 +86,17 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Top-K page tokens kept for query-guided pruning when "
             "--base-score-source=approx_page_maxsim_topk in base-only mode."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-scorer",
+        default="query_mean",
+        choices=APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
+        help=(
+            "Coarse scorer used to select page tokens before top-K pruning in "
+            "approx_page_maxsim_topk mode. 'query_mean' is the original fast mean-query scorer; "
+            "'query_token_max' uses per-page-token max similarity over query tokens and is usually "
+            "stronger but less efficient."
         ),
     )
     parser.add_argument(
@@ -270,6 +282,14 @@ def main() -> None:
             "--approx-base-page-token-topk is only valid with "
             "--base-score-source=approx_page_maxsim_topk."
         )
+    if (
+        args.base_score_source != "approx_page_maxsim_topk"
+        and args.approx_base_page_token_scorer != "query_mean"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-scorer is only valid with "
+            "--base-score-source=approx_page_maxsim_topk."
+        )
 
     fixed_weights = WeightConfig(
         base=args.weight_base,
@@ -400,6 +420,7 @@ def main() -> None:
                                     if args.base_score_source == "approx_page_maxsim_topk"
                                     else 0
                                 ),
+                                approx_page_token_scorer=args.approx_base_page_token_scorer,
                             )
                         )
                     else:
@@ -477,6 +498,7 @@ def main() -> None:
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
             "base_score_source": args.base_score_source,
             "approx_base_page_token_topk": args.approx_base_page_token_topk,
+            "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
@@ -522,6 +544,7 @@ def main() -> None:
         "query_token_filter": args.query_token_filter,
         "base_score_source": args.base_score_source,
         "approx_base_page_token_topk": args.approx_base_page_token_topk,
+        "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
         "grid_search_enabled": args.grid_search,

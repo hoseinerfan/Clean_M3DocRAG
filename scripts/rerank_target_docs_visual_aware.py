@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 QUERY_TOKEN_FILTER_CHOICES = ("full", "drop_pad_like", "semantic_only")
 BASE_SCORE_SOURCE_CHOICES = ("exact_page_maxsim", "baseline_pred", "approx_page_maxsim_topk")
+APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = ("query_mean", "query_token_max")
 BIG_RANK = 10**12
 
 
@@ -86,11 +87,27 @@ def make_base_only_page_feature(
     )
 
 
+def compute_coarse_page_token_scores(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    approx_page_token_scorer: str,
+) -> torch.Tensor:
+    if approx_page_token_scorer == "query_mean":
+        coarse_query = query_emb.mean(dim=0)
+        return page_emb @ coarse_query
+    if approx_page_token_scorer == "query_token_max":
+        score_matrix = page_emb @ query_emb.T
+        return score_matrix.max(dim=1).values
+    raise ValueError(f"Unsupported approx_page_token_scorer: {approx_page_token_scorer!r}")
+
+
 def maybe_prune_page_tokens_for_base_only(
     *,
     page_emb: torch.Tensor,
     query_emb: torch.Tensor,
     approx_page_token_topk: int,
+    approx_page_token_scorer: str,
 ) -> torch.Tensor:
     import torch
 
@@ -99,8 +116,11 @@ def maybe_prune_page_tokens_for_base_only(
     topk = min(int(approx_page_token_topk), int(page_emb.shape[0]))
     if topk >= int(page_emb.shape[0]):
         return page_emb
-    coarse_query = query_emb.mean(dim=0)
-    coarse_scores = page_emb @ coarse_query
+    coarse_scores = compute_coarse_page_token_scores(
+        page_emb=page_emb,
+        query_emb=query_emb,
+        approx_page_token_scorer=approx_page_token_scorer,
+    )
     top_indices = torch.topk(coarse_scores, k=topk, largest=True, sorted=False).indices
     return page_emb.index_select(0, top_indices)
 
@@ -711,6 +731,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-scorer",
+        default="query_mean",
+        choices=APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
+        help=(
+            "Coarse scorer used to select page tokens before top-K pruning in "
+            "approx_page_maxsim_topk mode. 'query_mean' is the original fast mean-query scorer; "
+            "'query_token_max' uses per-page-token max similarity over query tokens and is usually "
+            "stronger but less efficient."
+        ),
+    )
+    parser.add_argument(
         "--nonspatial-token-position",
         default="suffix",
         choices=["prefix", "suffix"],
@@ -1259,11 +1290,13 @@ def compute_base_only_page_feature(
     page_idx: int,
     base_score_override: float | None = None,
     approx_page_token_topk: int = 0,
+    approx_page_token_scorer: str = "query_mean",
 ) -> PageFeature:
     pruned_page_emb = maybe_prune_page_tokens_for_base_only(
         page_emb=page_emb,
         query_emb=query_emb,
         approx_page_token_topk=approx_page_token_topk,
+        approx_page_token_scorer=approx_page_token_scorer,
     )
     score_matrix = pruned_page_emb @ query_emb.T
     full_best_scores = score_matrix.max(dim=0).values
@@ -1512,6 +1545,14 @@ def main() -> None:
             "--approx-base-page-token-topk is only valid with "
             "--base-score-source=approx_page_maxsim_topk."
         )
+    if (
+        args.base_score_source != "approx_page_maxsim_topk"
+        and args.approx_base_page_token_scorer != "query_mean"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-scorer is only valid with "
+            "--base-score-source=approx_page_maxsim_topk."
+        )
 
     import torch
 
@@ -1672,6 +1713,7 @@ def main() -> None:
                             if args.base_score_source == "approx_page_maxsim_topk"
                             else 0
                         ),
+                        approx_page_token_scorer=args.approx_base_page_token_scorer,
                     )
                 )
             else:
@@ -1731,6 +1773,7 @@ def main() -> None:
         "query_token_filter": args.query_token_filter,
         "base_score_source": args.base_score_source,
         "approx_base_page_token_topk": args.approx_base_page_token_topk,
+        "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
@@ -1769,6 +1812,7 @@ def main() -> None:
                 "query_token_filter": args.query_token_filter,
                 "base_score_source": args.base_score_source,
                 "approx_base_page_token_topk": args.approx_base_page_token_topk,
+                "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
                 "patch_label_path": args.splice_patch_labels_jsonl,
@@ -1786,6 +1830,7 @@ def main() -> None:
     print(f"query_token_filter: {args.query_token_filter}")
     print(f"base_score_source: {args.base_score_source}")
     print(f"approx_base_page_token_topk: {args.approx_base_page_token_topk}")
+    print(f"approx_base_page_token_scorer: {args.approx_base_page_token_scorer}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")
     print(f"candidate_page_count: {len(page_features)}")
