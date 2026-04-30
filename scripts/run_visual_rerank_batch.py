@@ -23,6 +23,7 @@ from scripts.rerank_target_docs_visual_aware import (
     COARSE_SCORE_DTYPE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
     WeightConfig,
+    apply_visual_rerank_to_top_pages,
     apply_two_stage_exact_rerank_to_page_features,
     axis_class_counts,
     build_page_id_metadata,
@@ -178,6 +179,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "For --base-score-source=two_stage_page_maxsim, recompute exact MaxSim only on the "
             "top-N pages from the approximate stage-1 ranking."
+        ),
+    )
+    parser.add_argument(
+        "--visual-rerank-top-pages",
+        type=int,
+        default=0,
+        help=(
+            "Experimental staged mode. First compute a base-only ranking over all candidate pages, "
+            "then recompute full visual-aware features only for the top-N stage-1 pages."
         ),
     )
     parser.add_argument(
@@ -436,6 +446,8 @@ def main() -> None:
             "--two-stage-exact-top-pages is only valid with "
             "--base-score-source=two_stage_page_maxsim."
         )
+    if args.visual_rerank_top_pages < 0:
+        raise ValueError("--visual-rerank-top-pages must be >= 0.")
 
     fixed_weights = WeightConfig(
         base=args.weight_base,
@@ -444,15 +456,20 @@ def main() -> None:
         balance=args.weight_balance,
     )
     fixed_base_only = (not args.grid_search) and is_base_only_weights(fixed_weights)
+    staged_visual_rerank = (not args.grid_search) and args.visual_rerank_top_pages > 0
     if (
         args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
-        and not fixed_base_only
+        and not (fixed_base_only or staged_visual_rerank)
     ):
         raise ValueError(
             f"--base-score-source={args.base_score_source} is currently only supported in base-only mode."
         )
-    if args.base_only_page_batch_size > 0 and not fixed_base_only:
+    if args.base_only_page_batch_size > 0 and not (fixed_base_only or staged_visual_rerank):
         raise ValueError("--base-only-page-batch-size is currently only supported in base-only mode.")
+    if args.visual_rerank_top_pages > 0 and fixed_base_only:
+        raise ValueError("--visual-rerank-top-pages requires non-base-only fusion weights.")
+    if args.visual_rerank_top_pages > 0 and args.grid_search:
+        raise ValueError("--visual-rerank-top-pages is currently only supported with fixed weights.")
 
     qids = load_qids(Path(args.qid_jsonl), args.qid_field, args.max_qids)
     gold_rows = load_gold_rows(Path(args.gold), set(qids))
@@ -534,12 +551,15 @@ def main() -> None:
                 ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
             )
 
-            if fixed_base_only:
-                needs_query_axis_classes = args.approx_base_page_token_selector in {
+            if fixed_base_only or staged_visual_rerank:
+                needs_query_axis_classes = staged_visual_rerank or args.approx_base_page_token_selector in {
                     "query_label_mix",
                     "soft_label_prior",
                 }
-                needs_patch_axis_classes = args.approx_base_page_token_selector == "soft_label_prior"
+                needs_patch_axis_classes = (
+                    staged_visual_rerank
+                    or args.approx_base_page_token_selector == "soft_label_prior"
+                )
                 patch_axis_classes_by_uid = (
                     load_patch_axis_classes_for_pages(
                         labels_jsonl=args.splice_patch_labels_jsonl,
@@ -571,6 +591,17 @@ def main() -> None:
 
             page_features = []
             with torch.no_grad():
+                page_token_classes_by_uid = (
+                    None
+                    if patch_axis_classes_by_uid is None
+                    else {
+                        page_uid: build_page_token_classes(
+                            page_meta=page_meta[page_uid],
+                            patch_axis_classes=patch_axis_classes,
+                        )
+                        for page_uid, patch_axis_classes in patch_axis_classes_by_uid.items()
+                    }
+                )
                 if fixed_base_only:
                     page_features = compute_base_only_page_features(
                         page_specs=page_specs,
@@ -589,17 +620,32 @@ def main() -> None:
                         approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
                         query_axis_classes=query_axis_classes,
                         query_token_labels=query_token_labels,
-                        page_token_classes_by_uid=(
-                            None
-                            if patch_axis_classes_by_uid is None
-                            else {
-                                page_uid: build_page_token_classes(
-                                    page_meta=page_meta[page_uid],
-                                    patch_axis_classes=patch_axis_classes,
-                                )
-                                for page_uid, patch_axis_classes in patch_axis_classes_by_uid.items()
-                            }
+                        page_token_classes_by_uid=page_token_classes_by_uid,
+                        approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
+                        approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
+                        approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                        coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
+                        page_batch_size=args.base_only_page_batch_size,
+                    )
+                elif staged_visual_rerank:
+                    page_features = compute_base_only_page_features(
+                        page_specs=page_specs,
+                        docid2embs=docid2embs,
+                        query_emb=query_emb,
+                        query_score_mask=query_score_mask,
+                        base_score_source=args.base_score_source,
+                        baseline_page_score_map=baseline_page_score_map,
+                        approx_page_token_topk=(
+                            args.approx_base_page_token_topk
+                            if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
+                            else 0
                         ),
+                        approx_page_token_scorer=args.approx_base_page_token_scorer,
+                        approx_page_token_selector=args.approx_base_page_token_selector,
+                        approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
+                        query_axis_classes=query_axis_classes,
+                        query_token_labels=query_token_labels,
+                        page_token_classes_by_uid=page_token_classes_by_uid,
                         approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
@@ -613,10 +659,8 @@ def main() -> None:
                             device=device,
                             dtype=torch.float32,
                         )
-                        page_token_classes = build_page_token_classes(
-                            page_meta=page_meta[page_uid],
-                            patch_axis_classes=patch_axis_classes_by_uid[page_uid],
-                        )
+                        assert page_token_classes_by_uid is not None
+                        page_token_classes = page_token_classes_by_uid[page_uid]
                         page_features.append(
                             compute_page_feature(
                                 page_emb=page_emb,
@@ -641,6 +685,17 @@ def main() -> None:
                     query_emb=query_emb,
                     query_score_mask=query_score_mask,
                     top_pages=args.two_stage_exact_top_pages,
+                )
+            if staged_visual_rerank:
+                assert page_token_classes_by_uid is not None
+                page_features = apply_visual_rerank_to_top_pages(
+                    page_features=page_features,
+                    docid2embs=docid2embs,
+                    query_emb=query_emb,
+                    query_axis_classes=query_axis_classes,
+                    query_score_mask=query_score_mask,
+                    page_token_classes_by_uid=page_token_classes_by_uid,
+                    top_pages=args.visual_rerank_top_pages,
                 )
 
         if args.grid_search:
@@ -705,6 +760,7 @@ def main() -> None:
             "base_only_page_batch_size": args.base_only_page_batch_size,
             "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
+            "visual_rerank_top_pages": args.visual_rerank_top_pages,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
@@ -759,6 +815,7 @@ def main() -> None:
         "base_only_page_batch_size": args.base_only_page_batch_size,
         "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
+        "visual_rerank_top_pages": args.visual_rerank_top_pages,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
         "grid_search_enabled": args.grid_search,
