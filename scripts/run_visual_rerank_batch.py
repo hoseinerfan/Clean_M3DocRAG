@@ -21,6 +21,7 @@ from scripts.rerank_target_docs_visual_aware import (
     BASE_SCORE_SOURCE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
     WeightConfig,
+    apply_two_stage_exact_rerank_to_page_features,
     axis_class_counts,
     build_page_id_metadata,
     build_page_token_classes,
@@ -76,7 +77,9 @@ def parse_args() -> argparse.Namespace:
             "'exact_page_maxsim' recomputes page-local MaxSim on the fixed pool; "
             "'baseline_pred' reuses the page score stored in --baseline-pred. "
             "'approx_page_maxsim_topk' uses query-guided top-K page-token pruning before "
-            "MaxSim in base-only mode."
+            "MaxSim in base-only mode. "
+            "'two_stage_page_maxsim' uses approximate top-K pruning on all pages, then "
+            "recomputes exact MaxSim only on the top-N stage-1 pages."
         ),
     )
     parser.add_argument(
@@ -97,6 +100,15 @@ def parse_args() -> argparse.Namespace:
             "approx_page_maxsim_topk mode. 'query_mean' is the original fast mean-query scorer; "
             "'query_token_max' uses per-page-token max similarity over query tokens and is usually "
             "stronger but less efficient."
+        ),
+    )
+    parser.add_argument(
+        "--two-stage-exact-top-pages",
+        type=int,
+        default=0,
+        help=(
+            "For --base-score-source=two_stage_page_maxsim, recompute exact MaxSim only on the "
+            "top-N pages from the approximate stage-1 ranking."
         ),
     )
     parser.add_argument(
@@ -277,18 +289,33 @@ def main() -> None:
             "--base-score-source=approx_page_maxsim_topk requires "
             "--approx-base-page-token-topk > 0."
         )
-    if args.base_score_source != "approx_page_maxsim_topk" and args.approx_base_page_token_topk > 0:
+    if args.base_score_source == "two_stage_page_maxsim" and args.approx_base_page_token_topk <= 0:
+        raise ValueError(
+            "--base-score-source=two_stage_page_maxsim requires "
+            "--approx-base-page-token-topk > 0."
+        )
+    if args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim"} and args.approx_base_page_token_topk > 0:
         raise ValueError(
             "--approx-base-page-token-topk is only valid with "
-            "--base-score-source=approx_page_maxsim_topk."
+            "--base-score-source=approx_page_maxsim_topk or two_stage_page_maxsim."
         )
     if (
-        args.base_score_source != "approx_page_maxsim_topk"
+        args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
         and args.approx_base_page_token_scorer != "query_mean"
     ):
         raise ValueError(
             "--approx-base-page-token-scorer is only valid with "
-            "--base-score-source=approx_page_maxsim_topk."
+            "--base-score-source=approx_page_maxsim_topk or two_stage_page_maxsim."
+        )
+    if args.base_score_source == "two_stage_page_maxsim" and args.two_stage_exact_top_pages <= 0:
+        raise ValueError(
+            "--base-score-source=two_stage_page_maxsim requires "
+            "--two-stage-exact-top-pages > 0."
+        )
+    if args.base_score_source != "two_stage_page_maxsim" and args.two_stage_exact_top_pages > 0:
+        raise ValueError(
+            "--two-stage-exact-top-pages is only valid with "
+            "--base-score-source=two_stage_page_maxsim."
         )
 
     fixed_weights = WeightConfig(
@@ -298,6 +325,13 @@ def main() -> None:
         balance=args.weight_balance,
     )
     fixed_base_only = (not args.grid_search) and is_base_only_weights(fixed_weights)
+    if (
+        args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
+        and not fixed_base_only
+    ):
+        raise ValueError(
+            f"--base-score-source={args.base_score_source} is currently only supported in base-only mode."
+        )
 
     qids = load_qids(Path(args.qid_jsonl), args.qid_field, args.max_qids)
     gold_rows = load_gold_rows(Path(args.gold), set(qids))
@@ -417,7 +451,7 @@ def main() -> None:
                                 ),
                                 approx_page_token_topk=(
                                     args.approx_base_page_token_topk
-                                    if args.base_score_source == "approx_page_maxsim_topk"
+                                    if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
                                     else 0
                                 ),
                                 approx_page_token_scorer=args.approx_base_page_token_scorer,
@@ -444,6 +478,15 @@ def main() -> None:
                                 ),
                             )
                         )
+
+            if args.base_score_source == "two_stage_page_maxsim":
+                page_features = apply_two_stage_exact_rerank_to_page_features(
+                    page_features=page_features,
+                    docid2embs=docid2embs,
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                    top_pages=args.two_stage_exact_top_pages,
+                )
 
         if args.grid_search:
             weights, best_grid_record, _grid_leaderboard = grid_search_weights(
@@ -499,6 +542,7 @@ def main() -> None:
             "base_score_source": args.base_score_source,
             "approx_base_page_token_topk": args.approx_base_page_token_topk,
             "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+            "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
@@ -545,6 +589,7 @@ def main() -> None:
         "base_score_source": args.base_score_source,
         "approx_base_page_token_topk": args.approx_base_page_token_topk,
         "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+        "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
         "grid_search_enabled": args.grid_search,

@@ -18,7 +18,12 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(1, str(REPO_ROOT))
 
 QUERY_TOKEN_FILTER_CHOICES = ("full", "drop_pad_like", "semantic_only")
-BASE_SCORE_SOURCE_CHOICES = ("exact_page_maxsim", "baseline_pred", "approx_page_maxsim_topk")
+BASE_SCORE_SOURCE_CHOICES = (
+    "exact_page_maxsim",
+    "baseline_pred",
+    "approx_page_maxsim_topk",
+    "two_stage_page_maxsim",
+)
 APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = ("query_mean", "query_token_max")
 BIG_RANK = 10**12
 
@@ -100,6 +105,39 @@ def compute_coarse_page_token_scores(
         score_matrix = page_emb @ query_emb.T
         return score_matrix.max(dim=1).values
     raise ValueError(f"Unsupported approx_page_token_scorer: {approx_page_token_scorer!r}")
+
+
+def compute_exact_base_page_score(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+) -> float:
+    score_matrix = page_emb @ query_emb.T
+    full_best_scores = score_matrix.max(dim=0).values
+    active_best_scores = full_best_scores[query_score_mask.to(full_best_scores.device)]
+    return float(active_best_scores.sum().item())
+
+
+def compute_approx_base_page_score(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+    approx_page_token_topk: int,
+    approx_page_token_scorer: str,
+) -> float:
+    pruned_page_emb = maybe_prune_page_tokens_for_base_only(
+        page_emb=page_emb,
+        query_emb=query_emb,
+        approx_page_token_topk=approx_page_token_topk,
+        approx_page_token_scorer=approx_page_token_scorer,
+    )
+    return compute_exact_base_page_score(
+        page_emb=pruned_page_emb,
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+    )
 
 
 def maybe_prune_page_tokens_for_base_only(
@@ -718,7 +756,9 @@ def parse_args() -> argparse.Namespace:
             "'exact_page_maxsim' recomputes page-local MaxSim on the fixed candidate pool. "
             "'baseline_pred' reuses the page score already stored in --baseline-pred. "
             "'approx_page_maxsim_topk' uses query-guided top-K page-token pruning before MaxSim "
-            "in base-only mode."
+            "in base-only mode. "
+            "'two_stage_page_maxsim' uses approximate top-K pruning on all pages, then "
+            "recomputes exact MaxSim only on the top-N stage-1 pages."
         ),
     )
     parser.add_argument(
@@ -739,6 +779,15 @@ def parse_args() -> argparse.Namespace:
             "approx_page_maxsim_topk mode. 'query_mean' is the original fast mean-query scorer; "
             "'query_token_max' uses per-page-token max similarity over query tokens and is usually "
             "stronger but less efficient."
+        ),
+    )
+    parser.add_argument(
+        "--two-stage-exact-top-pages",
+        type=int,
+        default=0,
+        help=(
+            "For --base-score-source=two_stage_page_maxsim, recompute exact MaxSim only on the "
+            "top-N pages from the approximate stage-1 ranking."
         ),
     )
     parser.add_argument(
@@ -1292,22 +1341,64 @@ def compute_base_only_page_feature(
     approx_page_token_topk: int = 0,
     approx_page_token_scorer: str = "query_mean",
 ) -> PageFeature:
-    pruned_page_emb = maybe_prune_page_tokens_for_base_only(
+    exact_base_page_score = compute_approx_base_page_score(
         page_emb=page_emb,
         query_emb=query_emb,
+        query_score_mask=query_score_mask,
         approx_page_token_topk=approx_page_token_topk,
         approx_page_token_scorer=approx_page_token_scorer,
     )
-    score_matrix = pruned_page_emb @ query_emb.T
-    full_best_scores = score_matrix.max(dim=0).values
-    active_best_scores = full_best_scores[query_score_mask.to(full_best_scores.device)]
-    exact_base_page_score = float(active_best_scores.sum().item())
     base_page_score = exact_base_page_score if base_score_override is None else float(base_score_override)
     return make_base_only_page_feature(
         doc_id=doc_id,
         page_idx=page_idx,
         base_page_score=base_page_score,
     )
+
+
+def apply_two_stage_exact_rerank_to_page_features(
+    *,
+    page_features: list[PageFeature],
+    docid2embs: dict[str, object],
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+    top_pages: int,
+) -> list[PageFeature]:
+    if top_pages <= 0 or not page_features:
+        return page_features
+
+    stage1_ranked_pages, _ = build_rankings(
+        page_features=page_features,
+        weights=WeightConfig(base=1.0, visual=0.0, non_visual=0.0, balance=0.0),
+        baseline_doc_rank_map={},
+    )
+    top_page_uids = {item["page_uid"] for item in stage1_ranked_pages[:top_pages]}
+
+    updated_features: list[PageFeature] = []
+    for feature in page_features:
+        if feature.page_uid not in top_page_uids:
+            updated_features.append(feature)
+            continue
+
+        page_tensor = docid2embs[feature.doc_id][feature.page_idx]
+        page_emb = page_tensor.view(-1, page_tensor.shape[-1]).to(
+            device=query_emb.device,
+            dtype=query_emb.dtype,
+        )
+        exact_base_page_score = compute_exact_base_page_score(
+            page_emb=page_emb,
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+        )
+        updated_features.append(
+            make_base_only_page_feature(
+                doc_id=feature.doc_id,
+                page_idx=feature.page_idx,
+                base_page_score=exact_base_page_score,
+            )
+        )
+
+    return updated_features
 
 
 def fused_page_score(feature: PageFeature, weights: WeightConfig) -> float:
@@ -1540,18 +1631,33 @@ def main() -> None:
             "--base-score-source=approx_page_maxsim_topk requires "
             "--approx-base-page-token-topk > 0."
         )
-    if args.base_score_source != "approx_page_maxsim_topk" and args.approx_base_page_token_topk > 0:
+    if args.base_score_source == "two_stage_page_maxsim" and args.approx_base_page_token_topk <= 0:
+        raise ValueError(
+            "--base-score-source=two_stage_page_maxsim requires "
+            "--approx-base-page-token-topk > 0."
+        )
+    if args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim"} and args.approx_base_page_token_topk > 0:
         raise ValueError(
             "--approx-base-page-token-topk is only valid with "
-            "--base-score-source=approx_page_maxsim_topk."
+            "--base-score-source=approx_page_maxsim_topk or two_stage_page_maxsim."
         )
     if (
-        args.base_score_source != "approx_page_maxsim_topk"
+        args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
         and args.approx_base_page_token_scorer != "query_mean"
     ):
         raise ValueError(
             "--approx-base-page-token-scorer is only valid with "
-            "--base-score-source=approx_page_maxsim_topk."
+            "--base-score-source=approx_page_maxsim_topk or two_stage_page_maxsim."
+        )
+    if args.base_score_source == "two_stage_page_maxsim" and args.two_stage_exact_top_pages <= 0:
+        raise ValueError(
+            "--base-score-source=two_stage_page_maxsim requires "
+            "--two-stage-exact-top-pages > 0."
+        )
+    if args.base_score_source != "two_stage_page_maxsim" and args.two_stage_exact_top_pages > 0:
+        raise ValueError(
+            "--two-stage-exact-top-pages is only valid with "
+            "--base-score-source=two_stage_page_maxsim."
         )
 
     import torch
@@ -1568,6 +1674,13 @@ def main() -> None:
         balance=args.weight_balance,
     )
     fixed_base_only = (not args.grid_search) and is_base_only_weights(fixed_weights)
+    if (
+        args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
+        and not fixed_base_only
+    ):
+        raise ValueError(
+            f"--base-score-source={args.base_score_source} is currently only supported in base-only mode."
+        )
 
     if fixed_base_only and args.base_score_source == "baseline_pred":
         page_features = []
@@ -1606,6 +1719,8 @@ def main() -> None:
             "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
             "base_score_source": args.base_score_source,
             "approx_base_page_token_topk": args.approx_base_page_token_topk,
+            "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+            "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
@@ -1710,7 +1825,7 @@ def main() -> None:
                         ),
                         approx_page_token_topk=(
                             args.approx_base_page_token_topk
-                            if args.base_score_source == "approx_page_maxsim_topk"
+                            if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
                             else 0
                         ),
                         approx_page_token_scorer=args.approx_base_page_token_scorer,
@@ -1740,6 +1855,15 @@ def main() -> None:
 
     if not page_features:
         raise ValueError("No candidate pages were scored.")
+
+    if args.base_score_source == "two_stage_page_maxsim":
+        page_features = apply_two_stage_exact_rerank_to_page_features(
+            page_features=page_features,
+            docid2embs=docid2embs,
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+            top_pages=args.two_stage_exact_top_pages,
+        )
 
     if args.grid_search:
         best_weights, best_grid_record, grid_leaderboard = grid_search_weights(
@@ -1774,6 +1898,7 @@ def main() -> None:
         "base_score_source": args.base_score_source,
         "approx_base_page_token_topk": args.approx_base_page_token_topk,
         "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+        "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
@@ -1813,6 +1938,7 @@ def main() -> None:
                 "base_score_source": args.base_score_source,
                 "approx_base_page_token_topk": args.approx_base_page_token_topk,
                 "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+                "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
                 "patch_label_path": args.splice_patch_labels_jsonl,
@@ -1831,6 +1957,7 @@ def main() -> None:
     print(f"base_score_source: {args.base_score_source}")
     print(f"approx_base_page_token_topk: {args.approx_base_page_token_topk}")
     print(f"approx_base_page_token_scorer: {args.approx_base_page_token_scorer}")
+    print(f"two_stage_exact_top_pages: {args.two_stage_exact_top_pages}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")
     print(f"candidate_page_count: {len(page_features)}")
