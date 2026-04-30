@@ -92,6 +92,8 @@ def maybe_prune_page_tokens_for_base_only(
     query_emb: torch.Tensor,
     approx_page_token_topk: int,
 ) -> torch.Tensor:
+    import torch
+
     if approx_page_token_topk <= 0:
         return page_emb
     topk = min(int(approx_page_token_topk), int(page_emb.shape[0]))
