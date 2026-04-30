@@ -1367,7 +1367,7 @@ def apply_two_stage_exact_rerank_to_page_features(
     if top_pages <= 0 or not page_features:
         return page_features
 
-    stage1_ranked_pages, _ = build_rankings(
+    _stage1_ranked_docs, stage1_ranked_pages = build_rankings(
         page_features=page_features,
         weights=WeightConfig(base=1.0, visual=0.0, non_visual=0.0, balance=0.0),
         baseline_doc_rank_map={},
