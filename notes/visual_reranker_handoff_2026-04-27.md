@@ -535,3 +535,282 @@ There is now a useful conditional narrative:
    - dense full retrieval source
    - possibly later sparse/title/entity retrieval
    - followed by conditional reranking rather than one universal fusion
+
+## Update: 2026-04-30
+
+### Additional helper changes now on `main`
+
+New helper-only commits after the 2026-04-28 note:
+
+- `226a2a5` Add baseline-score source option for visual reranker
+- `fdafddb` Add query-label version comparison helper
+- `1a56a20` Optimize base-only visual reranker path
+- `9b2e1ef` Add top-k pruning for base-only MaxSim
+- `bef1226` Separate approximate MaxSim base path
+- `a4276d8` Fix top-k MaxSim pruning import
+
+These add:
+
+- `--base-score-source baseline_pred`
+- `--base-score-source approx_page_maxsim_topk`
+- `--approx-base-page-token-topk K`
+- `scripts/compare_query_label_versions.py`
+
+The exact path is still preserved when:
+
+- `--base-score-source exact_page_maxsim`
+
+The approximation is now isolated to its own path and does not silently change the exact one.
+
+### Dev-set visual-evidence stats
+
+Using MMQA dev taxonomy:
+
+- total dev questions: `2441`
+- total question types: `16`
+- image-involving question types: `10 / 16`
+- dev questions in image-involving types: `940 / 2441 = 38.51%`
+
+Using the current best query-label export:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/visual_needed_binary/deberta_v3_large_seed42/export/dev_query_visual_binary_labels_union_relaxed_v6_fulltrainlex_v2.jsonl`
+
+Labeler-wide counts:
+
+- questions with at least one visual-needed token/phrase:
+  - `999 / 2441 = 40.93%`
+- image-type questions labeled visual-needed:
+  - `854 / 940 = 90.85%`
+
+Interpretation:
+
+- MMQA question type is the right dataset-level proxy for "requires image evidence"
+- `v6_fulltrainlex_v2` is the right labeler-level view of "did we recover an explicit visual cue?"
+
+### Query-label file comparison: `union_relaxed_v2` vs `v6_fulltrainlex_v2`
+
+On sampled qids such as:
+
+- `e783cba0b3df36372d11823e378e5437`
+- `3444052221c1104c977a4653988d44f1`
+- `46a4103ba65b176fba9ed85889775f8d`
+- `e1e6ed53f9ad11813845088f4cf2f6b1`
+
+the raw JSON fields can look different, but the only trustworthy comparison is the final ColPali-aligned query-token class sequence used by the reranker.
+
+On those sampled qids:
+
+- the effective aligned visual-token labels were identical across `v2` and `v6`
+
+On all `141` `ImageListQ` qids, using `scripts/compare_query_label_versions.py` with ColPali-aligned final token classes:
+
+- `total_qids = 141`
+- `identical_class_sequence_count = 73`
+- `different_class_sequence_count = 68`
+- `gained_visual_qid_count = 66`
+- `lost_visual_qid_count = 2`
+
+Interpretation:
+
+- `v6` changes the effective reranker input on nearly half of `ImageListQ`
+- the shift is almost entirely additive
+- `v6` mostly adds visual cues rather than removing them
+
+### 83-qid ImageListQ failure subset: additional ablations
+
+Input set remains:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/rag_dev_ret4/ret4_imagelistq_failures_no_gold_doc_in_top4.jsonl`
+
+Using qid-specific grid search with the old query-label file (`union_relaxed_v2`) and exact page-local MaxSim:
+
+#### H1: `base + visual + non_visual` with `balance = 0`
+
+- `num_qids = 83`
+- `improved_doc_rank_count = 61`
+- `reranked_top4_doc_count = 39`
+
+#### H2: `base + visual` with `non_visual = 0`, `balance = 0`
+
+- `num_qids = 83`
+- `improved_doc_rank_count = 59`
+- `reranked_top4_doc_count = 38`
+
+Interpretation:
+
+- a simpler fused score can carry most of the benefit
+- `non_visual` adds only a small extra gain in this oracle-style qid-grid setting
+- these are still qid-specific tuned results, not a single deployable global configuration
+
+#### Fixed `v6` run with the old preferred global weights
+
+Using:
+
+- `query_token_filter = full`
+- `base = 1.0`
+- `visual = 1.0`
+- `non_visual = 0.0`
+- `balance = 8.0`
+- query labels = `v6_fulltrainlex_v2`
+
+Summary:
+
+- `num_qids = 83`
+- `improved_doc_rank_count = 53`
+- `reranked_top4_doc_count = 30`
+
+Compared with the earlier fixed `v2` run:
+
+- fixed `v2`: `54` improved, `32` top-4
+- fixed `v6`: `53` improved, `30` top-4
+
+Interpretation:
+
+- `v6` did not help this subset under the old global weights
+- if `v6` is used in reranking, it likely needs retuning rather than inheriting the `v2` fixed weights
+
+### All `141` ImageListQ qids
+
+Using the original fixed full-method run on all `ImageListQ` qids:
+
+- output:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_all_rerank_full_balance8.jsonl`
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_all_rerank_full_balance8.summary.json`
+
+Summary:
+
+- `num_qids = 141`
+- `baseline_top4_doc_count = 53`
+- `reranked_top4_doc_count = 82`
+- `improved_doc_rank_count = 75`
+- `worsened_doc_rank_count = 24`
+- `unchanged_doc_rank_count = 31`
+- `baseline_doc_rank_median = 8.5`
+- `reranked_doc_rank_median = 2.0`
+
+The bucket counts above do not sum to `141` because:
+
+- `11` qids had `baseline_first_gold_doc_rank = None`
+- and also `reranked_first_gold_doc_rank = None`
+
+So:
+
+- `11 / 141 = 7.80%` are unrecoverable by reranking alone under the fixed top-1000 pool
+
+Clean interpretation:
+
+- baseline top-4 gold-doc rate:
+  - `53 / 141 = 37.59%`
+- full reranker top-4 gold-doc rate:
+  - `82 / 141 = 58.16%`
+- gain:
+  - `+20.57` percentage points
+
+### All `141` ImageListQ qids: base-only exact MaxSim
+
+Using:
+
+- query labels = `v6_fulltrainlex_v2`
+- `base-score-source = exact_page_maxsim`
+- `base = 1.0`
+- `visual = 0.0`
+- `non_visual = 0.0`
+- `balance = 0.0`
+
+Output:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_all_rerank_baseonly_exactmaxsim_v6.jsonl`
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_all_rerank_baseonly_exactmaxsim_v6.summary.json`
+
+Summary:
+
+- `num_qids = 141`
+- `improved_doc_rank_count = 73`
+- `reranked_top4_doc_count = 78`
+
+Interpretation:
+
+- baseline top-4 gold-doc rate:
+  - `53 / 141 = 37.59%`
+- base-only exact-MaxSim top-4 gold-doc rate:
+  - `78 / 141 = 55.32%`
+- gain:
+  - `+17.73` percentage points
+
+Compared with the full reranker on the same `141` qids:
+
+- full reranker:
+  - `82 / 141`
+- base-only exact MaxSim:
+  - `78 / 141`
+
+So the full method is still better, but only by:
+
+- `4` extra top-4 recoveries
+
+Interpretation:
+
+- much of the gain comes from recomputing exact page-local MaxSim on the fixed top-1000 pool
+- the visual-aware terms add a smaller but real extra gain
+
+### Approximate base-only MaxSim with query-guided page-token pruning
+
+This was tested on a stress subset:
+
+- `20` qids chosen from cases rescued into top-4 by the normal full reranker
+
+Important caveat:
+
+- this rescued-20 subset was constructed from the older all-141 full reranker output because the all-141 full-`v6` output was not yet available at subset-construction time
+
+Outputs:
+
+- exact base-only:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_rescued_by_full_top20_baseonly_exact.summary.json`
+- approximate `top128`:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_rescued_by_full_top20_baseonly_top128.summary.json`
+- approximate `top256`:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_rescued_by_full_top20_baseonly_top256.summary.json`
+- approximate `top512`:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_rescued_by_full_top20_baseonly_top512.summary.json`
+
+Summary on the same rescued-20 subset:
+
+- exact base-only:
+  - `reranked_top4_doc_count = 12`
+  - `reranked_doc_rank_median = 3.0`
+- `top128`:
+  - `reranked_top4_doc_count = 12`
+  - `reranked_doc_rank_median = 3.5`
+- `top256`:
+  - `reranked_top4_doc_count = 13`
+  - `reranked_doc_rank_median = 3.0`
+- `top512`:
+  - `reranked_top4_doc_count = 10`
+  - `reranked_doc_rank_median = 4.0`
+
+All four variants had:
+
+- `improved_doc_rank_count = 19`
+- `worsened_doc_rank_count = 0`
+- `unchanged_doc_rank_count = 1`
+
+Interpretation:
+
+- query-guided top-K page-token pruning is promising
+- `top256` is the best setting seen so far on this subset
+- larger `K` is not better here; `top512` is worse than `top256`
+- the pruning is acting like a regularizer, not just an approximation
+
+### Practical current view
+
+1. For broad `ImageListQ` retrieval quality, the fixed full reranker is still the strongest global result we have:
+   - `82 / 141` top-4 on all `ImageListQ`
+2. Base-only exact MaxSim already gives most of that gain:
+   - `78 / 141` top-4
+3. The difference between full and base-only is real but modest:
+   - `4` extra top-4 recoveries on all `ImageListQ`
+4. `v6_fulltrainlex_v2` substantially changes label coverage, but fixed old `balance=8` weights do not automatically improve with it
+5. For approximate base-only MaxSim:
+   - `top256` is the only promising first setting so far
+   - it should be tested next on a larger set if a speed/quality tradeoff is needed
