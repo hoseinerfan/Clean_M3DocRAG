@@ -77,6 +77,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-topk",
+        type=int,
+        default=0,
+        help=(
+            "Optional query-guided top-K page-token pruning used only in base-only exact_page_maxsim "
+            "mode. Set 0 to keep exact MaxSim over all page tokens."
+        ),
+    )
+    parser.add_argument(
         "--ignore-pad-scores-in-final-ranking",
         action="store_true",
     )
@@ -373,6 +382,7 @@ def main() -> None:
                                     if args.base_score_source == "baseline_pred"
                                     else None
                                 ),
+                                approx_page_token_topk=args.approx_base_page_token_topk,
                             )
                         )
                     else:
@@ -449,6 +459,7 @@ def main() -> None:
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
             "base_score_source": args.base_score_source,
+            "approx_base_page_token_topk": args.approx_base_page_token_topk,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
@@ -493,6 +504,7 @@ def main() -> None:
         "embedding_name": args.embedding_name,
         "query_token_filter": args.query_token_filter,
         "base_score_source": args.base_score_source,
+        "approx_base_page_token_topk": args.approx_base_page_token_topk,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
         "grid_search_enabled": args.grid_search,

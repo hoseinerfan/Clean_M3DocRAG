@@ -86,6 +86,23 @@ def make_base_only_page_feature(
     )
 
 
+def maybe_prune_page_tokens_for_base_only(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    approx_page_token_topk: int,
+) -> torch.Tensor:
+    if approx_page_token_topk <= 0:
+        return page_emb
+    topk = min(int(approx_page_token_topk), int(page_emb.shape[0]))
+    if topk >= int(page_emb.shape[0]):
+        return page_emb
+    coarse_query = query_emb.mean(dim=0)
+    coarse_scores = page_emb @ coarse_query
+    top_indices = torch.topk(coarse_scores, k=topk, largest=True, sorted=False).indices
+    return page_emb.index_select(0, top_indices)
+
+
 def parse_float_list(raw: str) -> list[float]:
     values = []
     for item in raw.split(","):
@@ -681,6 +698,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-topk",
+        type=int,
+        default=0,
+        help=(
+            "Optional query-guided top-K page-token pruning used only in base-only exact_page_maxsim "
+            "mode. Set 0 to keep exact MaxSim over all page tokens."
+        ),
+    )
+    parser.add_argument(
         "--nonspatial-token-position",
         default="suffix",
         choices=["prefix", "suffix"],
@@ -1228,8 +1254,14 @@ def compute_base_only_page_feature(
     doc_id: str,
     page_idx: int,
     base_score_override: float | None = None,
+    approx_page_token_topk: int = 0,
 ) -> PageFeature:
-    score_matrix = page_emb @ query_emb.T
+    pruned_page_emb = maybe_prune_page_tokens_for_base_only(
+        page_emb=page_emb,
+        query_emb=query_emb,
+        approx_page_token_topk=approx_page_token_topk,
+    )
+    score_matrix = pruned_page_emb @ query_emb.T
     full_best_scores = score_matrix.max(dim=0).values
     active_best_scores = full_best_scores[query_score_mask.to(full_best_scores.device)]
     exact_base_page_score = float(active_best_scores.sum().item())
@@ -1517,6 +1549,7 @@ def main() -> None:
             "query_token_filter": args.query_token_filter,
             "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
             "base_score_source": args.base_score_source,
+            "approx_base_page_token_topk": args.approx_base_page_token_topk,
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
@@ -1619,6 +1652,7 @@ def main() -> None:
                             if args.base_score_source == "baseline_pred"
                             else None
                         ),
+                        approx_page_token_topk=args.approx_base_page_token_topk,
                     )
                 )
             else:
@@ -1677,6 +1711,7 @@ def main() -> None:
         "embedding_name": args.embedding_name,
         "query_token_filter": args.query_token_filter,
         "base_score_source": args.base_score_source,
+        "approx_base_page_token_topk": args.approx_base_page_token_topk,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
@@ -1714,6 +1749,7 @@ def main() -> None:
                 "weights": asdict(weights),
                 "query_token_filter": args.query_token_filter,
                 "base_score_source": args.base_score_source,
+                "approx_base_page_token_topk": args.approx_base_page_token_topk,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
                 "patch_label_path": args.splice_patch_labels_jsonl,
@@ -1730,6 +1766,7 @@ def main() -> None:
 
     print(f"query_token_filter: {args.query_token_filter}")
     print(f"base_score_source: {args.base_score_source}")
+    print(f"approx_base_page_token_topk: {args.approx_base_page_token_topk}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")
     print(f"candidate_page_count: {len(page_features)}")
