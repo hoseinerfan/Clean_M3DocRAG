@@ -18,7 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(1, str(REPO_ROOT))
 
 QUERY_TOKEN_FILTER_CHOICES = ("full", "drop_pad_like", "semantic_only")
-BASE_SCORE_SOURCE_CHOICES = ("exact_page_maxsim", "baseline_pred")
+BASE_SCORE_SOURCE_CHOICES = ("exact_page_maxsim", "baseline_pred", "approx_page_maxsim_topk")
 BIG_RANK = 10**12
 
 
@@ -694,7 +694,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Source used for the base term in the fusion. "
             "'exact_page_maxsim' recomputes page-local MaxSim on the fixed candidate pool. "
-            "'baseline_pred' reuses the page score already stored in --baseline-pred."
+            "'baseline_pred' reuses the page score already stored in --baseline-pred. "
+            "'approx_page_maxsim_topk' uses query-guided top-K page-token pruning before MaxSim "
+            "in base-only mode."
         ),
     )
     parser.add_argument(
@@ -702,8 +704,8 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help=(
-            "Optional query-guided top-K page-token pruning used only in base-only exact_page_maxsim "
-            "mode. Set 0 to keep exact MaxSim over all page tokens."
+            "Top-K page tokens kept for query-guided pruning when "
+            "--base-score-source=approx_page_maxsim_topk in base-only mode."
         ),
     )
     parser.add_argument(
@@ -1498,6 +1500,17 @@ def build_prediction_payload(
 def main() -> None:
     args = parse_args()
 
+    if args.base_score_source == "approx_page_maxsim_topk" and args.approx_base_page_token_topk <= 0:
+        raise ValueError(
+            "--base-score-source=approx_page_maxsim_topk requires "
+            "--approx-base-page-token-topk > 0."
+        )
+    if args.base_score_source != "approx_page_maxsim_topk" and args.approx_base_page_token_topk > 0:
+        raise ValueError(
+            "--approx-base-page-token-topk is only valid with "
+            "--base-score-source=approx_page_maxsim_topk."
+        )
+
     import torch
 
     from m3docrag.retrieval import ColPaliRetrievalModel
@@ -1652,7 +1665,11 @@ def main() -> None:
                             if args.base_score_source == "baseline_pred"
                             else None
                         ),
-                        approx_page_token_topk=args.approx_base_page_token_topk,
+                        approx_page_token_topk=(
+                            args.approx_base_page_token_topk
+                            if args.base_score_source == "approx_page_maxsim_topk"
+                            else 0
+                        ),
                     )
                 )
             else:
