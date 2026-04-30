@@ -20,6 +20,7 @@ from scripts.rerank_target_docs_visual_aware import (
     APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
     APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES,
     BASE_SCORE_SOURCE_CHOICES,
+    COARSE_SCORE_DTYPE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
     WeightConfig,
     apply_two_stage_exact_rerank_to_page_features,
@@ -28,6 +29,7 @@ from scripts.rerank_target_docs_visual_aware import (
     build_page_token_classes,
     build_rankings,
     clean_token_label,
+    compute_base_only_page_features,
     compute_base_only_page_feature,
     compute_page_feature,
     grid_search_weights,
@@ -129,6 +131,24 @@ def parse_args() -> argparse.Namespace:
         help=(
             "When --approx-base-page-token-selector=query_label_mix, reserve this many "
             "token slots for pruning against the query's visual-token subset."
+        ),
+    )
+    parser.add_argument(
+        "--base-only-page-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Optional batch size for base-only page scoring. Currently accelerates exact and "
+            "global-topK approximate scoring paths when page token counts match."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-coarse-dtype",
+        default="fp32",
+        choices=COARSE_SCORE_DTYPE_CHOICES,
+        help=(
+            "Numeric precision used only for the coarse pruning-score computation in approximate "
+            "base-only modes. Final exact MaxSim remains fp32."
         ),
     )
     parser.add_argument(
@@ -360,6 +380,16 @@ def main() -> None:
             "--approx-base-page-token-label-reserve is only valid with "
             "--approx-base-page-token-selector=query_label_mix."
         )
+    if args.base_only_page_batch_size < 0:
+        raise ValueError("--base-only-page-batch-size must be >= 0.")
+    if (
+        args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
+        and args.approx_base_page_token_coarse_dtype != "fp32"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-coarse-dtype is only valid with "
+            "--base-score-source=approx_page_maxsim_topk or two_stage_page_maxsim."
+        )
     if args.base_score_source == "two_stage_page_maxsim" and args.two_stage_exact_top_pages <= 0:
         raise ValueError(
             "--base-score-source=two_stage_page_maxsim requires "
@@ -385,6 +415,8 @@ def main() -> None:
         raise ValueError(
             f"--base-score-source={args.base_score_source} is currently only supported in base-only mode."
         )
+    if args.base_only_page_batch_size > 0 and not fixed_base_only:
+        raise ValueError("--base-only-page-batch-size is currently only supported in base-only mode.")
 
     qids = load_qids(Path(args.qid_jsonl), args.qid_field, args.max_qids)
     gold_rows = load_gold_rows(Path(args.gold), set(qids))
@@ -491,38 +523,34 @@ def main() -> None:
 
             page_features = []
             with torch.no_grad():
-                for doc_id, page_idx in page_specs:
-                    page_uid = f"{doc_id}_page{page_idx}"
-                    page_emb = docid2embs[doc_id][page_idx].view(-1, docid2embs[doc_id][page_idx].shape[-1]).to(
-                        device=device,
-                        dtype=torch.float32,
+                if fixed_base_only:
+                    page_features = compute_base_only_page_features(
+                        page_specs=page_specs,
+                        docid2embs=docid2embs,
+                        query_emb=query_emb,
+                        query_score_mask=query_score_mask,
+                        base_score_source=args.base_score_source,
+                        baseline_page_score_map=baseline_page_score_map,
+                        approx_page_token_topk=(
+                            args.approx_base_page_token_topk
+                            if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
+                            else 0
+                        ),
+                        approx_page_token_scorer=args.approx_base_page_token_scorer,
+                        approx_page_token_selector=args.approx_base_page_token_selector,
+                        approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
+                        query_axis_classes=query_axis_classes,
+                        approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
+                        coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
+                        page_batch_size=args.base_only_page_batch_size,
                     )
-                    if fixed_base_only:
-                        page_features.append(
-                            compute_base_only_page_feature(
-                                page_emb=page_emb,
-                                query_emb=query_emb,
-                                query_score_mask=query_score_mask,
-                                doc_id=doc_id,
-                                page_idx=page_idx,
-                                base_score_override=(
-                                    baseline_page_score_map.get(page_uid)
-                                    if args.base_score_source == "baseline_pred"
-                                    else None
-                                ),
-                                approx_page_token_topk=(
-                                    args.approx_base_page_token_topk
-                                    if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
-                                    else 0
-                                ),
-                                approx_page_token_scorer=args.approx_base_page_token_scorer,
-                                approx_page_token_selector=args.approx_base_page_token_selector,
-                                approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
-                                query_axis_classes=query_axis_classes,
-                                approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
-                            )
+                else:
+                    for doc_id, page_idx in page_specs:
+                        page_uid = f"{doc_id}_page{page_idx}"
+                        page_emb = docid2embs[doc_id][page_idx].view(-1, docid2embs[doc_id][page_idx].shape[-1]).to(
+                            device=device,
+                            dtype=torch.float32,
                         )
-                    else:
                         page_token_classes = build_page_token_classes(
                             page_meta=page_meta[page_uid],
                             patch_axis_classes=patch_axis_classes_by_uid[page_uid],
@@ -610,6 +638,8 @@ def main() -> None:
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
             "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
             "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
+            "base_only_page_batch_size": args.base_only_page_batch_size,
+            "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
@@ -660,6 +690,8 @@ def main() -> None:
         "approx_base_page_token_selector": args.approx_base_page_token_selector,
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
+        "base_only_page_batch_size": args.base_only_page_batch_size,
+        "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,

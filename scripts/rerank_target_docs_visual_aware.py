@@ -26,6 +26,7 @@ BASE_SCORE_SOURCE_CHOICES = (
 )
 APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = ("query_mean", "query_token_max")
 APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = ("global_topk", "spatial_quadrant_mix", "query_label_mix")
+COARSE_SCORE_DTYPE_CHOICES = ("fp32", "bf16", "fp16")
 BIG_RANK = 10**12
 
 
@@ -98,13 +99,24 @@ def compute_coarse_page_token_scores(
     page_emb: torch.Tensor,
     query_emb: torch.Tensor,
     approx_page_token_scorer: str,
+    coarse_score_dtype: str = "fp32",
 ) -> torch.Tensor:
+    import torch
+
+    if coarse_score_dtype == "fp32" or page_emb.device.type != "cuda":
+        page_emb_coarse = page_emb
+        query_emb_coarse = query_emb
+    else:
+        dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
+        page_emb_coarse = page_emb.to(dtype=dtype)
+        query_emb_coarse = query_emb.to(dtype=dtype)
+
     if approx_page_token_scorer == "query_mean":
-        coarse_query = query_emb.mean(dim=0)
-        return page_emb @ coarse_query
+        coarse_query = query_emb_coarse.mean(dim=0)
+        return (page_emb_coarse @ coarse_query).to(dtype=torch.float32)
     if approx_page_token_scorer == "query_token_max":
-        score_matrix = page_emb @ query_emb.T
-        return score_matrix.max(dim=1).values
+        score_matrix = page_emb_coarse @ query_emb_coarse.T
+        return score_matrix.max(dim=1).values.to(dtype=torch.float32)
     raise ValueError(f"Unsupported approx_page_token_scorer: {approx_page_token_scorer!r}")
 
 
@@ -131,6 +143,7 @@ def compute_approx_base_page_score(
     approx_page_token_spatial_reserve: int,
     query_axis_classes: list[str] | None,
     approx_page_token_label_reserve: int,
+    coarse_score_dtype: str = "fp32",
 ) -> float:
     pruned_page_emb = maybe_prune_page_tokens_for_base_only(
         page_emb=page_emb,
@@ -141,6 +154,7 @@ def compute_approx_base_page_score(
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
         query_axis_classes=query_axis_classes,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
+        coarse_score_dtype=coarse_score_dtype,
     )
     return compute_exact_base_page_score(
         page_emb=pruned_page_emb,
@@ -195,6 +209,7 @@ def select_page_token_indices_for_base_only(
     approx_page_token_spatial_reserve: int,
     query_axis_classes: list[str] | None,
     approx_page_token_label_reserve: int,
+    coarse_score_dtype: str = "fp32",
 ) -> list[int]:
     import torch
 
@@ -202,6 +217,7 @@ def select_page_token_indices_for_base_only(
         page_emb=page_emb,
         query_emb=query_emb,
         approx_page_token_scorer=approx_page_token_scorer,
+        coarse_score_dtype=coarse_score_dtype,
     )
     topk = min(int(approx_page_token_topk), int(page_emb.shape[0]))
     if topk >= int(page_emb.shape[0]):
@@ -235,6 +251,7 @@ def select_page_token_indices_for_base_only(
             page_emb=page_emb,
             query_emb=visual_query_emb,
             approx_page_token_scorer=approx_page_token_scorer,
+            coarse_score_dtype=coarse_score_dtype,
         )
         selected.update(_topk_indices_from_scores(scores=label_scores, k=label_reserve))
 
@@ -296,6 +313,7 @@ def maybe_prune_page_tokens_for_base_only(
     approx_page_token_spatial_reserve: int,
     query_axis_classes: list[str] | None,
     approx_page_token_label_reserve: int,
+    coarse_score_dtype: str = "fp32",
 ) -> torch.Tensor:
     import torch
 
@@ -313,6 +331,7 @@ def maybe_prune_page_tokens_for_base_only(
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
         query_axis_classes=query_axis_classes,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
+        coarse_score_dtype=coarse_score_dtype,
     )
     top_index_tensor = torch.tensor(top_indices, device=page_emb.device, dtype=torch.long)
     return page_emb.index_select(0, top_index_tensor)
@@ -965,6 +984,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--base-only-page-batch-size",
+        type=int,
+        default=0,
+        help=(
+            "Optional batch size for base-only page scoring. Currently accelerates exact and "
+            "global-topK approximate scoring paths when page token counts match."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-coarse-dtype",
+        default="fp32",
+        choices=COARSE_SCORE_DTYPE_CHOICES,
+        help=(
+            "Numeric precision used only for the coarse pruning-score computation in approximate "
+            "base-only modes. Final exact MaxSim remains fp32."
+        ),
+    )
+    parser.add_argument(
         "--two-stage-exact-top-pages",
         type=int,
         default=0,
@@ -1527,6 +1564,7 @@ def compute_base_only_page_feature(
     approx_page_token_spatial_reserve: int = 64,
     query_axis_classes: list[str] | None = None,
     approx_page_token_label_reserve: int = 64,
+    coarse_score_dtype: str = "fp32",
 ) -> PageFeature:
     exact_base_page_score = compute_approx_base_page_score(
         page_emb=page_emb,
@@ -1538,6 +1576,7 @@ def compute_base_only_page_feature(
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
         query_axis_classes=query_axis_classes,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
+        coarse_score_dtype=coarse_score_dtype,
     )
     base_page_score = exact_base_page_score if base_score_override is None else float(base_score_override)
     return make_base_only_page_feature(
@@ -1545,6 +1584,172 @@ def compute_base_only_page_feature(
         page_idx=page_idx,
         base_page_score=base_page_score,
     )
+
+
+def compute_base_only_page_feature_scores_batched(
+    *,
+    batch_page_embs: torch.Tensor,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+    base_score_source: str,
+    approx_page_token_topk: int,
+    approx_page_token_scorer: str,
+    coarse_score_dtype: str,
+) -> list[float]:
+    import torch
+
+    if base_score_source == "exact_page_maxsim":
+        score_matrix = batch_page_embs @ query_emb.T
+        full_best_scores = score_matrix.max(dim=1).values
+        active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
+        return active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+
+    if base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}:
+        raise ValueError(f"Unsupported batched base score source: {base_score_source!r}")
+
+    topk = min(int(approx_page_token_topk), int(batch_page_embs.shape[1]))
+    if topk <= 0:
+        raise ValueError("Batched approximate base scoring requires approx_page_token_topk > 0.")
+
+    if coarse_score_dtype == "fp32" or batch_page_embs.device.type != "cuda":
+        batch_page_embs_coarse = batch_page_embs
+        query_emb_coarse = query_emb
+    else:
+        dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
+        batch_page_embs_coarse = batch_page_embs.to(dtype=dtype)
+        query_emb_coarse = query_emb.to(dtype=dtype)
+
+    if approx_page_token_scorer == "query_mean":
+        coarse_query = query_emb_coarse.mean(dim=0)
+        coarse_scores = (batch_page_embs_coarse @ coarse_query).to(dtype=torch.float32)
+    elif approx_page_token_scorer == "query_token_max":
+        coarse_score_matrix = batch_page_embs_coarse @ query_emb_coarse.T
+        coarse_scores = coarse_score_matrix.max(dim=2).values.to(dtype=torch.float32)
+    else:
+        raise ValueError(f"Unsupported batched approx_page_token_scorer: {approx_page_token_scorer!r}")
+
+    top_indices = torch.topk(coarse_scores, k=topk, dim=1, largest=True, sorted=False).indices
+    gather_index = top_indices.unsqueeze(-1).expand(-1, -1, batch_page_embs.shape[-1])
+    pruned_page_embs = batch_page_embs.gather(dim=1, index=gather_index)
+
+    score_matrix = pruned_page_embs @ query_emb.T
+    full_best_scores = score_matrix.max(dim=1).values
+    active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
+    return active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+
+
+def compute_base_only_page_features(
+    *,
+    page_specs: list[tuple[str, int]],
+    docid2embs: dict[str, object],
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+    base_score_source: str,
+    baseline_page_score_map: dict[str, float],
+    approx_page_token_topk: int,
+    approx_page_token_scorer: str,
+    approx_page_token_selector: str,
+    approx_page_token_spatial_reserve: int,
+    query_axis_classes: list[str] | None,
+    approx_page_token_label_reserve: int,
+    coarse_score_dtype: str,
+    page_batch_size: int,
+) -> list[PageFeature]:
+    import torch
+
+    features: list[PageFeature] = []
+    can_batch = (
+        page_batch_size > 1
+        and approx_page_token_selector == "global_topk"
+        and base_score_source in {"exact_page_maxsim", "approx_page_maxsim_topk", "two_stage_page_maxsim"}
+    )
+
+    batch_meta: list[tuple[str, int, float | None]] = []
+    batch_embs: list[torch.Tensor] = []
+    batch_token_count: int | None = None
+
+    def flush_batch() -> None:
+        nonlocal batch_meta, batch_embs, batch_token_count
+        if not batch_meta:
+            return
+        if len(batch_meta) == 1 or not can_batch:
+            for (doc_id, page_idx, base_score_override), page_emb in zip(batch_meta, batch_embs):
+                features.append(
+                    compute_base_only_page_feature(
+                        page_emb=page_emb,
+                        query_emb=query_emb,
+                        query_score_mask=query_score_mask,
+                        doc_id=doc_id,
+                        page_idx=page_idx,
+                        base_score_override=base_score_override,
+                        approx_page_token_topk=approx_page_token_topk,
+                        approx_page_token_scorer=approx_page_token_scorer,
+                        approx_page_token_selector=approx_page_token_selector,
+                        approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+                        query_axis_classes=query_axis_classes,
+                        approx_page_token_label_reserve=approx_page_token_label_reserve,
+                        coarse_score_dtype=coarse_score_dtype,
+                    )
+                )
+        else:
+            batch_tensor = torch.stack(batch_embs, dim=0)
+            batch_scores = compute_base_only_page_feature_scores_batched(
+                batch_page_embs=batch_tensor,
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+                base_score_source=base_score_source,
+                approx_page_token_topk=approx_page_token_topk,
+                approx_page_token_scorer=approx_page_token_scorer,
+                coarse_score_dtype=coarse_score_dtype,
+            )
+            for (doc_id, page_idx, base_score_override), batch_score in zip(batch_meta, batch_scores):
+                base_page_score = float(batch_score) if base_score_override is None else float(base_score_override)
+                features.append(
+                    make_base_only_page_feature(
+                        doc_id=doc_id,
+                        page_idx=page_idx,
+                        base_page_score=base_page_score,
+                    )
+                )
+
+        batch_meta = []
+        batch_embs = []
+        batch_token_count = None
+
+    for doc_id, page_idx in page_specs:
+        page_uid = f"{doc_id}_page{page_idx}"
+        page_emb = docid2embs[doc_id][page_idx].view(-1, docid2embs[doc_id][page_idx].shape[-1]).to(
+            device=query_emb.device,
+            dtype=query_emb.dtype,
+        )
+        base_score_override = (
+            baseline_page_score_map.get(page_uid)
+            if base_score_source == "baseline_pred"
+            else None
+        )
+
+        if not can_batch:
+            batch_meta = [(doc_id, page_idx, base_score_override)]
+            batch_embs = [page_emb]
+            flush_batch()
+            continue
+
+        page_token_count = int(page_emb.shape[0])
+        if (
+            batch_meta
+            and (
+                batch_token_count != page_token_count
+                or len(batch_meta) >= page_batch_size
+            )
+        ):
+            flush_batch()
+
+        batch_meta.append((doc_id, page_idx, base_score_override))
+        batch_embs.append(page_emb)
+        batch_token_count = page_token_count
+
+    flush_batch()
+    return features
 
 
 def apply_two_stage_exact_rerank_to_page_features(
@@ -1864,6 +2069,16 @@ def main() -> None:
             "--approx-base-page-token-label-reserve is only valid with "
             "--approx-base-page-token-selector=query_label_mix."
         )
+    if args.base_only_page_batch_size < 0:
+        raise ValueError("--base-only-page-batch-size must be >= 0.")
+    if (
+        args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
+        and args.approx_base_page_token_coarse_dtype != "fp32"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-coarse-dtype is only valid with "
+            "--base-score-source=approx_page_maxsim_topk or two_stage_page_maxsim."
+        )
     if args.base_score_source == "two_stage_page_maxsim" and args.two_stage_exact_top_pages <= 0:
         raise ValueError(
             "--base-score-source=two_stage_page_maxsim requires "
@@ -1896,6 +2111,8 @@ def main() -> None:
         raise ValueError(
             f"--base-score-source={args.base_score_source} is currently only supported in base-only mode."
         )
+    if args.base_only_page_batch_size > 0 and not fixed_base_only:
+        raise ValueError("--base-only-page-batch-size is currently only supported in base-only mode.")
 
     if fixed_base_only and args.base_score_source == "baseline_pred":
         page_features = []
@@ -1938,6 +2155,8 @@ def main() -> None:
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
             "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
             "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
+            "base_only_page_batch_size": args.base_only_page_batch_size,
+            "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
@@ -2025,38 +2244,34 @@ def main() -> None:
 
     page_features: list[PageFeature] = []
     with torch.no_grad():
-        for doc_id, page_idx in page_specs:
-            page_uid = f"{doc_id}_page{page_idx}"
-            page_emb = docid2embs[doc_id][page_idx].view(-1, docid2embs[doc_id][page_idx].shape[-1]).to(
-                device=device,
-                dtype=torch.float32,
+        if fixed_base_only:
+            page_features = compute_base_only_page_features(
+                page_specs=page_specs,
+                docid2embs=docid2embs,
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+                base_score_source=args.base_score_source,
+                baseline_page_score_map=baseline_page_score_map,
+                approx_page_token_topk=(
+                    args.approx_base_page_token_topk
+                    if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
+                    else 0
+                ),
+                approx_page_token_scorer=args.approx_base_page_token_scorer,
+                approx_page_token_selector=args.approx_base_page_token_selector,
+                approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
+                query_axis_classes=query_axis_classes,
+                approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
+                coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
+                page_batch_size=args.base_only_page_batch_size,
             )
-            if fixed_base_only:
-                page_features.append(
-                    compute_base_only_page_feature(
-                        page_emb=page_emb,
-                        query_emb=query_emb,
-                        query_score_mask=query_score_mask,
-                        doc_id=doc_id,
-                        page_idx=page_idx,
-                        base_score_override=(
-                            baseline_page_score_map.get(page_uid)
-                            if args.base_score_source == "baseline_pred"
-                            else None
-                        ),
-                        approx_page_token_topk=(
-                            args.approx_base_page_token_topk
-                            if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim"}
-                            else 0
-                        ),
-                        approx_page_token_scorer=args.approx_base_page_token_scorer,
-                        approx_page_token_selector=args.approx_base_page_token_selector,
-                        approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
-                        query_axis_classes=query_axis_classes,
-                        approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
-                    )
+        else:
+            for doc_id, page_idx in page_specs:
+                page_uid = f"{doc_id}_page{page_idx}"
+                page_emb = docid2embs[doc_id][page_idx].view(-1, docid2embs[doc_id][page_idx].shape[-1]).to(
+                    device=device,
+                    dtype=torch.float32,
                 )
-            else:
                 page_token_classes = build_page_token_classes(
                     page_meta=page_meta[page_uid],
                     patch_axis_classes=patch_axis_classes_by_uid[page_uid],
@@ -2126,6 +2341,8 @@ def main() -> None:
         "approx_base_page_token_selector": args.approx_base_page_token_selector,
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
+        "base_only_page_batch_size": args.base_only_page_batch_size,
+        "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
@@ -2169,6 +2386,8 @@ def main() -> None:
                 "approx_base_page_token_selector": args.approx_base_page_token_selector,
                 "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
                 "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
+                "base_only_page_batch_size": args.base_only_page_batch_size,
+                "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
                 "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
@@ -2191,6 +2410,8 @@ def main() -> None:
     print(f"approx_base_page_token_selector: {args.approx_base_page_token_selector}")
     print(f"approx_base_page_token_spatial_reserve: {args.approx_base_page_token_spatial_reserve}")
     print(f"approx_base_page_token_label_reserve: {args.approx_base_page_token_label_reserve}")
+    print(f"base_only_page_batch_size: {args.base_only_page_batch_size}")
+    print(f"approx_base_page_token_coarse_dtype: {args.approx_base_page_token_coarse_dtype}")
     print(f"two_stage_exact_top_pages: {args.two_stage_exact_top_pages}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")
