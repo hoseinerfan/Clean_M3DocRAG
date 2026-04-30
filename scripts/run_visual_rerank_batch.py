@@ -25,10 +25,13 @@ from scripts.rerank_target_docs_visual_aware import (
     build_page_token_classes,
     build_rankings,
     clean_token_label,
+    compute_base_only_page_feature,
     compute_page_feature,
     grid_search_weights,
+    is_base_only_weights,
     load_patch_axis_classes_for_pages,
     load_splice_query_axis_classes,
+    make_base_only_page_feature,
     make_query_score_mask,
     parse_float_list,
     resolve_model_path,
@@ -246,25 +249,35 @@ def median_or_none(values: list[int]) -> float | None:
 def main() -> None:
     args = parse_args()
 
-    qids = load_qids(Path(args.qid_jsonl), args.qid_field, args.max_qids)
-    gold_rows = load_gold_rows(Path(args.gold), set(qids))
-    baseline_payload = load_baseline_payload(Path(args.baseline_pred), set(qids))
-
-    import torch
-    from m3docrag.retrieval import ColPaliRetrievalModel
-    from scripts.rerank_target_docs_visual_aware import load_doc_embeddings_for_doc_ids
-
-    retrieval_model = ColPaliRetrievalModel(
-        backbone_name_or_path=resolve_model_path(args.retrieval_model_name_or_path),
-        adapter_name_or_path=resolve_model_path(args.retrieval_adapter_model_name_or_path),
-    )
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     fixed_weights = WeightConfig(
         base=args.weight_base,
         visual=args.weight_visual,
         non_visual=args.weight_non_visual,
         balance=args.weight_balance,
     )
+    fixed_base_only = (not args.grid_search) and is_base_only_weights(fixed_weights)
+
+    qids = load_qids(Path(args.qid_jsonl), args.qid_field, args.max_qids)
+    gold_rows = load_gold_rows(Path(args.gold), set(qids))
+    baseline_payload = load_baseline_payload(Path(args.baseline_pred), set(qids))
+
+    torch = None
+    retrieval_model = None
+    load_doc_embeddings_for_doc_ids = None
+    device = None
+    if not (fixed_base_only and args.base_score_source == "baseline_pred"):
+        import torch as _torch
+        from m3docrag.retrieval import ColPaliRetrievalModel
+        from scripts.rerank_target_docs_visual_aware import load_doc_embeddings_for_doc_ids as _load_doc_embeddings_for_doc_ids
+
+        torch = _torch
+        load_doc_embeddings_for_doc_ids = _load_doc_embeddings_for_doc_ids
+        retrieval_model = ColPaliRetrievalModel(
+            backbone_name_or_path=resolve_model_path(args.retrieval_model_name_or_path),
+            adapter_name_or_path=resolve_model_path(args.retrieval_adapter_model_name_or_path),
+        )
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
     grid_base_values = parse_float_list(args.grid_base_values)
     grid_visual_values = parse_float_list(args.grid_visual_values)
     grid_non_visual_values = parse_float_list(args.grid_non_visual_values)
@@ -289,65 +302,100 @@ def main() -> None:
         )
         explicit_page_uids = set(baseline_page_uids)
 
-        docid2embs = load_doc_embeddings_for_doc_ids(candidate_doc_ids, args.embedding_name)
-        page_specs, page_meta = build_page_id_metadata(
-            docid2embs=docid2embs,
-            explicit_page_uids=explicit_page_uids,
-            nonspatial_token_position=args.nonspatial_token_position,
-        )
-        patch_axis_classes_by_uid = load_patch_axis_classes_for_pages(
-            labels_jsonl=args.splice_patch_labels_jsonl,
-            page_meta=page_meta,
-        )
-
         query_text = gold_row["question"]
-        query_meta = retrieval_model.encode_query_with_metadata(
-            query=query_text,
-            to_cpu=True,
-            query_token_filter=args.query_token_filter,
-        )
-        query_emb = query_meta["embeddings"].float().to(device=device, dtype=torch.float32)
-        query_raw_tokens = query_meta.get("raw_tokens", [])
-        query_token_labels = [clean_token_label(token) for token in query_raw_tokens]
-        query_axis_classes = load_splice_query_axis_classes(
-            query_labels_path=args.splice_query_token_labels,
-            qid=qid,
-            query_token_labels=query_token_labels,
-            query_raw_tokens=query_raw_tokens,
-        )
-        query_score_mask = make_query_score_mask(
-            query_raw_tokens=query_raw_tokens,
-            ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
-        )
-
-        page_features = []
-        with torch.no_grad():
-            for doc_id, page_idx in page_specs:
-                page_uid = f"{doc_id}_page{page_idx}"
-                page_emb = docid2embs[doc_id][page_idx].view(-1, docid2embs[doc_id][page_idx].shape[-1]).to(
-                    device=device,
-                    dtype=torch.float32,
-                )
-                page_token_classes = build_page_token_classes(
-                    page_meta=page_meta[page_uid],
-                    patch_axis_classes=patch_axis_classes_by_uid[page_uid],
-                )
+        if fixed_base_only and args.base_score_source == "baseline_pred":
+            query_axis_classes = []
+            page_features = []
+            for page_uid in baseline_page_uids:
+                doc_id, page_suffix = page_uid.rsplit("_page", 1)
+                page_idx = int(page_suffix)
                 page_features.append(
-                    compute_page_feature(
-                        page_emb=page_emb,
-                        query_emb=query_emb,
-                        query_axis_classes=query_axis_classes,
-                        query_score_mask=query_score_mask,
-                        page_token_classes=page_token_classes,
+                    make_base_only_page_feature(
                         doc_id=doc_id,
                         page_idx=page_idx,
-                        base_score_override=(
-                            baseline_page_score_map.get(page_uid)
-                            if args.base_score_source == "baseline_pred"
-                            else None
-                        ),
+                        base_page_score=baseline_page_score_map[page_uid],
                     )
                 )
+        else:
+            docid2embs = load_doc_embeddings_for_doc_ids(candidate_doc_ids, args.embedding_name)
+            page_specs, page_meta = build_page_id_metadata(
+                docid2embs=docid2embs,
+                explicit_page_uids=explicit_page_uids,
+                nonspatial_token_position=args.nonspatial_token_position,
+            )
+
+            query_meta = retrieval_model.encode_query_with_metadata(
+                query=query_text,
+                to_cpu=True,
+                query_token_filter=args.query_token_filter,
+            )
+            query_emb = query_meta["embeddings"].float().to(device=device, dtype=torch.float32)
+            query_raw_tokens = query_meta.get("raw_tokens", [])
+            query_token_labels = [clean_token_label(token) for token in query_raw_tokens]
+            query_score_mask = make_query_score_mask(
+                query_raw_tokens=query_raw_tokens,
+                ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
+            )
+
+            if fixed_base_only:
+                query_axis_classes = []
+                patch_axis_classes_by_uid = None
+            else:
+                query_axis_classes = load_splice_query_axis_classes(
+                    query_labels_path=args.splice_query_token_labels,
+                    qid=qid,
+                    query_token_labels=query_token_labels,
+                    query_raw_tokens=query_raw_tokens,
+                )
+                patch_axis_classes_by_uid = load_patch_axis_classes_for_pages(
+                    labels_jsonl=args.splice_patch_labels_jsonl,
+                    page_meta=page_meta,
+                )
+
+            page_features = []
+            with torch.no_grad():
+                for doc_id, page_idx in page_specs:
+                    page_uid = f"{doc_id}_page{page_idx}"
+                    page_emb = docid2embs[doc_id][page_idx].view(-1, docid2embs[doc_id][page_idx].shape[-1]).to(
+                        device=device,
+                        dtype=torch.float32,
+                    )
+                    if fixed_base_only:
+                        page_features.append(
+                            compute_base_only_page_feature(
+                                page_emb=page_emb,
+                                query_emb=query_emb,
+                                query_score_mask=query_score_mask,
+                                doc_id=doc_id,
+                                page_idx=page_idx,
+                                base_score_override=(
+                                    baseline_page_score_map.get(page_uid)
+                                    if args.base_score_source == "baseline_pred"
+                                    else None
+                                ),
+                            )
+                        )
+                    else:
+                        page_token_classes = build_page_token_classes(
+                            page_meta=page_meta[page_uid],
+                            patch_axis_classes=patch_axis_classes_by_uid[page_uid],
+                        )
+                        page_features.append(
+                            compute_page_feature(
+                                page_emb=page_emb,
+                                query_emb=query_emb,
+                                query_axis_classes=query_axis_classes,
+                                query_score_mask=query_score_mask,
+                                page_token_classes=page_token_classes,
+                                doc_id=doc_id,
+                                page_idx=page_idx,
+                                base_score_override=(
+                                    baseline_page_score_map.get(page_uid)
+                                    if args.base_score_source == "baseline_pred"
+                                    else None
+                                ),
+                            )
+                        )
 
         if args.grid_search:
             weights, best_grid_record, _grid_leaderboard = grid_search_weights(

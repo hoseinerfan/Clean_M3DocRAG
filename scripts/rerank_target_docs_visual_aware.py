@@ -51,6 +51,41 @@ class PageFeature:
     non_visual_patch_count: int
 
 
+def is_base_only_weights(weights: WeightConfig) -> bool:
+    return (
+        float(weights.visual) == 0.0
+        and float(weights.non_visual) == 0.0
+        and float(weights.balance) == 0.0
+    )
+
+
+def make_base_only_page_feature(
+    *,
+    doc_id: str,
+    page_idx: int,
+    base_page_score: float,
+) -> PageFeature:
+    return PageFeature(
+        doc_id=doc_id,
+        page_idx=page_idx,
+        page_uid=f"{doc_id}_page{page_idx}",
+        base_page_score=float(base_page_score),
+        visual_page_score=0.0,
+        non_visual_page_score=0.0,
+        visual_avg_score=0.0,
+        non_visual_avg_score=0.0,
+        balance_score=0.0,
+        visual_alignment_count=0,
+        visual_alignment_ratio=0.0,
+        non_visual_alignment_count=0,
+        non_visual_alignment_ratio=0.0,
+        visual_query_token_count=0,
+        non_visual_query_token_count=0,
+        visual_patch_count=0,
+        non_visual_patch_count=0,
+    )
+
+
 def parse_float_list(raw: str) -> list[float]:
     values = []
     for item in raw.split(","):
@@ -1185,6 +1220,27 @@ def compute_page_feature(
     )
 
 
+def compute_base_only_page_feature(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+    doc_id: str,
+    page_idx: int,
+    base_score_override: float | None = None,
+) -> PageFeature:
+    score_matrix = page_emb @ query_emb.T
+    full_best_scores = score_matrix.max(dim=0).values
+    active_best_scores = full_best_scores[query_score_mask.to(full_best_scores.device)]
+    exact_base_page_score = float(active_best_scores.sum().item())
+    base_page_score = exact_base_page_score if base_score_override is None else float(base_score_override)
+    return make_base_only_page_feature(
+        doc_id=doc_id,
+        page_idx=page_idx,
+        base_page_score=base_page_score,
+    )
+
+
 def fused_page_score(feature: PageFeature, weights: WeightConfig) -> float:
     return (
         weights.base * feature.base_page_score
@@ -1417,13 +1473,101 @@ def main() -> None:
     query_text, gold_doc_ids = load_query_text_and_gold_doc_ids(args)
     gold_page_uids = [str(value).strip() for value in args.gold_page_uid if str(value).strip()]
     candidate_doc_ids, explicit_page_uids, baseline_doc_rank_map, baseline_page_score_map = collect_candidate_sources(args)
+    fixed_weights = WeightConfig(
+        base=args.weight_base,
+        visual=args.weight_visual,
+        non_visual=args.weight_non_visual,
+        balance=args.weight_balance,
+    )
+    fixed_base_only = (not args.grid_search) and is_base_only_weights(fixed_weights)
+
+    if fixed_base_only and args.base_score_source == "baseline_pred":
+        page_features = []
+        for page_uid in sorted(explicit_page_uids):
+            doc_id, page_suffix = page_uid.rsplit("_page", 1)
+            page_idx = int(page_suffix)
+            score = baseline_page_score_map.get(page_uid)
+            if score is None:
+                continue
+            page_features.append(
+                make_base_only_page_feature(
+                    doc_id=doc_id,
+                    page_idx=page_idx,
+                    base_page_score=score,
+                )
+            )
+        if not page_features:
+            raise ValueError("No candidate pages were available for baseline_pred base-only reranking.")
+        query_axis_classes = []
+        query_token_labels = []
+        query_raw_tokens = []
+        best_grid_record = None
+        grid_leaderboard = []
+        weights = fixed_weights
+        reranked_docs, reranked_pages = build_rankings(
+            page_features=page_features,
+            weights=weights,
+            baseline_doc_rank_map=baseline_doc_rank_map,
+        )
+        gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
+        gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
+        summary = {
+            "qid": args.qid,
+            "query": query_text,
+            "query_token_filter": args.query_token_filter,
+            "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
+            "base_score_source": args.base_score_source,
+            "candidate_doc_count": len(candidate_doc_ids),
+            "candidate_page_count": len(page_features),
+            "query_axis_class_counts": axis_class_counts(query_axis_classes),
+            "gold_doc_ids": gold_doc_ids,
+            **gold_doc_summary,
+            "gold_page_uids": gold_page_uids,
+            **gold_page_summary,
+            "weights": asdict(weights),
+            "grid_search_enabled": args.grid_search,
+            "grid_search_best": best_grid_record,
+            "grid_search_leaderboard": grid_leaderboard,
+            "top_reranked_docs": reranked_docs[:10],
+            "top_reranked_pages": reranked_pages[:10],
+            "query_token_labels": query_token_labels,
+            "query_axis_classes": query_axis_classes,
+            "query_label_path": args.splice_query_token_labels,
+            "patch_label_path": args.splice_patch_labels_jsonl,
+            "explicit_page_uids": sorted(explicit_page_uids),
+            "baseline_doc_rank_map": baseline_doc_rank_map,
+        }
+        if args.output_json:
+            output_path = Path(args.output_json)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+            print(f"saved_summary: {output_path}")
+        if args.output_prediction_json:
+            prediction_payload = {
+                args.qid: {
+                    "pred_answer": "",
+                    "page_retrieval_results": [
+                        [item["doc_id"], item["page_idx"], item["fused_page_score"]]
+                        for item in reranked_pages
+                    ],
+                    "qid": args.qid,
+                    "question": query_text,
+                    "top_retrieved_docs": [item["doc_id"] for item in reranked_docs[:10]],
+                }
+            }
+            prediction_path = Path(args.output_prediction_json)
+            prediction_path.parent.mkdir(parents=True, exist_ok=True)
+            prediction_path.write_text(json.dumps(prediction_payload, indent=2) + "\n", encoding="utf-8")
+            print(f"saved_prediction: {prediction_path}")
+        return
+
     docid2embs = load_doc_embeddings_for_doc_ids(candidate_doc_ids, args.embedding_name)
     page_specs, page_meta = build_page_id_metadata(
         docid2embs=docid2embs,
         explicit_page_uids=explicit_page_uids,
         nonspatial_token_position=args.nonspatial_token_position,
     )
-    patch_axis_classes_by_uid = load_patch_axis_classes_for_pages(
+    patch_axis_classes_by_uid = None if fixed_base_only else load_patch_axis_classes_for_pages(
         labels_jsonl=args.splice_patch_labels_jsonl,
         page_meta=page_meta,
     )
@@ -1440,7 +1584,7 @@ def main() -> None:
     query_emb = query_meta["embeddings"].float()
     query_raw_tokens = query_meta.get("raw_tokens", [])
     query_token_labels = [clean_token_label(token) for token in query_raw_tokens]
-    query_axis_classes = load_splice_query_axis_classes(
+    query_axis_classes = [] if fixed_base_only else load_splice_query_axis_classes(
         query_labels_path=args.splice_query_token_labels,
         qid=args.qid,
         query_token_labels=query_token_labels,
@@ -1462,26 +1606,42 @@ def main() -> None:
                 device=device,
                 dtype=torch.float32,
             )
-            page_token_classes = build_page_token_classes(
-                page_meta=page_meta[page_uid],
-                patch_axis_classes=patch_axis_classes_by_uid[page_uid],
-            )
-            page_features.append(
-                compute_page_feature(
-                    page_emb=page_emb,
-                    query_emb=query_emb,
-                    query_axis_classes=query_axis_classes,
-                    query_score_mask=query_score_mask,
-                    page_token_classes=page_token_classes,
-                    doc_id=doc_id,
-                    page_idx=page_idx,
-                    base_score_override=(
-                        baseline_page_score_map.get(page_uid)
-                        if args.base_score_source == "baseline_pred"
-                        else None
-                    ),
+            if fixed_base_only:
+                page_features.append(
+                    compute_base_only_page_feature(
+                        page_emb=page_emb,
+                        query_emb=query_emb,
+                        query_score_mask=query_score_mask,
+                        doc_id=doc_id,
+                        page_idx=page_idx,
+                        base_score_override=(
+                            baseline_page_score_map.get(page_uid)
+                            if args.base_score_source == "baseline_pred"
+                            else None
+                        ),
+                    )
                 )
-            )
+            else:
+                page_token_classes = build_page_token_classes(
+                    page_meta=page_meta[page_uid],
+                    patch_axis_classes=patch_axis_classes_by_uid[page_uid],
+                )
+                page_features.append(
+                    compute_page_feature(
+                        page_emb=page_emb,
+                        query_emb=query_emb,
+                        query_axis_classes=query_axis_classes,
+                        query_score_mask=query_score_mask,
+                        page_token_classes=page_token_classes,
+                        doc_id=doc_id,
+                        page_idx=page_idx,
+                        base_score_override=(
+                            baseline_page_score_map.get(page_uid)
+                            if args.base_score_source == "baseline_pred"
+                            else None
+                        ),
+                    )
+                )
 
     if not page_features:
         raise ValueError("No candidate pages were scored.")
@@ -1499,12 +1659,7 @@ def main() -> None:
         )
         weights = best_weights
     else:
-        weights = WeightConfig(
-            base=args.weight_base,
-            visual=args.weight_visual,
-            non_visual=args.weight_non_visual,
-            balance=args.weight_balance,
-        )
+        weights = fixed_weights
         best_grid_record = None
         grid_leaderboard = []
 
