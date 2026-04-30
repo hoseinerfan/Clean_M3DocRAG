@@ -814,3 +814,176 @@ Interpretation:
 5. For approximate base-only MaxSim:
    - `top256` is the only promising first setting so far
    - it should be tested next on a larger set if a speed/quality tradeoff is needed
+
+## Update: 2026-04-30
+
+This section supersedes the older "82 / 141" broad-score discussion above. The current stable reference runs use:
+
+- query labels:
+  - `dev_query_visual_binary_labels_union_relaxed_v6_fulltrainlex_v2.jsonl`
+- patch labels:
+  - `layout_patch_assignments_done_so_far_plus_new_3class_full.jsonl`
+- baseline page pool:
+  - `ret1000 full`
+
+### Helper changes now on `main`
+
+Additional helper-only commits added after the previous note:
+
+- `78e1804` Add two-stage base-only MaxSim reranking
+- `aa6cb65` Fix page selection in two-stage MaxSim reranking
+- `c48aaf4` Add spatially diverse top-k token selection for MaxSim pruning
+- `2da9cfc` Fix torch import in spatial token selector
+- `fe2c3b8` Add query-label-aware token selection for MaxSim pruning
+- `f7010a6` Add base-only batching and coarse dtype controls
+- `d57bd10` Add visual rerank run comparison helper
+- `3fe8884` Add visual rerank subset filter helper
+- `5eb43e4` Add soft label prior for top-k MaxSim pruning
+- `f12d8f9` Add staged visual reranking over top pages
+- `69e92e2` Add doc-level exact refinement after top-k MaxSim
+
+### Current all-141 ImageListQ scoreboard
+
+Current stable runs on all `141` `ImageListQ` qids:
+
+- baseline control (`baseline_pred` reused as-is):
+  - `53 / 141` top-4
+  - `0 / 141` improved
+- base-only exact page MaxSim:
+  - `78 / 141` top-4
+- base-only approximate top-K MaxSim:
+  - `top256`
+  - `query_mean`
+  - `global_topk`
+  - `fp32`
+  - `79 / 141` top-4
+  - `74 / 141` improved
+- full visual-aware `v6`:
+  - `base = 1.0`
+  - `visual = 1.0`
+  - `non_visual = 0.0`
+  - `balance = 8.0`
+  - `80 / 141` top-4
+  - `75 / 141` improved
+
+Clean interpretation:
+
+- most of the gain comes from recomputing strong page-local base scores
+- `top256` is the best low-overhead approximation seen so far
+- the full visual-aware method is still the best tested absolute result, but only by `+1` over `top256`
+
+### Exact vs top256 disagreement analysis
+
+Head-to-head on all `141` qids:
+
+- `top4_only_in_exact = 2`
+- `top4_only_in_top256 = 3`
+- `top4_in_both = 76`
+- `top4_in_neither = 60`
+
+So `top256` is very close to exact in practical outcome. It does not behave like a broken approximation; it mainly changes a handful of near-boundary cases.
+
+For the `top256` run:
+
+- unrecoverable under the fixed top-1000 pool:
+  - `11` qids with `reranked_first_gold_doc_rank = None`
+- near-miss subset:
+  - `19` qids with reranked gold-doc rank in `5..20`
+
+This `19`-qid near-miss subset is the most actionable rescue set for later-stage reranking.
+
+### Negative results: methods that did not help
+
+The following variants were tested and are not currently recommended:
+
+- stronger coarse scorer:
+  - `query_token_max`
+  - matched exact-like behavior but did not beat `top256 + query_mean`
+- page-level two-stage exact refinement:
+  - `top256 -> exact top50 / top100 / top200 pages`
+  - did not beat plain `top256`
+- spatially diverse token selection:
+  - worse than plain global `top256`
+- hard query-label token reserve:
+  - worse than plain global `top256`
+- coarse `bf16` scoring:
+  - catastrophically unstable on all `141` qids
+  - `8 / 141` top-4
+- doc-level exact refinement on the generic near-miss set:
+  - `top256 -> exact full MaxSim on top100 docs`
+  - only `2 / 19` top-4 on the near-miss subset
+
+Interpretation:
+
+- many failures are not fixed by "more exact base MaxSim" alone
+- global visual-aware reranking also has limited marginal value on the whole pool
+
+### Selective visual reranking: the most promising new direction
+
+The new staged mode:
+
+- first runs cheap `top256` base-only ranking on the whole candidate pool
+- then recomputes full visual-aware features only for the top `N` stage-1 pages
+
+CLI:
+
+- `--visual-rerank-top-pages N`
+
+Important result on the `19`-qid near-miss subset:
+
+- `top256 -> staged top50 full_v6`
+  - `8 / 19` top-4
+  - `14 / 19` improved vs baseline
+
+This is the strongest recent signal for using visual scoring efficiently:
+
+- visual scoring is not a high-leverage global signal
+- but it is useful as a selective late reranker on boundary cases
+
+The all-141 staged run was queued after this note update and should be evaluated against:
+
+- base-only `top256`:
+  - `79 / 141`
+- full global visual-aware:
+  - `80 / 141`
+
+If staged top-50 lands near `80 / 141`, it is a much better efficiency story than running the full visual-aware reranker on all `1000` candidate pages.
+
+### Current recommended configurations
+
+Best absolute tested result on all `141`:
+
+- full visual-aware rerank
+- `query_token_filter = full`
+- `base_score_source = exact_page_maxsim`
+- `base = 1.0`
+- `visual = 1.0`
+- `non_visual = 0.0`
+- `balance = 8.0`
+
+Best efficiency / quality tradeoff tested so far:
+
+- base-only approximate MaxSim
+- `query_token_filter = full`
+- `base_score_source = approx_page_maxsim_topk`
+- `approx_base_page_token_topk = 256`
+- `approx_base_page_token_scorer = query_mean`
+- `approx_base_page_token_selector = global_topk`
+- `approx_base_page_token_coarse_dtype = fp32`
+- `base = 1.0`
+- `visual = 0.0`
+- `non_visual = 0.0`
+- `balance = 0.0`
+
+Most promising next deployment pattern:
+
+- use `top256` as the global cheap reranker
+- then run staged visual reranking only on a small shortlist, especially for the near-miss band (`5..20`)
+
+### Practical current view
+
+1. Strong page-local base rescoring is the main retrieval win.
+2. `top256` preserves essentially all of that gain at much lower cost.
+3. Visual-aware scoring seldom changes the global outcome, but it can matter on near-boundary logo / poster / appearance queries.
+4. Selective late visual reranking is more promising than global heavy visual reranking.
+5. Exact doc-level refinement after `top256` is not a strong generic fix; it should only be stress-tested on qids where `top256` is specifically worse than exact.
