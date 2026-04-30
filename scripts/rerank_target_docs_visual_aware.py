@@ -25,7 +25,7 @@ BASE_SCORE_SOURCE_CHOICES = (
     "two_stage_page_maxsim",
 )
 APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = ("query_mean", "query_token_max")
-APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = ("global_topk", "spatial_quadrant_mix")
+APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = ("global_topk", "spatial_quadrant_mix", "query_label_mix")
 BIG_RANK = 10**12
 
 
@@ -129,6 +129,8 @@ def compute_approx_base_page_score(
     approx_page_token_scorer: str,
     approx_page_token_selector: str,
     approx_page_token_spatial_reserve: int,
+    query_axis_classes: list[str] | None,
+    approx_page_token_label_reserve: int,
 ) -> float:
     pruned_page_emb = maybe_prune_page_tokens_for_base_only(
         page_emb=page_emb,
@@ -137,6 +139,8 @@ def compute_approx_base_page_score(
         approx_page_token_scorer=approx_page_token_scorer,
         approx_page_token_selector=approx_page_token_selector,
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+        query_axis_classes=query_axis_classes,
+        approx_page_token_label_reserve=approx_page_token_label_reserve,
     )
     return compute_exact_base_page_score(
         page_emb=pruned_page_emb,
@@ -189,6 +193,8 @@ def select_page_token_indices_for_base_only(
     approx_page_token_scorer: str,
     approx_page_token_selector: str,
     approx_page_token_spatial_reserve: int,
+    query_axis_classes: list[str] | None,
+    approx_page_token_label_reserve: int,
 ) -> list[int]:
     import torch
 
@@ -203,6 +209,44 @@ def select_page_token_indices_for_base_only(
 
     if approx_page_token_selector == "global_topk":
         return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+
+    if approx_page_token_selector == "query_label_mix":
+        visual_query_indices = []
+        if query_axis_classes is not None and len(query_axis_classes) == int(query_emb.shape[0]):
+            visual_query_indices = [
+                idx for idx, axis_class in enumerate(query_axis_classes) if axis_class == "visual"
+            ]
+        label_reserve = min(max(int(approx_page_token_label_reserve), 0), topk)
+        if label_reserve <= 0 or not visual_query_indices:
+            return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+
+        global_budget = topk - label_reserve
+        selected: set[int] = set()
+        if global_budget > 0:
+            selected.update(_topk_indices_from_scores(scores=coarse_scores, k=global_budget))
+
+        visual_query_index_tensor = torch.tensor(
+            visual_query_indices,
+            device=query_emb.device,
+            dtype=torch.long,
+        )
+        visual_query_emb = query_emb.index_select(0, visual_query_index_tensor)
+        label_scores = compute_coarse_page_token_scores(
+            page_emb=page_emb,
+            query_emb=visual_query_emb,
+            approx_page_token_scorer=approx_page_token_scorer,
+        )
+        selected.update(_topk_indices_from_scores(scores=label_scores, k=label_reserve))
+
+        if len(selected) < topk:
+            ranked_all = _topk_indices_from_scores(scores=coarse_scores, k=int(coarse_scores.shape[0]))
+            for idx in ranked_all:
+                selected.add(idx)
+                if len(selected) >= topk:
+                    break
+
+        ranked_selected = sorted(selected, key=lambda idx: float(coarse_scores[idx].item()), reverse=True)
+        return ranked_selected[:topk]
 
     if approx_page_token_selector != "spatial_quadrant_mix":
         raise ValueError(f"Unsupported approx_page_token_selector: {approx_page_token_selector!r}")
@@ -250,6 +294,8 @@ def maybe_prune_page_tokens_for_base_only(
     approx_page_token_scorer: str,
     approx_page_token_selector: str,
     approx_page_token_spatial_reserve: int,
+    query_axis_classes: list[str] | None,
+    approx_page_token_label_reserve: int,
 ) -> torch.Tensor:
     import torch
 
@@ -265,6 +311,8 @@ def maybe_prune_page_tokens_for_base_only(
         approx_page_token_scorer=approx_page_token_scorer,
         approx_page_token_selector=approx_page_token_selector,
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+        query_axis_classes=query_axis_classes,
+        approx_page_token_label_reserve=approx_page_token_label_reserve,
     )
     top_index_tensor = torch.tensor(top_indices, device=page_emb.device, dtype=torch.long)
     return page_emb.index_select(0, top_index_tensor)
@@ -908,6 +956,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-label-reserve",
+        type=int,
+        default=64,
+        help=(
+            "When --approx-base-page-token-selector=query_label_mix, reserve this many "
+            "token slots for pruning against the query's visual-token subset."
+        ),
+    )
+    parser.add_argument(
         "--two-stage-exact-top-pages",
         type=int,
         default=0,
@@ -1468,6 +1525,8 @@ def compute_base_only_page_feature(
     approx_page_token_scorer: str = "query_mean",
     approx_page_token_selector: str = "global_topk",
     approx_page_token_spatial_reserve: int = 64,
+    query_axis_classes: list[str] | None = None,
+    approx_page_token_label_reserve: int = 64,
 ) -> PageFeature:
     exact_base_page_score = compute_approx_base_page_score(
         page_emb=page_emb,
@@ -1477,6 +1536,8 @@ def compute_base_only_page_feature(
         approx_page_token_scorer=approx_page_token_scorer,
         approx_page_token_selector=approx_page_token_selector,
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+        query_axis_classes=query_axis_classes,
+        approx_page_token_label_reserve=approx_page_token_label_reserve,
     )
     base_page_score = exact_base_page_score if base_score_override is None else float(base_score_override)
     return make_base_only_page_feature(
@@ -1795,6 +1856,14 @@ def main() -> None:
             "--approx-base-page-token-spatial-reserve is only valid with "
             "--approx-base-page-token-selector=spatial_quadrant_mix."
         )
+    if (
+        args.approx_base_page_token_selector != "query_label_mix"
+        and args.approx_base_page_token_label_reserve != 64
+    ):
+        raise ValueError(
+            "--approx-base-page-token-label-reserve is only valid with "
+            "--approx-base-page-token-selector=query_label_mix."
+        )
     if args.base_score_source == "two_stage_page_maxsim" and args.two_stage_exact_top_pages <= 0:
         raise ValueError(
             "--base-score-source=two_stage_page_maxsim requires "
@@ -1868,6 +1937,7 @@ def main() -> None:
             "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
             "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+            "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
@@ -1936,12 +2006,15 @@ def main() -> None:
     query_emb = query_meta["embeddings"].float()
     query_raw_tokens = query_meta.get("raw_tokens", [])
     query_token_labels = [clean_token_label(token) for token in query_raw_tokens]
-    query_axis_classes = [] if fixed_base_only else load_splice_query_axis_classes(
-        query_labels_path=args.splice_query_token_labels,
-        qid=args.qid,
-        query_token_labels=query_token_labels,
-        query_raw_tokens=query_raw_tokens,
-    )
+    if fixed_base_only and args.approx_base_page_token_selector != "query_label_mix":
+        query_axis_classes = []
+    else:
+        query_axis_classes = load_splice_query_axis_classes(
+            query_labels_path=args.splice_query_token_labels,
+            qid=args.qid,
+            query_token_labels=query_token_labels,
+            query_raw_tokens=query_raw_tokens,
+        )
     query_score_mask = make_query_score_mask(
         query_raw_tokens=query_raw_tokens,
         ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
@@ -1979,6 +2052,8 @@ def main() -> None:
                         approx_page_token_scorer=args.approx_base_page_token_scorer,
                         approx_page_token_selector=args.approx_base_page_token_selector,
                         approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
+                        query_axis_classes=query_axis_classes,
+                        approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                     )
                 )
             else:
@@ -2050,6 +2125,7 @@ def main() -> None:
         "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
         "approx_base_page_token_selector": args.approx_base_page_token_selector,
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+        "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
@@ -2092,6 +2168,7 @@ def main() -> None:
                 "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
                 "approx_base_page_token_selector": args.approx_base_page_token_selector,
                 "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+                "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
                 "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
@@ -2113,6 +2190,7 @@ def main() -> None:
     print(f"approx_base_page_token_scorer: {args.approx_base_page_token_scorer}")
     print(f"approx_base_page_token_selector: {args.approx_base_page_token_selector}")
     print(f"approx_base_page_token_spatial_reserve: {args.approx_base_page_token_spatial_reserve}")
+    print(f"approx_base_page_token_label_reserve: {args.approx_base_page_token_label_reserve}")
     print(f"two_stage_exact_top_pages: {args.two_stage_exact_top_pages}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")

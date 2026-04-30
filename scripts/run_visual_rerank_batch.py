@@ -123,6 +123,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-label-reserve",
+        type=int,
+        default=64,
+        help=(
+            "When --approx-base-page-token-selector=query_label_mix, reserve this many "
+            "token slots for pruning against the query's visual-token subset."
+        ),
+    )
+    parser.add_argument(
         "--two-stage-exact-top-pages",
         type=int,
         default=0,
@@ -343,6 +352,14 @@ def main() -> None:
             "--approx-base-page-token-spatial-reserve is only valid with "
             "--approx-base-page-token-selector=spatial_quadrant_mix."
         )
+    if (
+        args.approx_base_page_token_selector != "query_label_mix"
+        and args.approx_base_page_token_label_reserve != 64
+    ):
+        raise ValueError(
+            "--approx-base-page-token-label-reserve is only valid with "
+            "--approx-base-page-token-selector=query_label_mix."
+        )
     if args.base_score_source == "two_stage_page_maxsim" and args.two_stage_exact_top_pages <= 0:
         raise ValueError(
             "--base-score-source=two_stage_page_maxsim requires "
@@ -450,8 +467,16 @@ def main() -> None:
             )
 
             if fixed_base_only:
-                query_axis_classes = []
                 patch_axis_classes_by_uid = None
+                if args.approx_base_page_token_selector == "query_label_mix":
+                    query_axis_classes = load_splice_query_axis_classes(
+                        query_labels_path=args.splice_query_token_labels,
+                        qid=qid,
+                        query_token_labels=query_token_labels,
+                        query_raw_tokens=query_raw_tokens,
+                    )
+                else:
+                    query_axis_classes = []
             else:
                 query_axis_classes = load_splice_query_axis_classes(
                     query_labels_path=args.splice_query_token_labels,
@@ -493,6 +518,8 @@ def main() -> None:
                                 approx_page_token_scorer=args.approx_base_page_token_scorer,
                                 approx_page_token_selector=args.approx_base_page_token_selector,
                                 approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
+                                query_axis_classes=query_axis_classes,
+                                approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                             )
                         )
                     else:
@@ -582,6 +609,7 @@ def main() -> None:
             "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
             "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+            "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
@@ -631,6 +659,7 @@ def main() -> None:
         "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
         "approx_base_page_token_selector": args.approx_base_page_token_selector,
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+        "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
