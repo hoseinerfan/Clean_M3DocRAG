@@ -207,6 +207,31 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--visual-rerank-require-informative-visual-query",
+        action="store_true",
+        help=(
+            "Only apply staged visual reranking when the query has at least one informative "
+            "visual cue token after filtering weak words like articles and prepositions."
+        ),
+    )
+    parser.add_argument(
+        "--visual-rerank-filter-to-informative-visual-query",
+        action="store_true",
+        help=(
+            "When staged visual reranking is active, only let informative visual query tokens "
+            "contribute to the visual channel; weak visual-labeled tokens are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--visual-rerank-preserve-stage1-base-score",
+        action="store_true",
+        help=(
+            "When staged visual reranking is active, keep the stage-1 base score for shortlisted "
+            "pages and recompute only the visual/non-visual/balance channels. This makes the "
+            "second stage a late tie-breaker instead of a partial exact-base replacement."
+        ),
+    )
+    parser.add_argument(
         "--ignore-pad-scores-in-final-ranking",
         action="store_true",
     )
@@ -479,6 +504,19 @@ def main() -> None:
         )
     if args.visual_rerank_top_pages < 0:
         raise ValueError("--visual-rerank-top-pages must be >= 0.")
+    if (
+        args.visual_rerank_top_pages == 0
+        and (
+            args.visual_rerank_require_informative_visual_query
+            or args.visual_rerank_filter_to_informative_visual_query
+            or args.visual_rerank_preserve_stage1_base_score
+        )
+    ):
+        raise ValueError(
+            "--visual-rerank-require-informative-visual-query, "
+            "--visual-rerank-filter-to-informative-visual-query, and "
+            "--visual-rerank-preserve-stage1-base-score require --visual-rerank-top-pages > 0."
+        )
 
     fixed_weights = WeightConfig(
         base=args.weight_base,
@@ -734,9 +772,13 @@ def main() -> None:
                     docid2embs=docid2embs,
                     query_emb=query_emb,
                     query_axis_classes=query_axis_classes,
+                    query_token_labels=query_token_labels,
                     query_score_mask=query_score_mask,
                     page_token_classes_by_uid=page_token_classes_by_uid,
                     top_pages=args.visual_rerank_top_pages,
+                    require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
+                    filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
+                    preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
                 )
 
         if args.grid_search:
@@ -803,6 +845,9 @@ def main() -> None:
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
             "visual_rerank_top_pages": args.visual_rerank_top_pages,
+            "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
+            "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
+            "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
@@ -859,6 +904,9 @@ def main() -> None:
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
         "visual_rerank_top_pages": args.visual_rerank_top_pages,
+        "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
+        "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
+        "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
         "splice_query_token_labels": args.splice_query_token_labels,
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
         "grid_search_enabled": args.grid_search,

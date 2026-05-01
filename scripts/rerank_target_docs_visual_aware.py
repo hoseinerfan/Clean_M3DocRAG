@@ -274,6 +274,27 @@ def _select_informative_visual_query_indices(
     ]
 
 
+def filter_query_axis_classes_to_informative_visual(
+    *,
+    query_axis_classes: list[str],
+    query_token_labels: list[str] | None,
+) -> list[str]:
+    informative_visual_indices = set(
+        _select_informative_visual_query_indices(
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+        )
+    )
+    if not informative_visual_indices:
+        return list(query_axis_classes)
+
+    filtered = list(query_axis_classes)
+    for idx, axis_class in enumerate(filtered):
+        if axis_class == "visual" and idx not in informative_visual_indices:
+            filtered[idx] = "unknown"
+    return filtered
+
+
 def select_page_token_indices_for_base_only(
     *,
     page_emb: torch.Tensor,
@@ -1223,6 +1244,31 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--visual-rerank-require-informative-visual-query",
+        action="store_true",
+        help=(
+            "Only apply staged visual reranking when the query has at least one informative "
+            "visual cue token after filtering weak words like articles and prepositions."
+        ),
+    )
+    parser.add_argument(
+        "--visual-rerank-filter-to-informative-visual-query",
+        action="store_true",
+        help=(
+            "When staged visual reranking is active, only let informative visual query tokens "
+            "contribute to the visual channel; weak visual-labeled tokens are ignored."
+        ),
+    )
+    parser.add_argument(
+        "--visual-rerank-preserve-stage1-base-score",
+        action="store_true",
+        help=(
+            "When staged visual reranking is active, keep the stage-1 base score for shortlisted "
+            "pages and recompute only the visual/non-visual/balance channels. This makes the "
+            "second stage a late tie-breaker instead of a partial exact-base replacement."
+        ),
+    )
+    parser.add_argument(
         "--nonspatial-token-position",
         default="suffix",
         choices=["prefix", "suffix"],
@@ -2080,12 +2126,32 @@ def apply_visual_rerank_to_top_pages(
     docid2embs: dict[str, object],
     query_emb: torch.Tensor,
     query_axis_classes: list[str],
+    query_token_labels: list[str] | None,
     query_score_mask: torch.Tensor,
     page_token_classes_by_uid: dict[str, list[str]],
     top_pages: int,
+    require_informative_visual_query: bool = False,
+    filter_to_informative_visual_query: bool = False,
+    preserve_stage1_base_score: bool = False,
 ) -> list[PageFeature]:
     if top_pages <= 0 or not page_features:
         return page_features
+
+    informative_visual_query_indices = _select_informative_visual_query_indices(
+        query_axis_classes=query_axis_classes,
+        query_token_labels=query_token_labels,
+    )
+    if require_informative_visual_query and not informative_visual_query_indices:
+        return page_features
+
+    effective_query_axis_classes = (
+        filter_query_axis_classes_to_informative_visual(
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+        )
+        if filter_to_informative_visual_query
+        else query_axis_classes
+    )
 
     _stage1_ranked_docs, stage1_ranked_pages = build_rankings(
         page_features=page_features,
@@ -2112,12 +2178,12 @@ def apply_visual_rerank_to_top_pages(
             compute_page_feature(
                 page_emb=page_emb,
                 query_emb=query_emb,
-                query_axis_classes=query_axis_classes,
+                query_axis_classes=effective_query_axis_classes,
                 query_score_mask=query_score_mask,
                 page_token_classes=page_token_classes,
                 doc_id=feature.doc_id,
                 page_idx=feature.page_idx,
-                base_score_override=None,
+                base_score_override=feature.base_page_score if preserve_stage1_base_score else None,
             )
         )
 
@@ -2449,6 +2515,19 @@ def main() -> None:
         )
     if args.visual_rerank_top_pages < 0:
         raise ValueError("--visual-rerank-top-pages must be >= 0.")
+    if (
+        args.visual_rerank_top_pages == 0
+        and (
+            args.visual_rerank_require_informative_visual_query
+            or args.visual_rerank_filter_to_informative_visual_query
+            or args.visual_rerank_preserve_stage1_base_score
+        )
+    ):
+        raise ValueError(
+            "--visual-rerank-require-informative-visual-query, "
+            "--visual-rerank-filter-to-informative-visual-query, and "
+            "--visual-rerank-preserve-stage1-base-score require --visual-rerank-top-pages > 0."
+        )
 
     import torch
 
@@ -2750,9 +2829,13 @@ def main() -> None:
             docid2embs=docid2embs,
             query_emb=query_emb,
             query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
             query_score_mask=query_score_mask,
             page_token_classes_by_uid=page_token_classes_by_uid,
             top_pages=args.visual_rerank_top_pages,
+            require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
+            filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
+            preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
         )
 
     if args.grid_search:
@@ -2798,6 +2881,9 @@ def main() -> None:
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
         "visual_rerank_top_pages": args.visual_rerank_top_pages,
+        "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
+        "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
+        "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
