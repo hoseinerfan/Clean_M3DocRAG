@@ -9,6 +9,7 @@
 # The default array range 0-4 matches 2441 dev qids split into chunks of 500.
 
 #SBATCH --job-name=mmqa-top256
+#SBATCH --partition=gpu
 #SBATCH --output=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/slurm_mmqa_top256_%A_%a.out
 #SBATCH --error=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/slurm_mmqa_top256_%A_%a.err
 #SBATCH --nodes=1
