@@ -987,3 +987,139 @@ Most promising next deployment pattern:
 3. Visual-aware scoring seldom changes the global outcome, but it can matter on near-boundary logo / poster / appearance queries.
 4. Selective late visual reranking is more promising than global heavy visual reranking.
 5. Exact doc-level refinement after `top256` is not a strong generic fix; it should only be stress-tested on qids where `top256` is specifically worse than exact.
+
+### Later 2026-04-30 update: full-pool transfer checks
+
+#### Staged visual rerank did not transfer to all `141`
+
+After the promising `19`-qid near-miss result, the staged full-pool run was completed on all `141` `ImageListQ` qids:
+
+- config:
+  - stage 1:
+    - `base_score_source = approx_page_maxsim_topk`
+    - `approx_base_page_token_topk = 256`
+    - `approx_base_page_token_scorer = query_mean`
+    - `approx_base_page_token_selector = global_topk`
+  - stage 2:
+    - `visual_rerank_top_pages = 50`
+    - `base = 1.0`
+    - `visual = 1.0`
+    - `non_visual = 0.0`
+    - `balance = 8.0`
+
+Result:
+
+- `improved_doc_rank_count = 78`
+- `reranked_top4_doc_count = 78`
+
+Interpretation:
+
+- the staged `top50` visual rerank improved many qids in rank terms
+- but it did not beat either:
+  - base-only `top256`:
+    - `79 / 141` top-4
+  - full global visual-aware:
+    - `80 / 141` top-4
+- so the local near-miss success did not transfer to the full `141`
+
+Practical ranking remains:
+
+1. full global visual-aware:
+   - `80 / 141` top-4
+2. base-only `top256`:
+   - `79 / 141` top-4
+3. base-only exact:
+   - `78 / 141` top-4
+4. staged `top50` visual rerank:
+   - `78 / 141` top-4
+
+#### Doc-level exact refinement is targeted, not general
+
+The new `two_stage_doc_maxsim` path was evaluated in two ways.
+
+On the generic `19`-qid near-miss subset:
+
+- `top256 -> exact full MaxSim on top100 docs`
+  - `2 / 19` top-4
+
+This is weak and confirms that most near-miss failures are not fixed by reverting to exact base MaxSim alone.
+
+On the `34` qids where `top256` was specifically worse than exact:
+
+- `docstage50`
+  - `8 / 34` top-4
+  - reranked median `17.5`
+- `docstage100`
+  - `8 / 34` top-4
+  - reranked median `16.0`
+- `docstage200`
+  - `8 / 34` top-4
+  - reranked median `16.0`
+
+Interpretation:
+
+- this method has a mild repair effect on the "top256 hurt relative to exact" subset
+- its benefit saturates by `top100` docs
+- `top200` adds cost without any measured gain
+- this is not a strong general second-stage default
+
+If this family is kept at all, `two_stage_doc_maxsim` with:
+
+- `two_stage_exact_top_docs = 100`
+
+is the representative setting.
+
+#### Top-10 view from the existing outputs
+
+Using the saved per-qid `jsonl` outputs, the methods can also be compared at `top10` without rerunning anything.
+
+Top-10 gold-doc counts on all `141` `ImageListQ` qids:
+
+- baseline control:
+  - `72 / 141`
+- base-only exact:
+  - `90 / 141`
+- base-only `top256`:
+  - `88 / 141`
+- full global visual-aware:
+  - `90 / 141`
+- staged `top50` visual rerank:
+  - `87 / 141`
+
+Top-10 gold-page counts:
+
+- baseline control:
+  - `65 / 141`
+- base-only exact:
+  - `84 / 141`
+- base-only `top256`:
+  - `84 / 141`
+- full global visual-aware:
+  - `89 / 141`
+- staged `top50` visual rerank:
+  - `85 / 141`
+
+Interpretation:
+
+- at `top4`, `top256` slightly beats exact (`79` vs `78`)
+- at `top10`, exact is better than `top256` for docs (`90` vs `88`)
+- full global visual-aware ties exact at `top10 doc`, but is best at `top10 page`
+
+This suggests:
+
+- `top256` is strongest for aggressive early precision / top-4 boundary wins
+- exact base rescoring is slightly better for broader top-10 recovery
+- visual-aware scoring helps more on page surfacing than on additional doc-level top-10 wins
+
+#### Subset definition reminder
+
+There are two different "visual" subset notions in the project:
+
+1. question-type level:
+   - the `10 / 16` MMQA image-involving question types
+   - this is the right subset for "requires visual evidence to answer"
+2. query-label level:
+   - qids whose query-label export contains explicit visual-needed cues
+   - this is the right subset for "does the question text expose a visual cue"
+
+Do not mix these in later analysis; they answer different questions.
