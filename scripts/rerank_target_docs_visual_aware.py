@@ -1278,6 +1278,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--scale-auxiliary-by-base-score",
+        action="store_true",
+        help=(
+            "Scale non-base rerank channels by normalized base page score "
+            "(base_page_score / max_base_page_score) so auxiliary signals help more on pages "
+            "that are already strong under the base retriever."
+        ),
+    )
+    parser.add_argument(
         "--nonspatial-token-position",
         default="suffix",
         choices=["prefix", "suffix"],
@@ -2222,16 +2231,26 @@ def build_rankings(
     baseline_doc_rank_map: dict[str, int],
     stage1_base_doc_rank_map: dict[str, int] | None = None,
     gated_visual_top_docs: int = 0,
+    scale_auxiliary_by_base_score: bool = False,
 ) -> tuple[list[dict], list[dict]]:
-    def fused_with_gate(item: PageFeature) -> float:
-        score = weights.base * item.base_page_score
+    max_base_page_score = max((item.base_page_score for item in page_features), default=0.0)
+
+    def auxiliary_scale(item: PageFeature) -> float:
         if gated_visual_top_docs > 0:
             if stage1_base_doc_rank_map is None:
-                return score
+                return 0.0
             doc_rank = stage1_base_doc_rank_map.get(item.doc_id)
             if doc_rank is None or doc_rank > gated_visual_top_docs:
-                return score
-        return score + auxiliary_page_bonus(item, weights)
+                return 0.0
+        if not scale_auxiliary_by_base_score:
+            return 1.0
+        if max_base_page_score <= 0.0:
+            return 0.0
+        return max(0.0, min(1.0, item.base_page_score / max_base_page_score))
+
+    def fused_with_gate(item: PageFeature) -> float:
+        score = weights.base * item.base_page_score
+        return score + auxiliary_page_bonus(item, weights) * auxiliary_scale(item)
 
     ranked_pages = sorted(
         page_features,
@@ -2247,20 +2266,15 @@ def build_rankings(
     reranked_pages = []
     for rank, item in enumerate(ranked_pages, start=1):
         payload = asdict(item)
+        auxiliary_bonus = auxiliary_page_bonus(item, weights)
+        page_auxiliary_scale = auxiliary_scale(item)
         payload["fused_page_score"] = fused_with_gate(item)
-        payload["auxiliary_page_bonus"] = auxiliary_page_bonus(item, weights)
+        payload["auxiliary_page_bonus"] = auxiliary_bonus
+        payload["auxiliary_base_scale"] = page_auxiliary_scale
         payload["stage1_base_doc_rank"] = (
             None if stage1_base_doc_rank_map is None else stage1_base_doc_rank_map.get(item.doc_id)
         )
-        payload["gated_visual_applied"] = (
-            True
-            if gated_visual_top_docs <= 0
-            else (
-                stage1_base_doc_rank_map is not None
-                and stage1_base_doc_rank_map.get(item.doc_id) is not None
-                and stage1_base_doc_rank_map[item.doc_id] <= gated_visual_top_docs
-            )
-        )
+        payload["gated_visual_applied"] = page_auxiliary_scale > 0.0
         payload["rank"] = rank
         reranked_pages.append(payload)
 
@@ -2280,6 +2294,7 @@ def build_rankings(
                 "best_page_non_visual_score": item["non_visual_page_score"],
                 "best_page_balance_score": item["balance_score"],
                 "best_page_auxiliary_bonus": item["auxiliary_page_bonus"],
+                "best_page_auxiliary_scale": item["auxiliary_base_scale"],
                 "stage1_base_doc_rank": item["stage1_base_doc_rank"],
                 "gated_visual_applied": item["gated_visual_applied"],
                 "baseline_doc_rank": baseline_doc_rank_map.get(doc_id),
@@ -2360,6 +2375,7 @@ def grid_search_weights(
     baseline_doc_rank_map: dict[str, int],
     stage1_base_doc_rank_map: dict[str, int] | None,
     gated_visual_top_docs: int,
+    scale_auxiliary_by_base_score: bool,
     gold_doc_ids: list[str],
     gold_page_uids: list[str],
     base_values: list[float],
@@ -2389,6 +2405,7 @@ def grid_search_weights(
             baseline_doc_rank_map=baseline_doc_rank_map,
             stage1_base_doc_rank_map=stage1_base_doc_rank_map,
             gated_visual_top_docs=gated_visual_top_docs,
+            scale_auxiliary_by_base_score=scale_auxiliary_by_base_score,
         )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids) if gold_doc_ids else None
         gold_page_summary = summarize_gold_page_ranks(_reranked_pages, gold_page_uids) if gold_page_uids else None
@@ -2647,6 +2664,7 @@ def main() -> None:
             baseline_doc_rank_map=baseline_doc_rank_map,
             stage1_base_doc_rank_map=None,
             gated_visual_top_docs=args.gated_visual_top_docs,
+            scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
         )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
         gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
@@ -2665,6 +2683,7 @@ def main() -> None:
             "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "gated_visual_top_docs": args.gated_visual_top_docs,
+            "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
@@ -2914,6 +2933,7 @@ def main() -> None:
             baseline_doc_rank_map=baseline_doc_rank_map,
             stage1_base_doc_rank_map=stage1_base_doc_rank_map,
             gated_visual_top_docs=args.gated_visual_top_docs,
+            scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
             gold_doc_ids=gold_doc_ids,
             gold_page_uids=gold_page_uids,
             base_values=parse_float_list(args.grid_base_values),
@@ -2933,6 +2953,7 @@ def main() -> None:
         baseline_doc_rank_map=baseline_doc_rank_map,
         stage1_base_doc_rank_map=stage1_base_doc_rank_map,
         gated_visual_top_docs=args.gated_visual_top_docs,
+        scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
     )
     gold_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
     gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
@@ -2959,6 +2980,7 @@ def main() -> None:
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
         "gated_visual_top_docs": args.gated_visual_top_docs,
+        "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
@@ -3004,6 +3026,8 @@ def main() -> None:
                 "base_only_page_batch_size": args.base_only_page_batch_size,
                 "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
                 "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
+                "gated_visual_top_docs": args.gated_visual_top_docs,
+                "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
                 "patch_label_path": args.splice_patch_labels_jsonl,
@@ -3028,6 +3052,8 @@ def main() -> None:
     print(f"base_only_page_batch_size: {args.base_only_page_batch_size}")
     print(f"approx_base_page_token_coarse_dtype: {args.approx_base_page_token_coarse_dtype}")
     print(f"two_stage_exact_top_pages: {args.two_stage_exact_top_pages}")
+    print(f"gated_visual_top_docs: {args.gated_visual_top_docs}")
+    print(f"scale_auxiliary_by_base_score: {args.scale_auxiliary_by_base_score}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")
     print(f"candidate_page_count: {len(page_features)}")

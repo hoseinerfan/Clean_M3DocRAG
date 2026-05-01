@@ -242,6 +242,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--scale-auxiliary-by-base-score",
+        action="store_true",
+        help=(
+            "Scale non-base rerank channels by normalized base page score "
+            "(base_page_score / max_base_page_score) so auxiliary signals help more on pages "
+            "that are already strong under the base retriever."
+        ),
+    )
+    parser.add_argument(
         "--ignore-pad-scores-in-final-ranking",
         action="store_true",
     )
@@ -803,6 +812,7 @@ def main() -> None:
                 baseline_doc_rank_map=baseline_doc_rank_map,
                 stage1_base_doc_rank_map=stage1_base_doc_rank_map,
                 gated_visual_top_docs=args.gated_visual_top_docs,
+                scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
                 gold_doc_ids=gold_doc_ids,
                 gold_page_uids=[],
                 base_values=grid_base_values,
@@ -820,6 +830,7 @@ def main() -> None:
             baseline_doc_rank_map=baseline_doc_rank_map,
             stage1_base_doc_rank_map=stage1_base_doc_rank_map,
             gated_visual_top_docs=args.gated_visual_top_docs,
+            scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
         )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
 
@@ -866,6 +877,7 @@ def main() -> None:
             "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
             "visual_rerank_top_pages": args.visual_rerank_top_pages,
             "gated_visual_top_docs": args.gated_visual_top_docs,
+            "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
             "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
             "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
@@ -926,6 +938,7 @@ def main() -> None:
         "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
         "visual_rerank_top_pages": args.visual_rerank_top_pages,
         "gated_visual_top_docs": args.gated_visual_top_docs,
+        "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
