@@ -30,6 +30,7 @@ from scripts.rerank_target_docs_visual_aware import (
     build_page_id_metadata,
     build_page_token_classes,
     build_rankings,
+    build_stage1_base_doc_rank_map,
     clean_token_label,
     compute_base_only_page_features,
     compute_base_only_page_feature,
@@ -229,6 +230,15 @@ def parse_args() -> argparse.Namespace:
             "When staged visual reranking is active, keep the stage-1 base score for shortlisted "
             "pages and recompute only the visual/non-visual/balance channels. This makes the "
             "second stage a late tie-breaker instead of a partial exact-base replacement."
+        ),
+    )
+    parser.add_argument(
+        "--gated-visual-top-docs",
+        type=int,
+        default=0,
+        help=(
+            "Only apply non-base rerank channels (visual, non-visual, balance) to docs whose "
+            "stage-1 base-only doc rank is <= this value. Use 0 to disable gating."
         ),
     )
     parser.add_argument(
@@ -517,6 +527,8 @@ def main() -> None:
             "--visual-rerank-filter-to-informative-visual-query, and "
             "--visual-rerank-preserve-stage1-base-score require --visual-rerank-top-pages > 0."
         )
+    if args.gated_visual_top_docs < 0:
+        raise ValueError("--gated-visual-top-docs must be >= 0.")
 
     fixed_weights = WeightConfig(
         base=args.weight_base,
@@ -586,6 +598,7 @@ def main() -> None:
         explicit_page_uids = set(baseline_page_uids)
 
         query_text = gold_row["question"]
+        stage1_base_doc_rank_map: dict[str, int] | None = None
         if fixed_base_only and args.base_score_source == "baseline_pred":
             query_axis_classes = []
             page_features = []
@@ -765,6 +778,8 @@ def main() -> None:
                     query_score_mask=query_score_mask,
                     top_docs=args.two_stage_exact_top_docs,
                 )
+            if args.gated_visual_top_docs > 0 and staged_visual_rerank:
+                stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
             if staged_visual_rerank:
                 assert page_token_classes_by_uid is not None
                 page_features = apply_visual_rerank_to_top_pages(
@@ -780,11 +795,14 @@ def main() -> None:
                     filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                     preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
                 )
-
+            if args.gated_visual_top_docs > 0 and stage1_base_doc_rank_map is None:
+                stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
         if args.grid_search:
             weights, best_grid_record, _grid_leaderboard = grid_search_weights(
                 page_features=page_features,
                 baseline_doc_rank_map=baseline_doc_rank_map,
+                stage1_base_doc_rank_map=stage1_base_doc_rank_map,
+                gated_visual_top_docs=args.gated_visual_top_docs,
                 gold_doc_ids=gold_doc_ids,
                 gold_page_uids=[],
                 base_values=grid_base_values,
@@ -800,6 +818,8 @@ def main() -> None:
             page_features=page_features,
             weights=weights,
             baseline_doc_rank_map=baseline_doc_rank_map,
+            stage1_base_doc_rank_map=stage1_base_doc_rank_map,
+            gated_visual_top_docs=args.gated_visual_top_docs,
         )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
 
@@ -845,6 +865,7 @@ def main() -> None:
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
             "visual_rerank_top_pages": args.visual_rerank_top_pages,
+            "gated_visual_top_docs": args.gated_visual_top_docs,
             "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
             "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
             "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
@@ -904,6 +925,7 @@ def main() -> None:
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
         "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
         "visual_rerank_top_pages": args.visual_rerank_top_pages,
+        "gated_visual_top_docs": args.gated_visual_top_docs,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,

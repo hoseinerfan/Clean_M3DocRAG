@@ -1269,6 +1269,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--gated-visual-top-docs",
+        type=int,
+        default=0,
+        help=(
+            "Only apply non-base rerank channels (visual, non-visual, balance) to docs whose "
+            "stage-1 base-only doc rank is <= this value. Use 0 to disable gating."
+        ),
+    )
+    parser.add_argument(
         "--nonspatial-token-position",
         default="suffix",
         choices=["prefix", "suffix"],
@@ -2199,15 +2208,35 @@ def fused_page_score(feature: PageFeature, weights: WeightConfig) -> float:
     )
 
 
+def auxiliary_page_bonus(feature: PageFeature, weights: WeightConfig) -> float:
+    return (
+        weights.visual * feature.visual_page_score
+        + weights.non_visual * feature.non_visual_page_score
+        + weights.balance * feature.balance_score
+    )
+
+
 def build_rankings(
     page_features: list[PageFeature],
     weights: WeightConfig,
     baseline_doc_rank_map: dict[str, int],
+    stage1_base_doc_rank_map: dict[str, int] | None = None,
+    gated_visual_top_docs: int = 0,
 ) -> tuple[list[dict], list[dict]]:
+    def fused_with_gate(item: PageFeature) -> float:
+        score = weights.base * item.base_page_score
+        if gated_visual_top_docs > 0:
+            if stage1_base_doc_rank_map is None:
+                return score
+            doc_rank = stage1_base_doc_rank_map.get(item.doc_id)
+            if doc_rank is None or doc_rank > gated_visual_top_docs:
+                return score
+        return score + auxiliary_page_bonus(item, weights)
+
     ranked_pages = sorted(
         page_features,
         key=lambda item: (
-            fused_page_score(item, weights),
+            fused_with_gate(item),
             item.base_page_score,
             item.visual_page_score,
             item.non_visual_page_score,
@@ -2218,7 +2247,20 @@ def build_rankings(
     reranked_pages = []
     for rank, item in enumerate(ranked_pages, start=1):
         payload = asdict(item)
-        payload["fused_page_score"] = fused_page_score(item, weights)
+        payload["fused_page_score"] = fused_with_gate(item)
+        payload["auxiliary_page_bonus"] = auxiliary_page_bonus(item, weights)
+        payload["stage1_base_doc_rank"] = (
+            None if stage1_base_doc_rank_map is None else stage1_base_doc_rank_map.get(item.doc_id)
+        )
+        payload["gated_visual_applied"] = (
+            True
+            if gated_visual_top_docs <= 0
+            else (
+                stage1_base_doc_rank_map is not None
+                and stage1_base_doc_rank_map.get(item.doc_id) is not None
+                and stage1_base_doc_rank_map[item.doc_id] <= gated_visual_top_docs
+            )
+        )
         payload["rank"] = rank
         reranked_pages.append(payload)
 
@@ -2237,6 +2279,9 @@ def build_rankings(
                 "best_page_visual_score": item["visual_page_score"],
                 "best_page_non_visual_score": item["non_visual_page_score"],
                 "best_page_balance_score": item["balance_score"],
+                "best_page_auxiliary_bonus": item["auxiliary_page_bonus"],
+                "stage1_base_doc_rank": item["stage1_base_doc_rank"],
+                "gated_visual_applied": item["gated_visual_applied"],
                 "baseline_doc_rank": baseline_doc_rank_map.get(doc_id),
             }
 
@@ -2249,6 +2294,15 @@ def build_rankings(
         item["rank"] = rank
 
     return reranked_docs, reranked_pages
+
+
+def build_stage1_base_doc_rank_map(page_features: list[PageFeature]) -> dict[str, int]:
+    stage1_ranked_docs, _stage1_ranked_pages = build_rankings(
+        page_features=page_features,
+        weights=WeightConfig(base=1.0, visual=0.0, non_visual=0.0, balance=0.0),
+        baseline_doc_rank_map={},
+    )
+    return {item["doc_id"]: item["rank"] for item in stage1_ranked_docs}
 
 
 def summarize_gold_doc_ranks(
@@ -2304,6 +2358,8 @@ def grid_search_weights(
     *,
     page_features: list[PageFeature],
     baseline_doc_rank_map: dict[str, int],
+    stage1_base_doc_rank_map: dict[str, int] | None,
+    gated_visual_top_docs: int,
     gold_doc_ids: list[str],
     gold_page_uids: list[str],
     base_values: list[float],
@@ -2331,6 +2387,8 @@ def grid_search_weights(
             page_features=page_features,
             weights=weights,
             baseline_doc_rank_map=baseline_doc_rank_map,
+            stage1_base_doc_rank_map=stage1_base_doc_rank_map,
+            gated_visual_top_docs=gated_visual_top_docs,
         )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids) if gold_doc_ids else None
         gold_page_summary = summarize_gold_page_ranks(_reranked_pages, gold_page_uids) if gold_page_uids else None
@@ -2528,6 +2586,8 @@ def main() -> None:
             "--visual-rerank-filter-to-informative-visual-query, and "
             "--visual-rerank-preserve-stage1-base-score require --visual-rerank-top-pages > 0."
         )
+    if args.gated_visual_top_docs < 0:
+        raise ValueError("--gated-visual-top-docs must be >= 0.")
 
     import torch
 
@@ -2585,6 +2645,8 @@ def main() -> None:
             page_features=page_features,
             weights=weights,
             baseline_doc_rank_map=baseline_doc_rank_map,
+            stage1_base_doc_rank_map=None,
+            gated_visual_top_docs=args.gated_visual_top_docs,
         )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
         gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
@@ -2602,6 +2664,7 @@ def main() -> None:
             "base_only_page_batch_size": args.base_only_page_batch_size,
             "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
+            "gated_visual_top_docs": args.gated_visual_top_docs,
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
@@ -2822,6 +2885,10 @@ def main() -> None:
             top_docs=args.two_stage_exact_top_docs,
         )
 
+    stage1_base_doc_rank_map: dict[str, int] | None = None
+    if args.gated_visual_top_docs > 0 and staged_visual_rerank:
+        stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
+
     if staged_visual_rerank:
         assert page_token_classes_by_uid is not None
         page_features = apply_visual_rerank_to_top_pages(
@@ -2838,10 +2905,15 @@ def main() -> None:
             preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
         )
 
+    if args.gated_visual_top_docs > 0 and stage1_base_doc_rank_map is None:
+        stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
+
     if args.grid_search:
         best_weights, best_grid_record, grid_leaderboard = grid_search_weights(
             page_features=page_features,
             baseline_doc_rank_map=baseline_doc_rank_map,
+            stage1_base_doc_rank_map=stage1_base_doc_rank_map,
+            gated_visual_top_docs=args.gated_visual_top_docs,
             gold_doc_ids=gold_doc_ids,
             gold_page_uids=gold_page_uids,
             base_values=parse_float_list(args.grid_base_values),
@@ -2859,6 +2931,8 @@ def main() -> None:
         page_features=page_features,
         weights=weights,
         baseline_doc_rank_map=baseline_doc_rank_map,
+        stage1_base_doc_rank_map=stage1_base_doc_rank_map,
+        gated_visual_top_docs=args.gated_visual_top_docs,
     )
     gold_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
     gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
@@ -2884,6 +2958,7 @@ def main() -> None:
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
+        "gated_visual_top_docs": args.gated_visual_top_docs,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
