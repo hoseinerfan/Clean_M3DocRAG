@@ -1112,7 +1112,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--base-score-source",
-        default="exact_page_maxsim",
+        default="approx_page_maxsim_topk",
         choices=BASE_SCORE_SOURCE_CHOICES,
         help=(
             "Source used for the base term in the fusion. "
@@ -1129,7 +1129,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--approx-base-page-token-topk",
         type=int,
-        default=0,
+        default=256,
         help=(
             "Top-K page tokens kept for query-guided pruning when "
             "--base-score-source=approx_page_maxsim_topk in base-only mode."
@@ -1359,9 +1359,9 @@ def parse_args() -> argparse.Namespace:
     )
 
     parser.add_argument("--weight-base", type=float, default=1.0)
-    parser.add_argument("--weight-visual", type=float, default=1.0)
+    parser.add_argument("--weight-visual", type=float, default=0.0)
     parser.add_argument("--weight-non-visual", type=float, default=0.0)
-    parser.add_argument("--weight-balance", type=float, default=8.0)
+    parser.add_argument("--weight-balance", type=float, default=0.0)
     parser.add_argument(
         "--grid-search",
         action="store_true",
