@@ -1123,3 +1123,228 @@ There are two different "visual" subset notions in the project:
    - this is the right subset for "does the question text expose a visual cue"
 
 Do not mix these in later analysis; they answer different questions.
+
+## Addendum: 2026-05-01
+
+### New helper changes now on `main`
+
+Additional helper-only commits added after the previous note:
+
+- `52acb63` Add hard-gated auxiliary rerank by base doc rank
+- `d218059` Add soft base-gated auxiliary reranking
+
+New flags introduced:
+
+- `--gated-visual-top-docs R`
+  - only apply non-base channels (`visual`, `non_visual`, `balance`) to docs whose
+    stage-1 base-only doc rank is `<= R`
+- `--scale-auxiliary-by-base-score`
+  - multiply the auxiliary bonus by:
+    - `base_page_score / max_base_page_score`
+  - intended to let visual evidence help more on already-strong base pages
+
+### Gated / tie-break visual rerank family on the `19` near-miss qids
+
+The following methods were tested on:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_all_top256_nearmiss_rank5to20.jsonl`
+
+Results:
+
+- staged late visual tie-break:
+  - `visual_rerank_top_pages = 50`
+  - informative-visual-query gating
+  - preserve stage-1 base score
+  - `2 / 19` top-4
+- hard-gated visual rerank:
+  - `gated_visual_top_docs = 20`
+  - `visual = 0.25`
+  - `balance = 1.0`
+  - `2 / 19` top-4
+- soft-gated visual rerank:
+  - `gated_visual_top_docs = 20`
+  - `scale_auxiliary_by_base_score = true`
+  - `visual = 0.25`
+  - `balance = 1.0`
+  - `2 / 19` top-4
+- soft-gated visual rerank:
+  - same as above, but `visual = 0.5`
+  - `2 / 19` top-4
+- soft-gated visual rerank:
+  - same as above, but `visual = 1.0`
+  - `5 / 19` top-4
+  - `14 / 19` improved vs baseline
+
+Interpretation:
+
+- the gated / tie-break family is real, but weak at low visual weight
+- `visual = 1.0` is the first setting in this family that gives a meaningful rescue effect
+- even then, it still trails the strongest earlier selective rerank:
+  - `top256 -> staged top50 full_v6`
+  - `8 / 19` top-4
+
+So the best current ordering on the `19` near-miss set is:
+
+1. staged `top50` full visual rerank:
+   - `8 / 19`
+2. soft-gated visual rerank with `visual = 1.0`:
+   - `5 / 19`
+3. doc-stage exact refinement / hard gate / late tie-break:
+   - around `2 / 19`
+4. pruning-prior variants:
+   - `0 / 19`
+
+### Visual-only low-level audits
+
+Pure visual-only runs were used to test whether the visual channel is functioning mechanically:
+
+- weights:
+  - `base = 0.0`
+  - `visual = 1.0`
+  - `non_visual = 0.0`
+  - `balance = 0.0`
+
+#### `4fc70c64c8abe430a1af267700e290b8` (`paw-print logo`)
+
+- gold doc:
+  - rank `3`
+- gold page:
+  - rank `3`
+
+Interpretation:
+
+- the visual channel is clearly alive
+- it can surface the true evidence page near the top without any base signal
+
+#### `9eaf685adaccf2218cc3d8fcf8797d09` (`shield-shaped logo`)
+
+Global visual-only run:
+
+- gold doc:
+  - rank `51`
+- gold page `page0`:
+  - rank `110`
+
+Doc-only visual audit inside the gold doc:
+
+- `page7`:
+  - rank `1`
+  - visual score `3.1228`
+- `page0`:
+  - rank `2`
+  - visual score `2.6156`
+
+Manual audit:
+
+- `page0` is the true evidence page with a large shield-shaped logo
+- `page7` also contains a small shield logo on a train
+- several globally higher-ranked competitor pages also contain real shield-shaped logos
+
+Interpretation:
+
+- the visual channel is concept-sensitive
+- but it does not reliably choose the strongest / most useful evidence page
+- this is not a hallucination bug; it is a specificity / ranking-granularity problem
+
+#### `39d1230b9456528d49ced799393985d3` (`flaming torch logo`)
+
+Global visual-only run:
+
+- gold doc:
+  - rank `9`
+- manually chosen gold page `page1`:
+  - rank `416`
+
+Doc-only visual audit inside the gold doc:
+
+- `page0`:
+  - rank `1`
+  - visual score about `3.096`
+  - `visual_patch_count = 58`
+- `page1`:
+  - rank `4`
+  - visual score `0.0`
+  - `visual_patch_count = 0`
+
+Manual audit:
+
+- both `page0` and `page1` contain the torch logo
+- `page0` contains a larger / clearer torch
+- several globally higher-ranked competitor pages also contain real torch logos or torch-like logos
+
+Interpretation:
+
+- this qid exposes two separate failure modes:
+  1. patch-label miss:
+     - real visual evidence can get zero visual score if no patches are labeled `visual`
+  2. weak specificity:
+     - many competing pages contain the queried visual concept too
+
+### Updated interpretation of the visual signal
+
+These audits support a more precise conclusion:
+
+- visual evidence is real
+- the visual channel is mechanically working
+- but it is often not strong or specific enough to beat semantically plausible competitors
+
+In other words:
+
+- the system can often detect:
+  - `shield logo`
+  - `torch logo`
+  - `paw-print logo`
+- but retrieval still fails when:
+  - many competitor pages contain the same visual concept
+  - the true evidence page has incomplete patch-label coverage
+  - the visual cue is not tightly bound to the relevant non-visual entity context
+
+So the main problem is not:
+
+- "visual score is broken"
+
+It is:
+
+- "visual score is too weak / noisy / weakly bound to semantics to dominate ranking on its own"
+
+### Updated view of why `top256` is hard to beat
+
+The current evidence suggests that `top256` is already close to the best result available from this heuristic family:
+
+- exact base-only:
+  - `78 / 141`
+- base-only `top256`:
+  - `79 / 141`
+- full global visual-aware:
+  - `80 / 141`
+
+Why the margin is so small:
+
+1. `top256` is already a strong regularizer.
+   - It removes many distractor page tokens while preserving enough gold evidence.
+2. Many remaining failures are outside the fixed top-1000 pool.
+   - those cannot be solved by reranking
+3. Exact refinement usually removes the regularization benefit.
+4. Visual evidence is useful, but only weakly discriminative unless tied to strong non-visual relevance.
+5. Patch-label coverage remains a limiting factor.
+
+The best current high-level interpretation is:
+
+- strong page-local base rescoring is the main retrieval win
+- `top256` preserves almost all of that win cheaply
+- visual-aware features help on a subset of boundary cases
+- but current integration methods have not yet produced a robust global improvement over `top256`
+
+### Practical next-step guidance
+
+If visual-aware retrieval work continues, the most justified next directions are:
+
+1. doc-conditioned page reranking:
+   - rerank all pages inside the top semantic docs, not just the global top pages
+2. fallback visual scoring that does not require visual patch labels
+3. stronger visual-semantic conjunction terms
+   - pages should be rewarded for:
+     - visual cue presence
+     - and strong non-visual relevance to the same query
+
+At this point, more small `top256` heuristic tweaks are unlikely to produce large gains by themselves.
