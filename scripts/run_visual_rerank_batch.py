@@ -118,7 +118,9 @@ def parse_args() -> argparse.Namespace:
             "'global_topk' is the current global-only selection. "
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
-            "informative visual query tokens and visual-labeled page patches."
+            "informative visual query tokens and visual-labeled page patches. "
+            "'visual_patch_query_prior' only boosts visual-labeled page patches using "
+            "informative visual-query-token similarity before global top-K selection."
         ),
     )
     parser.add_argument(
@@ -144,8 +146,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help=(
-            "When --approx-base-page-token-selector=soft_label_prior, add this weight times "
-            "the informative visual-query-token alignment score to the pruning score."
+            "When --approx-base-page-token-selector=soft_label_prior or "
+            "visual_patch_query_prior, add this weight times the informative "
+            "visual-query-token alignment score to the pruning score."
         ),
     )
     parser.add_argument(
@@ -153,8 +156,9 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.2,
         help=(
-            "When --approx-base-page-token-selector=soft_label_prior, add this bonus to "
-            "page tokens whose patch label is visual before top-K selection."
+            "When --approx-base-page-token-selector=soft_label_prior or "
+            "visual_patch_query_prior, add this bonus to page tokens whose patch "
+            "label is visual before top-K selection."
         ),
     )
     parser.add_argument(
@@ -428,20 +432,20 @@ def main() -> None:
             "--approx-base-page-token-selector=query_label_mix."
         )
     if (
-        args.approx_base_page_token_selector != "soft_label_prior"
+        args.approx_base_page_token_selector not in {"soft_label_prior", "visual_patch_query_prior"}
         and args.approx_base_page_token_soft_visual_query_weight != 0.5
     ):
         raise ValueError(
             "--approx-base-page-token-soft-visual-query-weight is only valid with "
-            "--approx-base-page-token-selector=soft_label_prior."
+            "--approx-base-page-token-selector=soft_label_prior or visual_patch_query_prior."
         )
     if (
-        args.approx_base_page_token_selector != "soft_label_prior"
+        args.approx_base_page_token_selector not in {"soft_label_prior", "visual_patch_query_prior"}
         and args.approx_base_page_token_soft_patch_visual_bonus != 0.2
     ):
         raise ValueError(
             "--approx-base-page-token-soft-patch-visual-bonus is only valid with "
-            "--approx-base-page-token-selector=soft_label_prior."
+            "--approx-base-page-token-selector=soft_label_prior or visual_patch_query_prior."
         )
     if args.base_only_page_batch_size < 0:
         raise ValueError("--base-only-page-batch-size must be >= 0.")
@@ -582,10 +586,12 @@ def main() -> None:
                 needs_query_axis_classes = staged_visual_rerank or args.approx_base_page_token_selector in {
                     "query_label_mix",
                     "soft_label_prior",
+                    "visual_patch_query_prior",
                 }
                 needs_patch_axis_classes = (
                     staged_visual_rerank
-                    or args.approx_base_page_token_selector == "soft_label_prior"
+                    or args.approx_base_page_token_selector
+                    in {"soft_label_prior", "visual_patch_query_prior"}
                 )
                 patch_axis_classes_by_uid = (
                     load_patch_axis_classes_for_pages(
