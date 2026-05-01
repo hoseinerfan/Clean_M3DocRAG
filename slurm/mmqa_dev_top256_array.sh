@@ -25,6 +25,7 @@ set -euo pipefail
 REPO_ROOT="${REPO_ROOT:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG}"
 ENV_PREFIX="${ENV_PREFIX:-$REPO_ROOT/env}"
 CUDA_MODULE="${CUDA_MODULE:-cuda/12.1.1}"
+CONDA_SH="${CONDA_SH:-/mmfs1/cm/shared/apps_local/ondemand/anaconda/etc/profile.d/conda.sh}"
 
 CHUNK_DIR="${CHUNK_DIR:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_chunks_500}"
 CHUNK_PREFIX="${CHUNK_PREFIX:-mmqa_dev_chunk_}"
@@ -54,10 +55,14 @@ if [[ ! -f "$QID_JSONL" ]]; then
 fi
 
 if [[ -f "$ENV_PREFIX/bin/activate" ]]; then
-  # Python venv workflow used in current HPC setup.
   source "$ENV_PREFIX/bin/activate"
+elif [[ -f "$CONDA_SH" ]]; then
+  source "$CONDA_SH"
+  conda activate "$ENV_PREFIX"
 else
-  echo "Missing virtualenv activate script: $ENV_PREFIX/bin/activate" >&2
+  echo "Could not activate environment." >&2
+  echo "Checked virtualenv activate: $ENV_PREFIX/bin/activate" >&2
+  echo "Checked conda init script: $CONDA_SH" >&2
   exit 1
 fi
 
