@@ -273,6 +273,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--visual-patch-dilation-radius",
+        type=int,
+        default=0,
+        help=(
+            "Optional visual-patch smoothing radius. When > 0, visual patch labels are dilated "
+            "over neighboring patches before building page token classes."
+        ),
+    )
+    parser.add_argument(
+        "--visual-patch-dilation-include-non-visual",
+        action="store_true",
+        help=(
+            "By default visual-patch dilation only expands into unknown patches. Enable this to "
+            "let the dilation overwrite non_visual patch labels too."
+        ),
+    )
+    parser.add_argument(
         "--visual-fallback-all-token-weight",
         type=float,
         default=0.0,
@@ -578,6 +595,8 @@ def main() -> None:
         )
     if args.gated_visual_top_docs < 0:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
+    if args.visual_patch_dilation_radius < 0:
+        raise ValueError("--visual-patch-dilation-radius must be >= 0.")
     if args.visual_fallback_all_token_weight < 0.0:
         raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
 
@@ -741,6 +760,8 @@ def main() -> None:
                         page_uid: build_page_token_classes(
                             page_meta=page_meta[page_uid],
                             patch_axis_classes=patch_axis_classes,
+                            visual_patch_dilation_radius=args.visual_patch_dilation_radius,
+                            visual_patch_dilation_include_non_visual=args.visual_patch_dilation_include_non_visual,
                         )
                         for page_uid, patch_axis_classes in patch_axis_classes_by_uid.items()
                     }
@@ -951,6 +972,8 @@ def main() -> None:
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "balance_score_mode": args.balance_score_mode,
+            "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
+            "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
             "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
             "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
             "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
@@ -1015,6 +1038,8 @@ def main() -> None:
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
         "balance_score_mode": args.balance_score_mode,
+        "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
+        "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
         "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,

@@ -1314,6 +1314,23 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--visual-patch-dilation-radius",
+        type=int,
+        default=0,
+        help=(
+            "Optional visual-patch smoothing radius. When > 0, visual patch labels are dilated "
+            "over neighboring patches before building page token classes."
+        ),
+    )
+    parser.add_argument(
+        "--visual-patch-dilation-include-non-visual",
+        action="store_true",
+        help=(
+            "By default visual-patch dilation only expands into unknown patches. Enable this to "
+            "let the dilation overwrite non_visual patch labels too."
+        ),
+    )
+    parser.add_argument(
         "--visual-fallback-all-token-weight",
         type=float,
         default=0.0,
@@ -1739,7 +1756,33 @@ def build_page_token_classes(
     *,
     page_meta: dict,
     patch_axis_classes: list[str],
+    visual_patch_dilation_radius: int = 0,
+    visual_patch_dilation_include_non_visual: bool = False,
 ) -> list[str]:
+    if visual_patch_dilation_radius > 0:
+        grid_side = int(page_meta["grid_side"])
+        dilated_patch_axis_classes = list(patch_axis_classes)
+        for patch_idx, patch_class in enumerate(patch_axis_classes):
+            if patch_class != "visual":
+                continue
+            row = patch_idx // grid_side
+            col = patch_idx % grid_side
+            for neighbor_row in range(
+                max(0, row - visual_patch_dilation_radius),
+                min(grid_side - 1, row + visual_patch_dilation_radius) + 1,
+            ):
+                for neighbor_col in range(
+                    max(0, col - visual_patch_dilation_radius),
+                    min(grid_side - 1, col + visual_patch_dilation_radius) + 1,
+                ):
+                    neighbor_idx = neighbor_row * grid_side + neighbor_col
+                    neighbor_class = dilated_patch_axis_classes[neighbor_idx]
+                    if neighbor_class == "visual":
+                        continue
+                    if neighbor_class == "unknown" or visual_patch_dilation_include_non_visual:
+                        dilated_patch_axis_classes[neighbor_idx] = "visual"
+        patch_axis_classes = dilated_patch_axis_classes
+
     token_classes = ["unknown"] * page_meta["page_token_count"]
     offset = page_meta["extra_tokens"] if page_meta["nonspatial_token_position"] == "prefix" else 0
     for patch_idx, patch_class in enumerate(patch_axis_classes):
@@ -2753,6 +2796,8 @@ def main() -> None:
         )
     if args.gated_visual_top_docs < 0:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
+    if args.visual_patch_dilation_radius < 0:
+        raise ValueError("--visual-patch-dilation-radius must be >= 0.")
     if args.visual_fallback_all_token_weight < 0.0:
         raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
 
@@ -2843,6 +2888,8 @@ def main() -> None:
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "balance_score_mode": args.balance_score_mode,
+            "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
+            "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
             "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
@@ -2914,6 +2961,8 @@ def main() -> None:
             page_uid: build_page_token_classes(
                 page_meta=page_meta[page_uid],
                 patch_axis_classes=patch_axis_classes,
+                visual_patch_dilation_radius=args.visual_patch_dilation_radius,
+                visual_patch_dilation_include_non_visual=args.visual_patch_dilation_include_non_visual,
             )
             for page_uid, patch_axis_classes in patch_axis_classes_by_uid.items()
         }
@@ -3164,6 +3213,8 @@ def main() -> None:
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
         "balance_score_mode": args.balance_score_mode,
+        "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
+        "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
         "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
@@ -3216,6 +3267,8 @@ def main() -> None:
                 "gated_visual_top_docs": args.gated_visual_top_docs,
                 "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
                 "balance_score_mode": args.balance_score_mode,
+                "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
+                "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
                 "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
@@ -3244,6 +3297,8 @@ def main() -> None:
     print(f"gated_visual_top_docs: {args.gated_visual_top_docs}")
     print(f"scale_auxiliary_by_base_score: {args.scale_auxiliary_by_base_score}")
     print(f"balance_score_mode: {args.balance_score_mode}")
+    print(f"visual_patch_dilation_radius: {args.visual_patch_dilation_radius}")
+    print(f"visual_patch_dilation_include_non_visual: {args.visual_patch_dilation_include_non_visual}")
     print(f"visual_fallback_all_token_weight: {args.visual_fallback_all_token_weight}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")
