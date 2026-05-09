@@ -34,7 +34,11 @@ APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = (
     "visual_patch_query_prior",
 )
 COARSE_SCORE_DTYPE_CHOICES = ("fp32", "bf16", "fp16")
-BALANCE_SCORE_MODE_CHOICES = ("min_avg", "visual_x_nonvisual_avg")
+BALANCE_SCORE_MODE_CHOICES = (
+    "min_avg",
+    "visual_x_nonvisual_avg",
+    "visual_x_grounded_nonvisual_avg",
+)
 BIG_RANK = 10**12
 SOFT_VISUAL_QUERY_STOPWORDS = {
     "a",
@@ -86,8 +90,10 @@ class PageFeature:
     visual_fallback_page_score: float
     visual_effective_uses_fallback: bool
     non_visual_page_score: float
+    grounded_non_visual_page_score: float
     visual_avg_score: float
     non_visual_avg_score: float
+    grounded_non_visual_avg_score: float
     balance_score: float
     visual_alignment_count: int
     visual_alignment_ratio: float
@@ -97,6 +103,8 @@ class PageFeature:
     non_visual_query_token_count: int
     visual_patch_count: int
     non_visual_patch_count: int
+    grounded_non_visual_patch_count: int
+    visual_anchor_patch_count: int
 
 
 def is_base_only_weights(weights: WeightConfig) -> bool:
@@ -123,8 +131,10 @@ def make_base_only_page_feature(
         visual_fallback_page_score=0.0,
         visual_effective_uses_fallback=False,
         non_visual_page_score=0.0,
+        grounded_non_visual_page_score=0.0,
         visual_avg_score=0.0,
         non_visual_avg_score=0.0,
+        grounded_non_visual_avg_score=0.0,
         balance_score=0.0,
         visual_alignment_count=0,
         visual_alignment_ratio=0.0,
@@ -134,6 +144,8 @@ def make_base_only_page_feature(
         non_visual_query_token_count=0,
         visual_patch_count=0,
         non_visual_patch_count=0,
+        grounded_non_visual_patch_count=0,
+        visual_anchor_patch_count=0,
     )
 
 
@@ -1435,7 +1447,18 @@ def parse_args() -> argparse.Namespace:
             "How to compute the balance/conjunction channel. 'min_avg' preserves the original "
             "min(visual_avg_score, non_visual_avg_score). 'visual_x_nonvisual_avg' makes the "
             "conjunction a stronger semantic gate by multiplying the effective visual page score "
-            "by the average non-visual support."
+            "by the average non-visual support. 'visual_x_grounded_nonvisual_avg' only counts "
+            "non-visual support from patches near the best visual anchors."
+        ),
+    )
+    parser.add_argument(
+        "--grounded-context-radius",
+        type=int,
+        default=0,
+        help=(
+            "Neighborhood radius in patch space for context-aware visual grounding. When using "
+            "--balance-score-mode=visual_x_grounded_nonvisual_avg, only non_visual patches within "
+            "this radius of the best visual anchor patches contribute to the grounded context score."
         ),
     )
     parser.add_argument(
@@ -1932,6 +1955,61 @@ def make_query_score_mask(
     return keep_mask
 
 
+def _page_meta_spatial_offset(page_meta: dict) -> int:
+    return (
+        int(page_meta["extra_tokens"])
+        if page_meta["nonspatial_token_position"] == "prefix"
+        else 0
+    )
+
+
+def _token_index_to_patch_index(
+    *,
+    token_idx: int,
+    page_meta: dict,
+) -> int | None:
+    patch_idx = int(token_idx) - _page_meta_spatial_offset(page_meta)
+    if 0 <= patch_idx < int(page_meta["n_spatial_patches"]):
+        return patch_idx
+    return None
+
+
+def select_grounded_non_visual_page_indices(
+    *,
+    page_meta: dict,
+    visual_anchor_token_indices: list[int],
+    non_visual_page_indices: list[int],
+    grounded_context_radius: int,
+) -> list[int]:
+    if grounded_context_radius <= 0 or not visual_anchor_token_indices or not non_visual_page_indices:
+        return []
+
+    grid_side = int(page_meta["grid_side"])
+    anchor_patch_indices = {
+        patch_idx
+        for token_idx in visual_anchor_token_indices
+        if (patch_idx := _token_index_to_patch_index(token_idx=token_idx, page_meta=page_meta)) is not None
+    }
+    if not anchor_patch_indices:
+        return []
+
+    anchor_coords = {(patch_idx // grid_side, patch_idx % grid_side) for patch_idx in anchor_patch_indices}
+    grounded_indices: list[int] = []
+    for token_idx in non_visual_page_indices:
+        patch_idx = _token_index_to_patch_index(token_idx=token_idx, page_meta=page_meta)
+        if patch_idx is None:
+            continue
+        row = patch_idx // grid_side
+        col = patch_idx % grid_side
+        if any(
+            abs(row - anchor_row) <= grounded_context_radius
+            and abs(col - anchor_col) <= grounded_context_radius
+            for anchor_row, anchor_col in anchor_coords
+        ):
+            grounded_indices.append(token_idx)
+    return grounded_indices
+
+
 def compute_page_feature(
     *,
     page_emb: torch.Tensor,
@@ -1939,9 +2017,11 @@ def compute_page_feature(
     query_axis_classes: list[str],
     query_score_mask: torch.Tensor,
     page_token_classes: list[str],
+    page_meta: dict,
     doc_id: str,
     page_idx: int,
     balance_score_mode: str = "min_avg",
+    grounded_context_radius: int = 0,
     visual_fallback_all_token_weight: float = 0.0,
     base_score_override: float | None = None,
 ) -> PageFeature:
@@ -1997,6 +2077,39 @@ def compute_page_feature(
         weighted_visual_fallback_page_score,
     )
     non_visual_page_score = masked_channel_score(non_visual_page_indices, non_visual_query_indices)
+    visual_anchor_token_indices: list[int] = []
+    if visual_page_indices and visual_query_indices:
+        visual_page_index_tensor = torch.tensor(
+            visual_page_indices,
+            device=score_matrix.device,
+            dtype=torch.long,
+        )
+        visual_query_index_tensor = torch.tensor(
+            visual_query_indices,
+            device=score_matrix.device,
+            dtype=torch.long,
+        )
+        visual_anchor_rows = (
+            score_matrix.index_select(0, visual_page_index_tensor)
+            .index_select(1, visual_query_index_tensor)
+            .argmax(dim=0)
+            .tolist()
+        )
+        visual_anchor_token_indices = [
+            visual_page_indices[int(anchor_row)]
+            for anchor_row in visual_anchor_rows
+        ]
+
+    grounded_non_visual_page_indices = select_grounded_non_visual_page_indices(
+        page_meta=page_meta,
+        visual_anchor_token_indices=visual_anchor_token_indices,
+        non_visual_page_indices=non_visual_page_indices,
+        grounded_context_radius=grounded_context_radius,
+    )
+    grounded_non_visual_page_score = masked_channel_score(
+        grounded_non_visual_page_indices,
+        non_visual_query_indices,
+    )
 
     visual_avg_score = (
         visual_page_score / len(visual_query_indices) if visual_query_indices else 0.0
@@ -2004,11 +2117,18 @@ def compute_page_feature(
     non_visual_avg_score = (
         non_visual_page_score / len(non_visual_query_indices) if non_visual_query_indices else 0.0
     )
+    grounded_non_visual_avg_score = (
+        grounded_non_visual_page_score / len(non_visual_query_indices)
+        if non_visual_query_indices
+        else 0.0
+    )
     if visual_query_indices and non_visual_query_indices:
         if balance_score_mode == "min_avg":
             balance_score = min(visual_avg_score, non_visual_avg_score)
         elif balance_score_mode == "visual_x_nonvisual_avg":
             balance_score = visual_page_score * non_visual_avg_score
+        elif balance_score_mode == "visual_x_grounded_nonvisual_avg":
+            balance_score = visual_page_score * grounded_non_visual_avg_score
         else:
             raise ValueError(f"Unsupported balance_score_mode: {balance_score_mode!r}")
     else:
@@ -2042,8 +2162,10 @@ def compute_page_feature(
         visual_fallback_page_score=visual_fallback_page_score,
         visual_effective_uses_fallback=visual_effective_uses_fallback,
         non_visual_page_score=non_visual_page_score,
+        grounded_non_visual_page_score=grounded_non_visual_page_score,
         visual_avg_score=visual_avg_score,
         non_visual_avg_score=non_visual_avg_score,
+        grounded_non_visual_avg_score=grounded_non_visual_avg_score,
         balance_score=balance_score,
         visual_alignment_count=visual_alignment_count,
         visual_alignment_ratio=visual_alignment_ratio,
@@ -2053,6 +2175,14 @@ def compute_page_feature(
         non_visual_query_token_count=len(non_visual_query_indices),
         visual_patch_count=len(visual_page_indices),
         non_visual_patch_count=len(non_visual_page_indices),
+        grounded_non_visual_patch_count=len(grounded_non_visual_page_indices),
+        visual_anchor_patch_count=len(
+            {
+                patch_idx
+                for token_idx in visual_anchor_token_indices
+                if (patch_idx := _token_index_to_patch_index(token_idx=token_idx, page_meta=page_meta)) is not None
+            }
+        ),
     )
 
 
@@ -2377,11 +2507,13 @@ def apply_visual_rerank_to_top_pages(
     query_token_labels: list[str] | None,
     query_score_mask: torch.Tensor,
     page_token_classes_by_uid: dict[str, list[str]],
+    page_meta_by_uid: dict[str, dict],
     top_pages: int,
     require_informative_visual_query: bool = False,
     filter_to_informative_visual_query: bool = False,
     preserve_stage1_base_score: bool = False,
     balance_score_mode: str = "min_avg",
+    grounded_context_radius: int = 0,
     visual_fallback_all_token_weight: float = 0.0,
 ) -> list[PageFeature]:
     if top_pages <= 0 or not page_features:
@@ -2424,6 +2556,9 @@ def apply_visual_rerank_to_top_pages(
         page_token_classes = page_token_classes_by_uid.get(feature.page_uid)
         if page_token_classes is None:
             raise KeyError(f"Missing page token classes for selected page_uid={feature.page_uid}")
+        page_meta = page_meta_by_uid.get(feature.page_uid)
+        if page_meta is None:
+            raise KeyError(f"Missing page metadata for selected page_uid={feature.page_uid}")
         updated_features.append(
             compute_page_feature(
                 page_emb=page_emb,
@@ -2431,9 +2566,11 @@ def apply_visual_rerank_to_top_pages(
                 query_axis_classes=effective_query_axis_classes,
                 query_score_mask=query_score_mask,
                 page_token_classes=page_token_classes,
+                page_meta=page_meta,
                 doc_id=feature.doc_id,
                 page_idx=feature.page_idx,
                 balance_score_mode=balance_score_mode,
+                grounded_context_radius=grounded_context_radius,
                 visual_fallback_all_token_weight=visual_fallback_all_token_weight,
                 base_score_override=feature.base_page_score if preserve_stage1_base_score else None,
             )
@@ -2451,11 +2588,13 @@ def apply_visual_rerank_to_top_docs(
     query_token_labels: list[str] | None,
     query_score_mask: torch.Tensor,
     page_token_classes_by_uid: dict[str, list[str]],
+    page_meta_by_uid: dict[str, dict],
     top_docs: int,
     require_informative_visual_query: bool = False,
     filter_to_informative_visual_query: bool = False,
     preserve_stage1_base_score: bool = False,
     balance_score_mode: str = "min_avg",
+    grounded_context_radius: int = 0,
     visual_fallback_all_token_weight: float = 0.0,
 ) -> list[PageFeature]:
     if top_docs <= 0 or not page_features:
@@ -2498,6 +2637,9 @@ def apply_visual_rerank_to_top_docs(
         page_token_classes = page_token_classes_by_uid.get(feature.page_uid)
         if page_token_classes is None:
             raise KeyError(f"Missing page token classes for selected page_uid={feature.page_uid}")
+        page_meta = page_meta_by_uid.get(feature.page_uid)
+        if page_meta is None:
+            raise KeyError(f"Missing page metadata for selected page_uid={feature.page_uid}")
         updated_features.append(
             compute_page_feature(
                 page_emb=page_emb,
@@ -2505,9 +2647,11 @@ def apply_visual_rerank_to_top_docs(
                 query_axis_classes=effective_query_axis_classes,
                 query_score_mask=query_score_mask,
                 page_token_classes=page_token_classes,
+                page_meta=page_meta,
                 doc_id=feature.doc_id,
                 page_idx=feature.page_idx,
                 balance_score_mode=balance_score_mode,
+                grounded_context_radius=grounded_context_radius,
                 visual_fallback_all_token_weight=visual_fallback_all_token_weight,
                 base_score_override=feature.base_page_score if preserve_stage1_base_score else None,
             )
@@ -2600,9 +2744,13 @@ def build_rankings(
                 "best_page_base_score": item["base_page_score"],
                 "best_page_visual_score": item["visual_page_score"],
                 "best_page_non_visual_score": item["non_visual_page_score"],
+                "best_page_grounded_non_visual_score": item["grounded_non_visual_page_score"],
                 "best_page_balance_score": item["balance_score"],
+                "best_page_grounded_non_visual_avg_score": item["grounded_non_visual_avg_score"],
                 "best_page_auxiliary_bonus": item["auxiliary_page_bonus"],
                 "best_page_auxiliary_scale": item["auxiliary_base_scale"],
+                "best_page_visual_anchor_patch_count": item["visual_anchor_patch_count"],
+                "best_page_grounded_non_visual_patch_count": item["grounded_non_visual_patch_count"],
                 "stage1_base_doc_rank": item["stage1_base_doc_rank"],
                 "gated_visual_applied": item["gated_visual_applied"],
                 "baseline_doc_rank": baseline_doc_rank_map.get(doc_id),
@@ -2923,6 +3071,16 @@ def main() -> None:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
     if args.visual_patch_dilation_radius < 0:
         raise ValueError("--visual-patch-dilation-radius must be >= 0.")
+    if args.grounded_context_radius < 0:
+        raise ValueError("--grounded-context-radius must be >= 0.")
+    if (
+        args.balance_score_mode == "visual_x_grounded_nonvisual_avg"
+        and args.grounded_context_radius <= 0
+    ):
+        raise ValueError(
+            "--grounded-context-radius must be > 0 when "
+            "--balance-score-mode=visual_x_grounded_nonvisual_avg."
+        )
     if args.visual_fallback_all_token_weight < 0.0:
         raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
 
@@ -3043,6 +3201,7 @@ def main() -> None:
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "balance_score_mode": args.balance_score_mode,
+            "grounded_context_radius": args.grounded_context_radius,
             "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
             "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
             "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
@@ -3253,9 +3412,11 @@ def main() -> None:
                         query_axis_classes=query_axis_classes,
                         query_score_mask=query_score_mask,
                         page_token_classes=page_token_classes,
+                        page_meta=page_meta[page_uid],
                         doc_id=doc_id,
                         page_idx=page_idx,
                         balance_score_mode=args.balance_score_mode,
+                        grounded_context_radius=args.grounded_context_radius,
                         visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                         base_score_override=(
                             baseline_page_score_map.get(page_uid)
@@ -3301,11 +3462,13 @@ def main() -> None:
                 query_token_labels=query_token_labels,
                 query_score_mask=query_score_mask,
                 page_token_classes_by_uid=page_token_classes_by_uid,
+                page_meta_by_uid=page_meta,
                 top_pages=args.visual_rerank_top_pages,
                 require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                 filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                 preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
                 balance_score_mode=args.balance_score_mode,
+                grounded_context_radius=args.grounded_context_radius,
                 visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
             )
         else:
@@ -3317,11 +3480,13 @@ def main() -> None:
                 query_token_labels=query_token_labels,
                 query_score_mask=query_score_mask,
                 page_token_classes_by_uid=page_token_classes_by_uid,
+                page_meta_by_uid=page_meta,
                 top_docs=args.visual_rerank_top_docs,
                 require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                 filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                 preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
                 balance_score_mode=args.balance_score_mode,
+                grounded_context_radius=args.grounded_context_radius,
                 visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
             )
 
@@ -3386,6 +3551,7 @@ def main() -> None:
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
         "balance_score_mode": args.balance_score_mode,
+        "grounded_context_radius": args.grounded_context_radius,
         "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
         "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
         "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
@@ -3446,6 +3612,7 @@ def main() -> None:
                 "gated_visual_top_docs": args.gated_visual_top_docs,
                 "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
                 "balance_score_mode": args.balance_score_mode,
+                "grounded_context_radius": args.grounded_context_radius,
                 "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
                 "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
                 "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
@@ -3477,6 +3644,7 @@ def main() -> None:
     print(f"gated_visual_top_docs: {args.gated_visual_top_docs}")
     print(f"scale_auxiliary_by_base_score: {args.scale_auxiliary_by_base_score}")
     print(f"balance_score_mode: {args.balance_score_mode}")
+    print(f"grounded_context_radius: {args.grounded_context_radius}")
     print(f"visual_patch_dilation_radius: {args.visual_patch_dilation_radius}")
     print(f"visual_patch_dilation_include_non_visual: {args.visual_patch_dilation_include_non_visual}")
     print(f"visual_fallback_all_token_weight: {args.visual_fallback_all_token_weight}")

@@ -279,7 +279,18 @@ def parse_args() -> argparse.Namespace:
             "How to compute the balance/conjunction channel. 'min_avg' preserves the original "
             "min(visual_avg_score, non_visual_avg_score). 'visual_x_nonvisual_avg' makes the "
             "conjunction a stronger semantic gate by multiplying the effective visual page score "
-            "by the average non-visual support."
+            "by the average non-visual support. 'visual_x_grounded_nonvisual_avg' only counts "
+            "non-visual support from patches near the best visual anchors."
+        ),
+    )
+    parser.add_argument(
+        "--grounded-context-radius",
+        type=int,
+        default=0,
+        help=(
+            "Neighborhood radius in patch space for context-aware visual grounding. When using "
+            "--balance-score-mode=visual_x_grounded_nonvisual_avg, only non_visual patches within "
+            "this radius of the best visual anchor patches contribute to the grounded context score."
         ),
     )
     parser.add_argument(
@@ -607,6 +618,16 @@ def main() -> None:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
     if args.visual_patch_dilation_radius < 0:
         raise ValueError("--visual-patch-dilation-radius must be >= 0.")
+    if args.grounded_context_radius < 0:
+        raise ValueError("--grounded-context-radius must be >= 0.")
+    if (
+        args.balance_score_mode == "visual_x_grounded_nonvisual_avg"
+        and args.grounded_context_radius <= 0
+    ):
+        raise ValueError(
+            "--grounded-context-radius must be > 0 when "
+            "--balance-score-mode=visual_x_grounded_nonvisual_avg."
+        )
     if args.visual_fallback_all_token_weight < 0.0:
         raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
 
@@ -894,9 +915,11 @@ def main() -> None:
                                 query_axis_classes=query_axis_classes,
                                 query_score_mask=query_score_mask,
                                 page_token_classes=page_token_classes,
+                                page_meta=page_meta[page_uid],
                                 doc_id=doc_id,
                                 page_idx=page_idx,
                                 balance_score_mode=args.balance_score_mode,
+                                grounded_context_radius=args.grounded_context_radius,
                                 visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                                 base_score_override=(
                                     baseline_page_score_map.get(page_uid)
@@ -942,11 +965,13 @@ def main() -> None:
                         query_token_labels=query_token_labels,
                         query_score_mask=query_score_mask,
                         page_token_classes_by_uid=page_token_classes_by_uid,
+                        page_meta_by_uid=page_meta,
                         top_pages=args.visual_rerank_top_pages,
                         require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                         filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                         preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
                         balance_score_mode=args.balance_score_mode,
+                        grounded_context_radius=args.grounded_context_radius,
                         visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                     )
                 else:
@@ -958,11 +983,13 @@ def main() -> None:
                         query_token_labels=query_token_labels,
                         query_score_mask=query_score_mask,
                         page_token_classes_by_uid=page_token_classes_by_uid,
+                        page_meta_by_uid=page_meta,
                         top_docs=args.visual_rerank_top_docs,
                         require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                         filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                         preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
                         balance_score_mode=args.balance_score_mode,
+                        grounded_context_radius=args.grounded_context_radius,
                         visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                     )
             if args.gated_visual_top_docs > 0 and apply_staged_visual_rerank and stage1_base_doc_rank_map is None:
@@ -1043,6 +1070,7 @@ def main() -> None:
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "balance_score_mode": args.balance_score_mode,
+            "grounded_context_radius": args.grounded_context_radius,
             "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
             "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
             "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
@@ -1115,6 +1143,7 @@ def main() -> None:
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
         "balance_score_mode": args.balance_score_mode,
+        "grounded_context_radius": args.grounded_context_radius,
         "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
         "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
         "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
