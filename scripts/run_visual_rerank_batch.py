@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.rerank_target_docs_visual_aware import (
     APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
     APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES,
+    BALANCE_SCORE_MODE_CHOICES,
     BASE_SCORE_SOURCE_CHOICES,
     COARSE_SCORE_DTYPE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
@@ -258,6 +259,17 @@ def parse_args() -> argparse.Namespace:
             "Scale non-base rerank channels by normalized base page score "
             "(base_page_score / max_base_page_score) so auxiliary signals help more on pages "
             "that are already strong under the base retriever."
+        ),
+    )
+    parser.add_argument(
+        "--balance-score-mode",
+        default="min_avg",
+        choices=BALANCE_SCORE_MODE_CHOICES,
+        help=(
+            "How to compute the balance/conjunction channel. 'min_avg' preserves the original "
+            "min(visual_avg_score, non_visual_avg_score). 'visual_x_nonvisual_avg' makes the "
+            "conjunction a stronger semantic gate by multiplying the effective visual page score "
+            "by the average non-visual support."
         ),
     )
     parser.add_argument(
@@ -801,6 +813,7 @@ def main() -> None:
                                 page_token_classes=page_token_classes,
                                 doc_id=doc_id,
                                 page_idx=page_idx,
+                                balance_score_mode=args.balance_score_mode,
                                 visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                                 base_score_override=(
                                     baseline_page_score_map.get(page_uid)
@@ -843,6 +856,7 @@ def main() -> None:
                         require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                         filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                         preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
+                        balance_score_mode=args.balance_score_mode,
                         visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                     )
                 else:
@@ -858,6 +872,7 @@ def main() -> None:
                         require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                         filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                         preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
+                        balance_score_mode=args.balance_score_mode,
                         visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                     )
             if args.gated_visual_top_docs > 0 and stage1_base_doc_rank_map is None:
@@ -935,6 +950,7 @@ def main() -> None:
             "visual_rerank_top_docs": args.visual_rerank_top_docs,
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+            "balance_score_mode": args.balance_score_mode,
             "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
             "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
             "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
@@ -998,6 +1014,7 @@ def main() -> None:
         "visual_rerank_top_docs": args.visual_rerank_top_docs,
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+        "balance_score_mode": args.balance_score_mode,
         "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
