@@ -46,6 +46,7 @@ from scripts.rerank_target_docs_visual_aware import (
     grid_search_weights,
     is_base_only_weights,
     load_learned_doc_reranker,
+    load_learned_token_selector_model,
     load_patch_axis_classes_for_pages,
     load_query_route_config,
     load_splice_query_axis_classes,
@@ -142,6 +143,8 @@ def parse_args() -> argparse.Namespace:
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
             "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
             "distinct informative query tokens before filling the rest globally. "
+            "'learned_token_topk' scores each page token with a small learned linear selector "
+            "trained from exact MaxSim token winners. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
             "informative visual query tokens and visual-labeled page patches. "
             "'visual_patch_query_prior' only boosts visual-labeled page patches using "
@@ -287,6 +290,13 @@ def parse_args() -> argparse.Namespace:
             "Optional learned linear doc reranker JSON. When provided, aggregate doc features "
             "from the stage-1 page features and rerank docs/pages using the learned model instead "
             "of the hand-weighted fusion."
+        ),
+    )
+    parser.add_argument(
+        "--learned-token-selector-model",
+        help=(
+            "Optional learned linear token-selector JSON. Required when "
+            "--approx-base-page-token-selector=learned_token_topk."
         ),
     )
     parser.add_argument(
@@ -878,6 +888,22 @@ def main() -> None:
             "--approx-base-page-token-selector=query_coverage_mix."
         )
     if (
+        args.approx_base_page_token_selector == "learned_token_topk"
+        and not args.learned_token_selector_model
+    ):
+        raise ValueError(
+            "--approx-base-page-token-selector=learned_token_topk requires "
+            "--learned-token-selector-model."
+        )
+    if (
+        args.approx_base_page_token_selector != "learned_token_topk"
+        and args.learned_token_selector_model
+    ):
+        raise ValueError(
+            "--learned-token-selector-model is only valid with "
+            "--approx-base-page-token-selector=learned_token_topk."
+        )
+    if (
         args.approx_base_page_token_selector not in {"soft_label_prior", "visual_patch_query_prior"}
         and args.approx_base_page_token_soft_visual_query_weight != 0.5
     ):
@@ -1025,6 +1051,7 @@ def main() -> None:
     baseline_payload = load_baseline_payload(Path(args.baseline_pred), set(qids))
     route_config = load_query_route_config(args.query_route_config_json)
     learned_doc_reranker_model = load_learned_doc_reranker(args.learned_doc_reranker_model)
+    learned_token_selector_model = load_learned_token_selector_model(args.learned_token_selector_model)
     default_route_decision = "visual" if staged_visual_rerank else "base"
 
     torch = None
@@ -1179,7 +1206,7 @@ def main() -> None:
                     or learned_doc_reranker_active
                     or bool(args.output_doc_feature_jsonl)
                     or args.approx_base_page_token_selector
-                    in {"soft_label_prior", "visual_patch_query_prior"}
+                    in {"learned_token_topk", "soft_label_prior", "visual_patch_query_prior"}
                 )
                 patch_axis_classes_by_uid = (
                     load_patch_axis_classes_for_pages(
@@ -1265,10 +1292,12 @@ def main() -> None:
                         query_axis_classes=query_axis_classes,
                         query_token_labels=query_token_labels,
                         page_token_classes_by_uid=page_token_classes_by_uid,
+                        page_meta_by_uid=page_meta,
                         approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                         approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                        learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                         page_batch_size=args.base_only_page_batch_size,
                     )
@@ -1292,10 +1321,12 @@ def main() -> None:
                         query_axis_classes=query_axis_classes,
                         query_token_labels=query_token_labels,
                         page_token_classes_by_uid=page_token_classes_by_uid,
+                        page_meta_by_uid=page_meta,
                         approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                         approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                        learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                         page_batch_size=args.base_only_page_batch_size,
                     )
@@ -1520,6 +1551,7 @@ def main() -> None:
             "visual_rerank_top_docs": args.visual_rerank_top_docs,
             "query_route_config_json": args.query_route_config_json,
             "learned_doc_reranker_model": args.learned_doc_reranker_model,
+            "learned_token_selector_model": args.learned_token_selector_model,
             "learned_doc_reranker_top_docs": args.learned_doc_reranker_top_docs,
             "vlm_rerank_top_docs": args.vlm_rerank_top_docs,
             "vlm_rerank_bonus": args.vlm_rerank_bonus,
@@ -1542,6 +1574,7 @@ def main() -> None:
             "route_matched_rule_index": route_info["matched_rule_index"],
             "route_matched_rule": route_info["matched_rule"],
             "learned_doc_reranker_applied": learned_doc_reranker_active,
+            "learned_token_selector_applied": args.approx_base_page_token_selector == "learned_token_topk",
             "vlm_reranker_applied": vlm_rerank_active,
             "staged_visual_rerank_applied": apply_staged_visual_rerank if not (fixed_base_only and args.base_score_source == "baseline_pred") else False,
             "weights": asdict(weights),
@@ -1614,6 +1647,7 @@ def main() -> None:
         "visual_rerank_top_docs": args.visual_rerank_top_docs,
         "query_route_config_json": args.query_route_config_json,
         "learned_doc_reranker_model": args.learned_doc_reranker_model,
+        "learned_token_selector_model": args.learned_token_selector_model,
         "learned_doc_reranker_top_docs": args.learned_doc_reranker_top_docs,
         "output_doc_feature_jsonl": args.output_doc_feature_jsonl,
         "vlm_rerank_top_docs": args.vlm_rerank_top_docs,
@@ -1639,6 +1673,7 @@ def main() -> None:
         "routed_to_visual_qid_count": routed_to_visual_qids,
         "routed_to_base_qid_count": routed_to_base_qids,
         "learned_doc_reranker_applied": learned_doc_reranker_active,
+        "learned_token_selector_applied": args.approx_base_page_token_selector == "learned_token_topk",
         "vlm_reranker_applied": vlm_rerank_active,
         "exported_doc_feature_row_count": len(all_doc_feature_rows),
         "grid_base_values": grid_base_values,

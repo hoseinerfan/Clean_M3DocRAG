@@ -35,6 +35,7 @@ APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = (
     "spatial_quadrant_mix",
     "query_coverage_mix",
     "query_label_mix",
+    "learned_token_topk",
     "soft_label_prior",
     "visual_patch_query_prior",
 )
@@ -97,6 +98,18 @@ LEARNED_DOC_RERANKER_FEATURE_NAMES = (
     "best_page_visual_anchor_patch_count",
     "best_page_visual_query_token_count",
     "best_page_non_visual_query_token_count",
+)
+LEARNED_TOKEN_SELECTOR_FEATURE_NAMES = (
+    "coarse_query_mean_score",
+    "coarse_query_token_max_score",
+    "page_token_norm",
+    "is_prefix_token",
+    "is_visual_token",
+    "is_non_visual_token",
+    "is_unknown_token",
+    "patch_row_norm",
+    "patch_col_norm",
+    "patch_center_dist",
 )
 
 
@@ -293,10 +306,12 @@ def compute_approx_base_page_score(
     query_axis_classes: list[str] | None,
     query_token_labels: list[str] | None,
     page_token_classes: list[str] | None,
+    page_meta: dict | None,
     approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
 ) -> float:
     pruned_page_emb = maybe_prune_page_tokens_for_base_only(
@@ -311,10 +326,12 @@ def compute_approx_base_page_score(
         query_axis_classes=query_axis_classes,
         query_token_labels=query_token_labels,
         page_token_classes=page_token_classes,
+        page_meta=page_meta,
         approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
     )
     return compute_exact_base_page_score(
@@ -573,10 +590,12 @@ def select_page_token_indices_for_base_only(
     query_axis_classes: list[str] | None,
     query_token_labels: list[str] | None,
     page_token_classes: list[str] | None,
+    page_meta: dict | None,
     approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
 ) -> list[int]:
     import torch
@@ -595,6 +614,26 @@ def select_page_token_indices_for_base_only(
 
     if approx_page_token_selector == "global_topk":
         return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+
+    if approx_page_token_selector == "learned_token_topk":
+        if learned_token_selector_model is None:
+            raise ValueError(
+                "approx_page_token_selector='learned_token_topk' requires a learned token selector model."
+            )
+        if page_meta is None:
+            raise ValueError("learned_token_topk requires page_meta.")
+        learned_scores = score_page_tokens_with_learned_selector(
+            page_emb=page_emb,
+            query_emb=query_emb,
+            query_score_mask=query_score_mask
+            if query_score_mask is not None
+            else torch.ones(int(query_emb.shape[0]), dtype=torch.bool, device=query_emb.device),
+            page_meta=page_meta,
+            page_token_classes=page_token_classes,
+            model_payload=learned_token_selector_model,
+            coarse_score_dtype=coarse_score_dtype,
+        )
+        return _topk_indices_from_scores(scores=learned_scores, k=topk)
 
     if approx_page_token_selector == "query_coverage_mix":
         coverage_reserve = min(max(int(approx_page_token_coverage_reserve), 0), topk)
@@ -841,10 +880,12 @@ def maybe_prune_page_tokens_for_base_only(
     query_axis_classes: list[str] | None,
     query_token_labels: list[str] | None,
     page_token_classes: list[str] | None,
+    page_meta: dict | None,
     approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
 ) -> torch.Tensor:
     import torch
@@ -866,10 +907,12 @@ def maybe_prune_page_tokens_for_base_only(
         query_axis_classes=query_axis_classes,
         query_token_labels=query_token_labels,
         page_token_classes=page_token_classes,
+        page_meta=page_meta,
         approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
     )
     top_index_tensor = torch.tensor(top_indices, device=page_emb.device, dtype=torch.long)
@@ -1516,6 +1559,8 @@ def parse_args() -> argparse.Namespace:
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
             "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
             "distinct informative query tokens before filling the rest globally. "
+            "'learned_token_topk' scores each page token with a small learned linear selector "
+            "trained from exact MaxSim token winners. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
             "informative visual query tokens and visual-labeled page patches. "
             "'visual_patch_query_prior' only boosts visual-labeled page patches using "
@@ -1662,6 +1707,13 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional explicit question type for free-form --query mode when using "
             "--query-route-config-json."
+        ),
+    )
+    parser.add_argument(
+        "--learned-token-selector-model",
+        help=(
+            "Optional learned linear token-selector JSON. Required when "
+            "--approx-base-page-token-selector=learned_token_topk."
         ),
     )
     parser.add_argument(
@@ -2217,6 +2269,110 @@ def _token_index_to_patch_index(
     return None
 
 
+def compute_exact_token_winner_counts(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+) -> torch.Tensor:
+    import torch
+
+    score_matrix = page_emb @ query_emb.T
+    full_best_indices = score_matrix.max(dim=0).indices
+    active_mask = query_score_mask.to(device=full_best_indices.device, dtype=torch.bool)
+    active_best_indices = full_best_indices[active_mask]
+    if int(active_best_indices.numel()) == 0:
+        return torch.zeros(int(page_emb.shape[0]), dtype=torch.float32, device=page_emb.device)
+    winner_counts = torch.bincount(
+        active_best_indices,
+        minlength=int(page_emb.shape[0]),
+    ).to(dtype=torch.float32, device=page_emb.device)
+    return winner_counts
+
+
+def compute_token_selector_feature_matrix(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+    page_meta: dict,
+    page_token_classes: list[str] | None,
+    coarse_score_dtype: str = "fp32",
+) -> torch.Tensor:
+    import torch
+
+    token_count = int(page_emb.shape[0])
+    mean_scores = compute_coarse_page_token_scores(
+        page_emb=page_emb,
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+        approx_page_token_scorer="query_mean",
+        coarse_score_dtype=coarse_score_dtype,
+    )
+    token_max_scores = compute_coarse_page_token_scores(
+        page_emb=page_emb,
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+        approx_page_token_scorer="query_token_max",
+        coarse_score_dtype=coarse_score_dtype,
+    )
+    token_norms = page_emb.norm(dim=1).to(dtype=torch.float32)
+
+    grid_side = int(page_meta["grid_side"])
+    max_row_col = float(max(grid_side - 1, 1))
+    center = (grid_side - 1) / 2.0
+    max_center_dist = max((2.0**0.5) * center, 1.0)
+
+    is_prefix = torch.zeros(token_count, dtype=torch.float32, device=page_emb.device)
+    is_visual = torch.zeros(token_count, dtype=torch.float32, device=page_emb.device)
+    is_non_visual = torch.zeros(token_count, dtype=torch.float32, device=page_emb.device)
+    is_unknown = torch.ones(token_count, dtype=torch.float32, device=page_emb.device)
+    row_norm = torch.zeros(token_count, dtype=torch.float32, device=page_emb.device)
+    col_norm = torch.zeros(token_count, dtype=torch.float32, device=page_emb.device)
+    center_dist = torch.zeros(token_count, dtype=torch.float32, device=page_emb.device)
+
+    for token_idx in range(token_count):
+        patch_idx = _token_index_to_patch_index(token_idx=token_idx, page_meta=page_meta)
+        token_class = (
+            "unknown"
+            if page_token_classes is None or token_idx >= len(page_token_classes)
+            else str(page_token_classes[token_idx])
+        )
+        if patch_idx is None:
+            is_prefix[token_idx] = 1.0
+        else:
+            row = patch_idx // grid_side
+            col = patch_idx % grid_side
+            row_norm[token_idx] = float(row) / max_row_col
+            col_norm[token_idx] = float(col) / max_row_col
+            center_dist[token_idx] = (
+                (((float(row) - center) ** 2 + (float(col) - center) ** 2) ** 0.5)
+                / max_center_dist
+            )
+        if token_class == "visual":
+            is_visual[token_idx] = 1.0
+            is_unknown[token_idx] = 0.0
+        elif token_class == "non_visual":
+            is_non_visual[token_idx] = 1.0
+            is_unknown[token_idx] = 0.0
+
+    return torch.stack(
+        [
+            mean_scores.to(dtype=torch.float32),
+            token_max_scores.to(dtype=torch.float32),
+            token_norms,
+            is_prefix,
+            is_visual,
+            is_non_visual,
+            is_unknown,
+            row_norm,
+            col_norm,
+            center_dist,
+        ],
+        dim=1,
+    )
+
+
 def select_grounded_non_visual_page_indices(
     *,
     page_meta: dict,
@@ -2445,10 +2601,12 @@ def compute_base_only_page_feature(
     query_axis_classes: list[str] | None = None,
     query_token_labels: list[str] | None = None,
     page_token_classes: list[str] | None = None,
+    page_meta: dict | None = None,
     approx_page_token_coverage_reserve: int = 64,
     approx_page_token_label_reserve: int = 64,
     approx_page_token_soft_visual_query_weight: float = 0.5,
     approx_page_token_soft_patch_visual_bonus: float = 0.2,
+    learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
 ) -> PageFeature:
     exact_base_page_score = compute_approx_base_page_score(
@@ -2463,10 +2621,12 @@ def compute_base_only_page_feature(
         query_axis_classes=query_axis_classes,
         query_token_labels=query_token_labels,
         page_token_classes=page_token_classes,
+        page_meta=page_meta,
         approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
     )
     base_page_score = exact_base_page_score if base_score_override is None else float(base_score_override)
@@ -2560,10 +2720,12 @@ def compute_base_only_page_features(
     query_axis_classes: list[str] | None,
     query_token_labels: list[str] | None,
     page_token_classes_by_uid: dict[str, list[str]] | None,
+    page_meta_by_uid: dict[str, dict] | None,
     approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    learned_token_selector_model: dict | None,
     coarse_score_dtype: str,
     page_batch_size: int,
 ) -> list[PageFeature]:
@@ -2606,10 +2768,16 @@ def compute_base_only_page_features(
                             if page_token_classes_by_uid is None
                             else page_token_classes_by_uid.get(f"{doc_id}_page{page_idx}")
                         ),
+                        page_meta=(
+                            None
+                            if page_meta_by_uid is None
+                            else page_meta_by_uid.get(f"{doc_id}_page{page_idx}")
+                        ),
                         approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
                         approx_page_token_label_reserve=approx_page_token_label_reserve,
                         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+                        learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=coarse_score_dtype,
                     )
                 )
@@ -3099,6 +3267,49 @@ def score_doc_feature_record(record: dict, model_payload: dict) -> float:
     return float(score)
 
 
+def load_learned_token_selector_model(path: str | None) -> dict | None:
+    if not path:
+        return None
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("model_type") != "linear_token_selector":
+        raise ValueError(
+            f"Unsupported learned token selector model_type: {payload.get('model_type')!r}"
+        )
+    feature_names = payload.get("feature_names", [])
+    if list(feature_names) != list(LEARNED_TOKEN_SELECTOR_FEATURE_NAMES):
+        raise ValueError("Learned token selector feature_names do not match current code.")
+    return payload
+
+
+def score_page_tokens_with_learned_selector(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+    page_meta: dict,
+    page_token_classes: list[str] | None,
+    model_payload: dict,
+    coarse_score_dtype: str = "fp32",
+) -> torch.Tensor:
+    import torch
+
+    features = compute_token_selector_feature_matrix(
+        page_emb=page_emb,
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+        page_meta=page_meta,
+        page_token_classes=page_token_classes,
+        coarse_score_dtype=coarse_score_dtype,
+    )
+    means = torch.tensor(model_payload["feature_means"], dtype=torch.float32, device=features.device)
+    stds = torch.tensor(model_payload["feature_stds"], dtype=torch.float32, device=features.device)
+    weights = torch.tensor(model_payload["weights"], dtype=torch.float32, device=features.device)
+    bias = float(model_payload.get("bias", 0.0))
+    stds = torch.where(stds > 1e-6, stds, torch.ones_like(stds))
+    normalized = (features - means) / stds
+    return (normalized @ weights) + bias
+
+
 def build_learned_doc_rankings(
     *,
     page_features: list[PageFeature],
@@ -3528,6 +3739,22 @@ def main() -> None:
             "--approx-base-page-token-selector=query_coverage_mix."
         )
     if (
+        args.approx_base_page_token_selector == "learned_token_topk"
+        and not args.learned_token_selector_model
+    ):
+        raise ValueError(
+            "--approx-base-page-token-selector=learned_token_topk requires "
+            "--learned-token-selector-model."
+        )
+    if (
+        args.approx_base_page_token_selector != "learned_token_topk"
+        and args.learned_token_selector_model
+    ):
+        raise ValueError(
+            "--learned-token-selector-model is only valid with "
+            "--approx-base-page-token-selector=learned_token_topk."
+        )
+    if (
         args.approx_base_page_token_selector not in {"soft_label_prior", "visual_patch_query_prior"}
         and args.approx_base_page_token_soft_visual_query_weight != 0.5
     ):
@@ -3666,6 +3893,7 @@ def main() -> None:
             "with fixed weights."
         )
     route_config = load_query_route_config(args.query_route_config_json)
+    learned_token_selector_model = load_learned_token_selector_model(args.learned_token_selector_model)
     default_route_decision = "visual" if staged_visual_rerank else "base"
 
     if fixed_base_only and args.base_score_source == "baseline_pred":
@@ -3794,7 +4022,7 @@ def main() -> None:
     needs_patch_axis_classes = (
         not fixed_base_only
         or staged_visual_rerank
-        or args.approx_base_page_token_selector in {"soft_label_prior", "visual_patch_query_prior"}
+        or args.approx_base_page_token_selector in {"learned_token_topk", "soft_label_prior", "visual_patch_query_prior"}
     )
     patch_axis_classes_by_uid = (
         load_patch_axis_classes_for_pages(
@@ -3897,10 +4125,12 @@ def main() -> None:
                 query_axis_classes=query_axis_classes,
                 query_token_labels=query_token_labels,
                 page_token_classes_by_uid=page_token_classes_by_uid,
+                page_meta_by_uid=page_meta,
                 approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                 approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                learned_token_selector_model=learned_token_selector_model,
                 coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                 page_batch_size=args.base_only_page_batch_size,
             )
@@ -3924,10 +4154,12 @@ def main() -> None:
                 query_axis_classes=query_axis_classes,
                 query_token_labels=query_token_labels,
                 page_token_classes_by_uid=page_token_classes_by_uid,
+                page_meta_by_uid=page_meta,
                 approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                 approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                learned_token_selector_model=learned_token_selector_model,
                 coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                 page_batch_size=args.base_only_page_batch_size,
             )
@@ -4082,6 +4314,7 @@ def main() -> None:
         "visual_rerank_top_pages": args.visual_rerank_top_pages,
         "visual_rerank_top_docs": args.visual_rerank_top_docs,
         "query_route_config_json": args.query_route_config_json,
+        "learned_token_selector_model": args.learned_token_selector_model,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
@@ -4148,6 +4381,7 @@ def main() -> None:
                 "visual_rerank_top_pages": args.visual_rerank_top_pages,
                 "visual_rerank_top_docs": args.visual_rerank_top_docs,
                 "query_route_config_json": args.query_route_config_json,
+                "learned_token_selector_model": args.learned_token_selector_model,
                 "gated_visual_top_docs": args.gated_visual_top_docs,
                 "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
                 "balance_score_mode": args.balance_score_mode,
@@ -4178,6 +4412,7 @@ def main() -> None:
     print(f"approx_base_page_token_spatial_reserve: {args.approx_base_page_token_spatial_reserve}")
     print(f"approx_base_page_token_coverage_reserve: {args.approx_base_page_token_coverage_reserve}")
     print(f"approx_base_page_token_label_reserve: {args.approx_base_page_token_label_reserve}")
+    print(f"learned_token_selector_model: {args.learned_token_selector_model}")
     print(f"base_only_page_batch_size: {args.base_only_page_batch_size}")
     print(f"approx_base_page_token_coarse_dtype: {args.approx_base_page_token_coarse_dtype}")
     print(f"two_stage_exact_top_pages: {args.two_stage_exact_top_pages}")
