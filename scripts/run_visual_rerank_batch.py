@@ -119,7 +119,17 @@ def parse_args() -> argparse.Namespace:
             "Coarse scorer used to select page tokens before top-K pruning in "
             "approx_page_maxsim_topk mode. 'query_mean' is the original fast mean-query scorer; "
             "'query_token_max' uses per-page-token max similarity over query tokens and is usually "
-            "stronger but less efficient."
+            "stronger but less efficient; 'query_prototype_max' clusters query tokens into a small "
+            "set of learned prototypes and scores each page token by its best prototype match."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-query-prototypes",
+        type=int,
+        default=4,
+        help=(
+            "When --approx-base-page-token-scorer=query_prototype_max, build this many query "
+            "prototypes before coarse top-K page-token pruning."
         ),
     )
     parser.add_argument(
@@ -822,6 +832,8 @@ def main() -> None:
             "--approx-base-page-token-scorer is only valid with "
             "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, or two_stage_doc_maxsim."
         )
+    if args.approx_base_page_token_scorer == "query_prototype_max" and args.approx_base_page_token_query_prototypes <= 0:
+        raise ValueError("--approx-base-page-token-query-prototypes must be > 0.")
     if (
         args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
         and args.approx_base_page_token_selector != "global_topk"
@@ -1228,6 +1240,7 @@ def main() -> None:
                             else 0
                         ),
                         approx_page_token_scorer=args.approx_base_page_token_scorer,
+                        approx_page_token_query_prototypes=args.approx_base_page_token_query_prototypes,
                         approx_page_token_selector=args.approx_base_page_token_selector,
                         approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
                         query_axis_classes=query_axis_classes,
@@ -1253,6 +1266,7 @@ def main() -> None:
                             else 0
                         ),
                         approx_page_token_scorer=args.approx_base_page_token_scorer,
+                        approx_page_token_query_prototypes=args.approx_base_page_token_query_prototypes,
                         approx_page_token_selector=args.approx_base_page_token_selector,
                         approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
                         query_axis_classes=query_axis_classes,
@@ -1470,6 +1484,7 @@ def main() -> None:
             "base_score_source": args.base_score_source,
             "approx_base_page_token_topk": args.approx_base_page_token_topk,
             "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+            "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
             "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
             "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
@@ -1562,6 +1577,7 @@ def main() -> None:
         "base_score_source": args.base_score_source,
         "approx_base_page_token_topk": args.approx_base_page_token_topk,
         "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+        "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
         "approx_base_page_token_selector": args.approx_base_page_token_selector,
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,

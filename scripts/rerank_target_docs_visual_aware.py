@@ -25,7 +25,11 @@ BASE_SCORE_SOURCE_CHOICES = (
     "two_stage_page_maxsim",
     "two_stage_doc_maxsim",
 )
-APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = ("query_mean", "query_token_max")
+APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = (
+    "query_mean",
+    "query_token_max",
+    "query_prototype_max",
+)
 APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = (
     "global_topk",
     "spatial_quadrant_mix",
@@ -177,7 +181,9 @@ def compute_coarse_page_token_scores(
     *,
     page_emb: torch.Tensor,
     query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor | None,
     approx_page_token_scorer: str,
+    approx_page_token_query_prototypes: int = 4,
     coarse_score_dtype: str = "fp32",
 ) -> torch.Tensor:
     import torch
@@ -190,13 +196,75 @@ def compute_coarse_page_token_scores(
         page_emb_coarse = page_emb.to(dtype=dtype)
         query_emb_coarse = query_emb.to(dtype=dtype)
 
+    query_emb_active = query_emb_coarse
+    if query_score_mask is not None and int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
+        query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
+        if bool(query_mask_device.any()):
+            query_emb_active = query_emb_coarse[query_mask_device]
+
     if approx_page_token_scorer == "query_mean":
-        coarse_query = query_emb_coarse.mean(dim=0)
+        coarse_query = query_emb_active.mean(dim=0)
         return (page_emb_coarse @ coarse_query).to(dtype=torch.float32)
+    if approx_page_token_scorer == "query_prototype_max":
+        prototype_count = max(1, int(approx_page_token_query_prototypes))
+        prototypes = build_query_prototypes(
+            query_emb=query_emb_active,
+            prototype_count=prototype_count,
+        ).to(device=page_emb_coarse.device, dtype=page_emb_coarse.dtype)
+        score_matrix = page_emb_coarse @ prototypes.T
+        return score_matrix.max(dim=1).values.to(dtype=torch.float32)
     if approx_page_token_scorer == "query_token_max":
-        score_matrix = page_emb_coarse @ query_emb_coarse.T
+        score_matrix = page_emb_coarse @ query_emb_active.T
         return score_matrix.max(dim=1).values.to(dtype=torch.float32)
     raise ValueError(f"Unsupported approx_page_token_scorer: {approx_page_token_scorer!r}")
+
+
+def build_query_prototypes(
+    *,
+    query_emb: torch.Tensor,
+    prototype_count: int,
+    max_iters: int = 4,
+) -> torch.Tensor:
+    import torch
+
+    if int(query_emb.shape[0]) == 0:
+        raise ValueError("Cannot build query prototypes from an empty query embedding tensor.")
+    if int(query_emb.shape[0]) == 1 or prototype_count <= 1:
+        coarse_query = query_emb.mean(dim=0)
+        return coarse_query.unsqueeze(0).to(dtype=query_emb.dtype)
+
+    prototype_count = min(max(1, int(prototype_count)), int(query_emb.shape[0]))
+    if prototype_count >= int(query_emb.shape[0]):
+        return query_emb
+
+    token_norms = query_emb.norm(dim=1)
+    first_idx = int(token_norms.argmax().item())
+    center_indices = [first_idx]
+
+    for _ in range(1, prototype_count):
+        selected = query_emb[center_indices]
+        similarities = query_emb @ selected.T
+        best_similarity = similarities.max(dim=1).values
+        for center_idx in center_indices:
+            best_similarity[center_idx] = float("inf")
+        next_idx = int(best_similarity.argmin().item())
+        center_indices.append(next_idx)
+
+    centers = query_emb[torch.tensor(center_indices, device=query_emb.device, dtype=torch.long)].clone()
+
+    for _ in range(max(1, int(max_iters))):
+        assignment_scores = query_emb @ centers.T
+        assignments = assignment_scores.argmax(dim=1)
+        updated_centers = []
+        for center_idx in range(prototype_count):
+            member_mask = assignments == center_idx
+            if bool(member_mask.any()):
+                updated_centers.append(query_emb[member_mask].mean(dim=0))
+            else:
+                updated_centers.append(centers[center_idx])
+        centers = torch.stack(updated_centers, dim=0)
+
+    return centers.to(dtype=query_emb.dtype)
 
 
 def compute_exact_base_page_score(
@@ -218,6 +286,7 @@ def compute_approx_base_page_score(
     query_score_mask: torch.Tensor,
     approx_page_token_topk: int,
     approx_page_token_scorer: str,
+    approx_page_token_query_prototypes: int,
     approx_page_token_selector: str,
     approx_page_token_spatial_reserve: int,
     query_axis_classes: list[str] | None,
@@ -231,8 +300,10 @@ def compute_approx_base_page_score(
     pruned_page_emb = maybe_prune_page_tokens_for_base_only(
         page_emb=page_emb,
         query_emb=query_emb,
+        query_score_mask=query_score_mask,
         approx_page_token_topk=approx_page_token_topk,
         approx_page_token_scorer=approx_page_token_scorer,
+        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
         approx_page_token_selector=approx_page_token_selector,
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
         query_axis_classes=query_axis_classes,
@@ -451,8 +522,10 @@ def select_page_token_indices_for_base_only(
     *,
     page_emb: torch.Tensor,
     query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor | None,
     approx_page_token_topk: int,
     approx_page_token_scorer: str,
+    approx_page_token_query_prototypes: int,
     approx_page_token_selector: str,
     approx_page_token_spatial_reserve: int,
     query_axis_classes: list[str] | None,
@@ -468,7 +541,9 @@ def select_page_token_indices_for_base_only(
     coarse_scores = compute_coarse_page_token_scores(
         page_emb=page_emb,
         query_emb=query_emb,
+        query_score_mask=query_score_mask,
         approx_page_token_scorer=approx_page_token_scorer,
+        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
         coarse_score_dtype=coarse_score_dtype,
     )
     topk = min(int(approx_page_token_topk), int(page_emb.shape[0]))
@@ -504,6 +579,7 @@ def select_page_token_indices_for_base_only(
         visual_query_scores = compute_coarse_page_token_scores(
             page_emb=page_emb,
             query_emb=visual_query_emb,
+            query_score_mask=None,
             approx_page_token_scorer="query_token_max",
             coarse_score_dtype=coarse_score_dtype,
         )
@@ -540,6 +616,7 @@ def select_page_token_indices_for_base_only(
             visual_query_scores = compute_coarse_page_token_scores(
                 page_emb=page_emb,
                 query_emb=visual_query_emb,
+                query_score_mask=None,
                 approx_page_token_scorer="query_token_max",
                 coarse_score_dtype=coarse_score_dtype,
             )
@@ -583,7 +660,9 @@ def select_page_token_indices_for_base_only(
         label_scores = compute_coarse_page_token_scores(
             page_emb=page_emb,
             query_emb=visual_query_emb,
+            query_score_mask=None,
             approx_page_token_scorer=approx_page_token_scorer,
+            approx_page_token_query_prototypes=approx_page_token_query_prototypes,
             coarse_score_dtype=coarse_score_dtype,
         )
         selected.update(_topk_indices_from_scores(scores=label_scores, k=label_reserve))
@@ -640,8 +719,10 @@ def maybe_prune_page_tokens_for_base_only(
     *,
     page_emb: torch.Tensor,
     query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
     approx_page_token_topk: int,
     approx_page_token_scorer: str,
+    approx_page_token_query_prototypes: int,
     approx_page_token_selector: str,
     approx_page_token_spatial_reserve: int,
     query_axis_classes: list[str] | None,
@@ -662,8 +743,10 @@ def maybe_prune_page_tokens_for_base_only(
     top_indices = select_page_token_indices_for_base_only(
         page_emb=page_emb,
         query_emb=query_emb,
+        query_score_mask=query_score_mask,
         approx_page_token_topk=topk,
         approx_page_token_scorer=approx_page_token_scorer,
+        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
         approx_page_token_selector=approx_page_token_selector,
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
         query_axis_classes=query_axis_classes,
@@ -1295,7 +1378,17 @@ def parse_args() -> argparse.Namespace:
             "Coarse scorer used to select page tokens before top-K pruning in "
             "approx_page_maxsim_topk mode. 'query_mean' is the original fast mean-query scorer; "
             "'query_token_max' uses per-page-token max similarity over query tokens and is usually "
-            "stronger but less efficient."
+            "stronger but less efficient; 'query_prototype_max' clusters query tokens into a small "
+            "set of learned prototypes and scores each page token by its best prototype match."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-query-prototypes",
+        type=int,
+        default=4,
+        help=(
+            "When --approx-base-page-token-scorer=query_prototype_max, build this many query "
+            "prototypes before coarse top-K page-token pruning."
         ),
     )
     parser.add_argument(
@@ -2220,6 +2313,7 @@ def compute_base_only_page_feature(
     base_score_override: float | None = None,
     approx_page_token_topk: int = 0,
     approx_page_token_scorer: str = "query_mean",
+    approx_page_token_query_prototypes: int = 4,
     approx_page_token_selector: str = "global_topk",
     approx_page_token_spatial_reserve: int = 64,
     query_axis_classes: list[str] | None = None,
@@ -2236,6 +2330,7 @@ def compute_base_only_page_feature(
         query_score_mask=query_score_mask,
         approx_page_token_topk=approx_page_token_topk,
         approx_page_token_scorer=approx_page_token_scorer,
+        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
         approx_page_token_selector=approx_page_token_selector,
         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
         query_axis_classes=query_axis_classes,
@@ -2262,6 +2357,7 @@ def compute_base_only_page_feature_scores_batched(
     base_score_source: str,
     approx_page_token_topk: int,
     approx_page_token_scorer: str,
+    approx_page_token_query_prototypes: int,
     coarse_score_dtype: str,
 ) -> list[float]:
     import torch
@@ -2287,11 +2383,25 @@ def compute_base_only_page_feature_scores_batched(
         batch_page_embs_coarse = batch_page_embs.to(dtype=dtype)
         query_emb_coarse = query_emb.to(dtype=dtype)
 
+    query_emb_active = query_emb_coarse
+    if int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
+        query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
+        if bool(query_mask_device.any()):
+            query_emb_active = query_emb_coarse[query_mask_device]
+
     if approx_page_token_scorer == "query_mean":
-        coarse_query = query_emb_coarse.mean(dim=0)
+        coarse_query = query_emb_active.mean(dim=0)
         coarse_scores = (batch_page_embs_coarse @ coarse_query).to(dtype=torch.float32)
+    elif approx_page_token_scorer == "query_prototype_max":
+        prototype_count = max(1, int(approx_page_token_query_prototypes))
+        prototypes = build_query_prototypes(
+            query_emb=query_emb_active,
+            prototype_count=prototype_count,
+        ).to(device=batch_page_embs_coarse.device, dtype=batch_page_embs_coarse.dtype)
+        coarse_score_matrix = batch_page_embs_coarse @ prototypes.T
+        coarse_scores = coarse_score_matrix.max(dim=2).values.to(dtype=torch.float32)
     elif approx_page_token_scorer == "query_token_max":
-        coarse_score_matrix = batch_page_embs_coarse @ query_emb_coarse.T
+        coarse_score_matrix = batch_page_embs_coarse @ query_emb_active.T
         coarse_scores = coarse_score_matrix.max(dim=2).values.to(dtype=torch.float32)
     else:
         raise ValueError(f"Unsupported batched approx_page_token_scorer: {approx_page_token_scorer!r}")
@@ -2316,6 +2426,7 @@ def compute_base_only_page_features(
     baseline_page_score_map: dict[str, float],
     approx_page_token_topk: int,
     approx_page_token_scorer: str,
+    approx_page_token_query_prototypes: int,
     approx_page_token_selector: str,
     approx_page_token_spatial_reserve: int,
     query_axis_classes: list[str] | None,
@@ -2356,6 +2467,7 @@ def compute_base_only_page_features(
                         base_score_override=base_score_override,
                         approx_page_token_topk=approx_page_token_topk,
                         approx_page_token_scorer=approx_page_token_scorer,
+                        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
                         approx_page_token_selector=approx_page_token_selector,
                         approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
                         query_axis_classes=query_axis_classes,
@@ -2380,6 +2492,7 @@ def compute_base_only_page_features(
                 base_score_source=base_score_source,
                 approx_page_token_topk=approx_page_token_topk,
                 approx_page_token_scorer=approx_page_token_scorer,
+                approx_page_token_query_prototypes=approx_page_token_query_prototypes,
                 coarse_score_dtype=coarse_score_dtype,
             )
             for (doc_id, page_idx, base_score_override), batch_score in zip(batch_meta, batch_scores):
@@ -3250,6 +3363,8 @@ def main() -> None:
             "--approx-base-page-token-scorer is only valid with "
             "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, or two_stage_doc_maxsim."
         )
+    if args.approx_base_page_token_scorer == "query_prototype_max" and args.approx_base_page_token_query_prototypes <= 0:
+        raise ValueError("--approx-base-page-token-query-prototypes must be > 0.")
     if (
         args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
         and args.approx_base_page_token_selector != "global_topk"
@@ -3467,6 +3582,7 @@ def main() -> None:
             "base_score_source": args.base_score_source,
             "approx_base_page_token_topk": args.approx_base_page_token_topk,
             "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+            "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
             "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
             "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
@@ -3636,6 +3752,7 @@ def main() -> None:
                     else 0
                 ),
                 approx_page_token_scorer=args.approx_base_page_token_scorer,
+                approx_page_token_query_prototypes=args.approx_base_page_token_query_prototypes,
                 approx_page_token_selector=args.approx_base_page_token_selector,
                 approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
                 query_axis_classes=query_axis_classes,
@@ -3661,6 +3778,7 @@ def main() -> None:
                     else 0
                 ),
                 approx_page_token_scorer=args.approx_base_page_token_scorer,
+                approx_page_token_query_prototypes=args.approx_base_page_token_query_prototypes,
                 approx_page_token_selector=args.approx_base_page_token_selector,
                 approx_page_token_spatial_reserve=args.approx_base_page_token_spatial_reserve,
                 query_axis_classes=query_axis_classes,
@@ -3807,9 +3925,10 @@ def main() -> None:
         "embedding_name": args.embedding_name,
         "query_token_filter": args.query_token_filter,
         "base_score_source": args.base_score_source,
-        "approx_base_page_token_topk": args.approx_base_page_token_topk,
-        "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
-        "approx_base_page_token_selector": args.approx_base_page_token_selector,
+            "approx_base_page_token_topk": args.approx_base_page_token_topk,
+            "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+            "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
+            "approx_base_page_token_selector": args.approx_base_page_token_selector,
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
@@ -3875,6 +3994,7 @@ def main() -> None:
                 "base_score_source": args.base_score_source,
                 "approx_base_page_token_topk": args.approx_base_page_token_topk,
                 "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+                "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
                 "approx_base_page_token_selector": args.approx_base_page_token_selector,
                 "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
                 "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
@@ -3910,6 +4030,7 @@ def main() -> None:
     print(f"base_score_source: {args.base_score_source}")
     print(f"approx_base_page_token_topk: {args.approx_base_page_token_topk}")
     print(f"approx_base_page_token_scorer: {args.approx_base_page_token_scorer}")
+    print(f"approx_base_page_token_query_prototypes: {args.approx_base_page_token_query_prototypes}")
     print(f"approx_base_page_token_selector: {args.approx_base_page_token_selector}")
     print(f"approx_base_page_token_spatial_reserve: {args.approx_base_page_token_spatial_reserve}")
     print(f"approx_base_page_token_label_reserve: {args.approx_base_page_token_label_reserve}")
