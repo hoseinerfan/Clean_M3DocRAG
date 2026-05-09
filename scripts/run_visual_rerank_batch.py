@@ -36,11 +36,15 @@ from scripts.rerank_target_docs_visual_aware import (
     clean_token_label,
     compute_base_only_page_features,
     compute_base_only_page_feature,
+    build_doc_feature_records,
+    build_learned_doc_rankings,
     compute_page_feature,
     decide_query_route,
+    enrich_page_features_with_channels,
     extract_query_route_features,
     grid_search_weights,
     is_base_only_weights,
+    load_learned_doc_reranker,
     load_patch_axis_classes_for_pages,
     load_query_route_config,
     load_splice_query_axis_classes,
@@ -251,6 +255,29 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional JSON config for binary query routing. When provided, each qid chooses "
             "between plain stage-1 base-only output and the staged visual rerank arm."
+        ),
+    )
+    parser.add_argument(
+        "--learned-doc-reranker-model",
+        help=(
+            "Optional learned linear doc reranker JSON. When provided, aggregate doc features "
+            "from the stage-1 page features and rerank docs/pages using the learned model instead "
+            "of the hand-weighted fusion."
+        ),
+    )
+    parser.add_argument(
+        "--learned-doc-reranker-top-docs",
+        type=int,
+        default=0,
+        help=(
+            "Optional shortlist size for the learned doc reranker. Use 0 to rerank all candidate "
+            "docs; otherwise only rerank the top-N stage-1 base docs and leave the rest in stage-1 order."
+        ),
+    )
+    parser.add_argument(
+        "--output-doc-feature-jsonl",
+        help=(
+            "Optional JSONL path to export one learned-reranker doc feature record per candidate doc."
         ),
     )
     parser.add_argument(
@@ -630,6 +657,8 @@ def main() -> None:
         )
     if args.visual_fallback_all_token_weight < 0.0:
         raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
+    if args.learned_doc_reranker_top_docs < 0:
+        raise ValueError("--learned-doc-reranker-top-docs must be >= 0.")
 
     fixed_weights = WeightConfig(
         base=args.weight_base,
@@ -642,19 +671,24 @@ def main() -> None:
         (not args.grid_search)
         and (args.visual_rerank_top_pages > 0 or args.visual_rerank_top_docs > 0)
     )
+    learned_doc_reranker_active = bool(args.learned_doc_reranker_model)
     if args.query_route_config_json and not staged_visual_rerank:
         raise ValueError(
             "--query-route-config-json requires --visual-rerank-top-pages > 0 "
             "or --visual-rerank-top-docs > 0."
         )
+    if learned_doc_reranker_active and args.grid_search:
+        raise ValueError("--learned-doc-reranker-model is not supported with --grid-search.")
     if (
         args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
-        and not (fixed_base_only or staged_visual_rerank)
+        and not (fixed_base_only or staged_visual_rerank or learned_doc_reranker_active)
     ):
         raise ValueError(
             f"--base-score-source={args.base_score_source} is currently only supported in base-only mode."
         )
-    if args.base_only_page_batch_size > 0 and not (fixed_base_only or staged_visual_rerank):
+    if args.base_only_page_batch_size > 0 and not (
+        fixed_base_only or staged_visual_rerank or learned_doc_reranker_active
+    ):
         raise ValueError("--base-only-page-batch-size is currently only supported in base-only mode.")
     if (args.visual_rerank_top_pages > 0 or args.visual_rerank_top_docs > 0) and fixed_base_only:
         raise ValueError(
@@ -670,13 +704,19 @@ def main() -> None:
     gold_rows = load_gold_rows(Path(args.gold), set(qids))
     baseline_payload = load_baseline_payload(Path(args.baseline_pred), set(qids))
     route_config = load_query_route_config(args.query_route_config_json)
+    learned_doc_reranker_model = load_learned_doc_reranker(args.learned_doc_reranker_model)
     default_route_decision = "visual" if staged_visual_rerank else "base"
 
     torch = None
     retrieval_model = None
     load_doc_embeddings_for_doc_ids = None
     device = None
-    if not (fixed_base_only and args.base_score_source == "baseline_pred"):
+    if not (
+        fixed_base_only
+        and args.base_score_source == "baseline_pred"
+        and not learned_doc_reranker_active
+        and not args.output_doc_feature_jsonl
+    ):
         import torch as _torch
         from m3docrag.retrieval import ColPaliRetrievalModel
         from scripts.rerank_target_docs_visual_aware import load_doc_embeddings_for_doc_ids as _load_doc_embeddings_for_doc_ids
@@ -695,6 +735,7 @@ def main() -> None:
     grid_balance_values = parse_float_list(args.grid_balance_values)
 
     all_rows: list[dict] = []
+    all_doc_feature_rows: list[dict] = []
     improved_doc = 0
     worsened_doc = 0
     unchanged_doc = 0
@@ -730,7 +771,12 @@ def main() -> None:
             if route_config is not None
             else {"route_decision": default_route_decision, "matched_rule_index": None, "matched_rule": None}
         )
-        if fixed_base_only and args.base_score_source == "baseline_pred":
+        if (
+            fixed_base_only
+            and args.base_score_source == "baseline_pred"
+            and not learned_doc_reranker_active
+            and not args.output_doc_feature_jsonl
+        ):
             query_axis_classes = []
             page_features = []
             for page_uid in baseline_page_uids:
@@ -775,13 +821,20 @@ def main() -> None:
             )
 
             if fixed_base_only or staged_visual_rerank:
-                needs_query_axis_classes = staged_visual_rerank or args.approx_base_page_token_selector in {
+                needs_query_axis_classes = (
+                    staged_visual_rerank
+                    or learned_doc_reranker_active
+                    or bool(args.output_doc_feature_jsonl)
+                    or args.approx_base_page_token_selector in {
                     "query_label_mix",
                     "soft_label_prior",
                     "visual_patch_query_prior",
-                }
+                    }
+                )
                 needs_patch_axis_classes = (
                     staged_visual_rerank
+                    or learned_doc_reranker_active
+                    or bool(args.output_doc_feature_jsonl)
                     or args.approx_base_page_token_selector
                     in {"soft_label_prior", "visual_patch_query_prior"}
                 )
@@ -945,6 +998,20 @@ def main() -> None:
                     query_score_mask=query_score_mask,
                     top_docs=args.two_stage_exact_top_docs,
                 )
+            if learned_doc_reranker_active or args.output_doc_feature_jsonl:
+                assert page_token_classes_by_uid is not None
+                page_features = enrich_page_features_with_channels(
+                    page_features=page_features,
+                    docid2embs=docid2embs,
+                    query_emb=query_emb,
+                    query_axis_classes=query_axis_classes,
+                    query_score_mask=query_score_mask,
+                    page_token_classes_by_uid=page_token_classes_by_uid,
+                    page_meta_by_uid=page_meta,
+                    balance_score_mode=args.balance_score_mode,
+                    grounded_context_radius=args.grounded_context_radius,
+                    visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
+                )
             apply_staged_visual_rerank = staged_visual_rerank and route_info["route_decision"] == "visual"
             if route_config is not None:
                 if route_info["route_decision"] == "visual":
@@ -1012,14 +1079,36 @@ def main() -> None:
             weights = fixed_weights
             best_grid_record = None
 
-        reranked_docs, reranked_pages = build_rankings(
-            page_features=page_features,
-            weights=weights,
-            baseline_doc_rank_map=baseline_doc_rank_map,
-            stage1_base_doc_rank_map=stage1_base_doc_rank_map,
-            gated_visual_top_docs=args.gated_visual_top_docs,
-            scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
-        )
+        doc_feature_records: list[dict] = []
+        if learned_doc_reranker_active or args.output_doc_feature_jsonl:
+            doc_feature_records = build_doc_feature_records(
+                page_features=page_features,
+                baseline_doc_rank_map=baseline_doc_rank_map,
+            )
+            for record in doc_feature_records:
+                export_row = dict(record)
+                export_row["qid"] = qid
+                export_row["question_type"] = question_type
+                export_row["gold_doc_ids"] = gold_doc_ids
+                export_row["label_is_gold"] = record["doc_id"] in gold_doc_id_set
+                all_doc_feature_rows.append(export_row)
+
+        if learned_doc_reranker_active:
+            reranked_docs, reranked_pages, _doc_records = build_learned_doc_rankings(
+                page_features=page_features,
+                baseline_doc_rank_map=baseline_doc_rank_map,
+                model_payload=learned_doc_reranker_model,
+                learned_top_docs=args.learned_doc_reranker_top_docs,
+            )
+        else:
+            reranked_docs, reranked_pages = build_rankings(
+                page_features=page_features,
+                weights=weights,
+                baseline_doc_rank_map=baseline_doc_rank_map,
+                stage1_base_doc_rank_map=stage1_base_doc_rank_map,
+                gated_visual_top_docs=args.gated_visual_top_docs,
+                scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
+            )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
 
         baseline_page_hits = baseline_gold_page_hits(baseline_rows, gold_doc_id_set)
@@ -1067,6 +1156,8 @@ def main() -> None:
             "visual_rerank_top_pages": args.visual_rerank_top_pages,
             "visual_rerank_top_docs": args.visual_rerank_top_docs,
             "query_route_config_json": args.query_route_config_json,
+            "learned_doc_reranker_model": args.learned_doc_reranker_model,
+            "learned_doc_reranker_top_docs": args.learned_doc_reranker_top_docs,
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "balance_score_mode": args.balance_score_mode,
@@ -1081,10 +1172,12 @@ def main() -> None:
             "route_decision": route_info["route_decision"],
             "route_matched_rule_index": route_info["matched_rule_index"],
             "route_matched_rule": route_info["matched_rule"],
+            "learned_doc_reranker_applied": learned_doc_reranker_active,
             "staged_visual_rerank_applied": apply_staged_visual_rerank if not (fixed_base_only and args.base_score_source == "baseline_pred") else False,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
+            "doc_feature_record_count": len(doc_feature_records),
             "baseline_first_gold_doc_rank": baseline_first_gold_doc_rank,
             "baseline_first_gold_page_rank": baseline_first_gold_page_rank,
             "baseline_gold_page_hits_top10": baseline_page_hits[:10],
@@ -1108,6 +1201,12 @@ def main() -> None:
     with output_jsonl.open("w", encoding="utf-8") as handle:
         for row in all_rows:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if args.output_doc_feature_jsonl:
+        output_doc_feature_jsonl = Path(args.output_doc_feature_jsonl)
+        output_doc_feature_jsonl.parent.mkdir(parents=True, exist_ok=True)
+        with output_doc_feature_jsonl.open("w", encoding="utf-8") as handle:
+            for row in all_doc_feature_rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
     baseline_doc_ranks = [row["baseline_first_gold_doc_rank"] for row in all_rows if row["baseline_first_gold_doc_rank"] is not None]
     reranked_doc_ranks = [row["reranked_first_gold_doc_rank"] for row in all_rows if row["reranked_first_gold_doc_rank"] is not None]
@@ -1140,6 +1239,9 @@ def main() -> None:
         "visual_rerank_top_pages": args.visual_rerank_top_pages,
         "visual_rerank_top_docs": args.visual_rerank_top_docs,
         "query_route_config_json": args.query_route_config_json,
+        "learned_doc_reranker_model": args.learned_doc_reranker_model,
+        "learned_doc_reranker_top_docs": args.learned_doc_reranker_top_docs,
+        "output_doc_feature_jsonl": args.output_doc_feature_jsonl,
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
         "balance_score_mode": args.balance_score_mode,
@@ -1156,6 +1258,8 @@ def main() -> None:
         "fixed_weights": asdict(fixed_weights),
         "routed_to_visual_qid_count": routed_to_visual_qids,
         "routed_to_base_qid_count": routed_to_base_qids,
+        "learned_doc_reranker_applied": learned_doc_reranker_active,
+        "exported_doc_feature_row_count": len(all_doc_feature_rows),
         "grid_base_values": grid_base_values,
         "grid_visual_values": grid_visual_values,
         "grid_non_visual_values": grid_non_visual_values,

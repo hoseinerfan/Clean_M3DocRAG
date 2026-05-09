@@ -69,6 +69,30 @@ SOFT_VISUAL_QUERY_STOPWORDS = {
     "who",
     "with",
 }
+LEARNED_DOC_RERANKER_FEATURE_NAMES = (
+    "stage1_base_doc_rank",
+    "baseline_doc_rank",
+    "candidate_page_count",
+    "max_base_page_score",
+    "mean_base_page_score",
+    "top2_base_gap",
+    "max_visual_page_score",
+    "mean_visual_page_score",
+    "max_non_visual_page_score",
+    "mean_non_visual_page_score",
+    "max_grounded_non_visual_page_score",
+    "mean_grounded_non_visual_page_score",
+    "max_balance_score",
+    "mean_balance_score",
+    "best_page_visual_alignment_ratio",
+    "best_page_non_visual_alignment_ratio",
+    "best_page_visual_patch_count",
+    "best_page_non_visual_patch_count",
+    "best_page_grounded_non_visual_patch_count",
+    "best_page_visual_anchor_patch_count",
+    "best_page_visual_query_token_count",
+    "best_page_non_visual_query_token_count",
+)
 
 
 @dataclass(frozen=True)
@@ -2660,6 +2684,54 @@ def apply_visual_rerank_to_top_docs(
     return updated_features
 
 
+def enrich_page_features_with_channels(
+    *,
+    page_features: list[PageFeature],
+    docid2embs: dict[str, object],
+    query_emb: torch.Tensor,
+    query_axis_classes: list[str],
+    query_score_mask: torch.Tensor,
+    page_token_classes_by_uid: dict[str, list[str]],
+    page_meta_by_uid: dict[str, dict],
+    balance_score_mode: str = "min_avg",
+    grounded_context_radius: int = 0,
+    visual_fallback_all_token_weight: float = 0.0,
+) -> list[PageFeature]:
+    if not page_features:
+        return page_features
+
+    updated_features: list[PageFeature] = []
+    for feature in page_features:
+        page_tensor = docid2embs[feature.doc_id][feature.page_idx]
+        page_emb = page_tensor.view(-1, page_tensor.shape[-1]).to(
+            device=query_emb.device,
+            dtype=query_emb.dtype,
+        )
+        page_token_classes = page_token_classes_by_uid.get(feature.page_uid)
+        if page_token_classes is None:
+            raise KeyError(f"Missing page token classes for page_uid={feature.page_uid}")
+        page_meta = page_meta_by_uid.get(feature.page_uid)
+        if page_meta is None:
+            raise KeyError(f"Missing page metadata for page_uid={feature.page_uid}")
+        updated_features.append(
+            compute_page_feature(
+                page_emb=page_emb,
+                query_emb=query_emb,
+                query_axis_classes=query_axis_classes,
+                query_score_mask=query_score_mask,
+                page_token_classes=page_token_classes,
+                page_meta=page_meta,
+                doc_id=feature.doc_id,
+                page_idx=feature.page_idx,
+                balance_score_mode=balance_score_mode,
+                grounded_context_radius=grounded_context_radius,
+                visual_fallback_all_token_weight=visual_fallback_all_token_weight,
+                base_score_override=feature.base_page_score,
+            )
+        )
+    return updated_features
+
+
 def fused_page_score(feature: PageFeature, weights: WeightConfig) -> float:
     return (
         weights.base * feature.base_page_score
@@ -2675,6 +2747,210 @@ def auxiliary_page_bonus(feature: PageFeature, weights: WeightConfig) -> float:
         + weights.non_visual * feature.non_visual_page_score
         + weights.balance * feature.balance_score
     )
+
+
+def build_doc_feature_records(
+    page_features: list[PageFeature],
+    baseline_doc_rank_map: dict[str, int],
+) -> list[dict]:
+    if not page_features:
+        return []
+
+    stage1_ranked_docs, _stage1_ranked_pages = build_rankings(
+        page_features=page_features,
+        weights=WeightConfig(base=1.0, visual=0.0, non_visual=0.0, balance=0.0),
+        baseline_doc_rank_map=baseline_doc_rank_map,
+    )
+    stage1_base_doc_rank_map = {item["doc_id"]: item["rank"] for item in stage1_ranked_docs}
+    missing_rank_value = float(len(stage1_ranked_docs) + 1)
+
+    features_by_doc: dict[str, list[PageFeature]] = {}
+    for feature in page_features:
+        features_by_doc.setdefault(feature.doc_id, []).append(feature)
+
+    records: list[dict] = []
+    for doc_id, items in features_by_doc.items():
+        items_sorted = sorted(items, key=lambda item: item.base_page_score, reverse=True)
+        best = items_sorted[0]
+        top2_base_gap = (
+            items_sorted[0].base_page_score - items_sorted[1].base_page_score
+            if len(items_sorted) > 1
+            else items_sorted[0].base_page_score
+        )
+        feature_values = {
+            "stage1_base_doc_rank": float(stage1_base_doc_rank_map.get(doc_id, missing_rank_value)),
+            "baseline_doc_rank": float(baseline_doc_rank_map.get(doc_id, missing_rank_value)),
+            "candidate_page_count": float(len(items_sorted)),
+            "max_base_page_score": float(max(item.base_page_score for item in items_sorted)),
+            "mean_base_page_score": float(sum(item.base_page_score for item in items_sorted) / len(items_sorted)),
+            "top2_base_gap": float(top2_base_gap),
+            "max_visual_page_score": float(max(item.visual_page_score for item in items_sorted)),
+            "mean_visual_page_score": float(sum(item.visual_page_score for item in items_sorted) / len(items_sorted)),
+            "max_non_visual_page_score": float(max(item.non_visual_page_score for item in items_sorted)),
+            "mean_non_visual_page_score": float(sum(item.non_visual_page_score for item in items_sorted) / len(items_sorted)),
+            "max_grounded_non_visual_page_score": float(
+                max(item.grounded_non_visual_page_score for item in items_sorted)
+            ),
+            "mean_grounded_non_visual_page_score": float(
+                sum(item.grounded_non_visual_page_score for item in items_sorted) / len(items_sorted)
+            ),
+            "max_balance_score": float(max(item.balance_score for item in items_sorted)),
+            "mean_balance_score": float(sum(item.balance_score for item in items_sorted) / len(items_sorted)),
+            "best_page_visual_alignment_ratio": float(best.visual_alignment_ratio),
+            "best_page_non_visual_alignment_ratio": float(best.non_visual_alignment_ratio),
+            "best_page_visual_patch_count": float(best.visual_patch_count),
+            "best_page_non_visual_patch_count": float(best.non_visual_patch_count),
+            "best_page_grounded_non_visual_patch_count": float(best.grounded_non_visual_patch_count),
+            "best_page_visual_anchor_patch_count": float(best.visual_anchor_patch_count),
+            "best_page_visual_query_token_count": float(best.visual_query_token_count),
+            "best_page_non_visual_query_token_count": float(best.non_visual_query_token_count),
+        }
+        records.append(
+            {
+                "doc_id": doc_id,
+                "stage1_base_doc_rank": int(stage1_base_doc_rank_map.get(doc_id, len(stage1_ranked_docs) + 1)),
+                "baseline_doc_rank": baseline_doc_rank_map.get(doc_id),
+                "best_page_uid": best.page_uid,
+                "best_page_idx": int(best.page_idx),
+                "candidate_page_count": len(items_sorted),
+                "feature_values": feature_values,
+            }
+        )
+
+    records.sort(key=lambda item: (item["stage1_base_doc_rank"], item["doc_id"]))
+    return records
+
+
+def load_learned_doc_reranker(path: str | None) -> dict | None:
+    if not path:
+        return None
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if payload.get("model_type") != "linear_pairwise_doc_reranker":
+        raise ValueError(
+            f"Unsupported learned doc reranker model_type: {payload.get('model_type')!r}"
+        )
+    feature_names = payload.get("feature_names", [])
+    if list(feature_names) != list(LEARNED_DOC_RERANKER_FEATURE_NAMES):
+        raise ValueError("Learned doc reranker feature_names do not match current code.")
+    return payload
+
+
+def score_doc_feature_record(record: dict, model_payload: dict) -> float:
+    feature_names = model_payload["feature_names"]
+    means = model_payload["feature_means"]
+    stds = model_payload["feature_stds"]
+    weights = model_payload["weights"]
+    bias = float(model_payload.get("bias", 0.0))
+    feature_values = record["feature_values"]
+
+    score = bias
+    for idx, feature_name in enumerate(feature_names):
+        value = float(feature_values.get(feature_name, 0.0))
+        mean = float(means[idx])
+        std = float(stds[idx])
+        if std <= 0.0:
+            standardized = value - mean
+        else:
+            standardized = (value - mean) / std
+        score += standardized * float(weights[idx])
+    return float(score)
+
+
+def build_learned_doc_rankings(
+    *,
+    page_features: list[PageFeature],
+    baseline_doc_rank_map: dict[str, int],
+    model_payload: dict,
+    learned_top_docs: int = 0,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    doc_records = build_doc_feature_records(
+        page_features=page_features,
+        baseline_doc_rank_map=baseline_doc_rank_map,
+    )
+    if not doc_records:
+        return [], [], []
+
+    stage1_doc_ids = [record["doc_id"] for record in doc_records]
+    selected_doc_ids = (
+        set(stage1_doc_ids[:learned_top_docs])
+        if learned_top_docs > 0
+        else set(stage1_doc_ids)
+    )
+
+    selected_records: list[dict] = []
+    remaining_records: list[dict] = []
+    for record in doc_records:
+        record_copy = dict(record)
+        learned_score = score_doc_feature_record(record_copy, model_payload)
+        record_copy["learned_doc_score"] = learned_score
+        if record_copy["doc_id"] in selected_doc_ids:
+            selected_records.append(record_copy)
+        else:
+            remaining_records.append(record_copy)
+
+    selected_records.sort(
+        key=lambda item: (
+            item["learned_doc_score"],
+            -float(item["feature_values"]["stage1_base_doc_rank"]),
+            item["feature_values"]["max_base_page_score"],
+        ),
+        reverse=True,
+    )
+    remaining_records.sort(key=lambda item: (item["stage1_base_doc_rank"], item["doc_id"]))
+
+    min_selected_score = (
+        min((item["learned_doc_score"] for item in selected_records), default=0.0)
+    )
+    final_doc_records = selected_records + remaining_records
+    doc_score_map: dict[str, float] = {}
+    doc_rank_map: dict[str, int] = {}
+    reranked_docs: list[dict] = []
+    for rank, record in enumerate(final_doc_records, start=1):
+        doc_id = record["doc_id"]
+        learned_score = record.get("learned_doc_score")
+        if learned_score is None:
+            learned_score = min_selected_score - float(rank)
+        doc_score_map[doc_id] = float(learned_score)
+        doc_rank_map[doc_id] = rank
+        reranked_docs.append(
+            {
+                "doc_id": doc_id,
+                "rank": rank,
+                "fused_doc_score": float(learned_score),
+                "best_page_uid": record["best_page_uid"],
+                "best_page_idx": record["best_page_idx"],
+                "best_page_base_score": record["feature_values"]["max_base_page_score"],
+                "best_page_visual_score": record["feature_values"]["max_visual_page_score"],
+                "best_page_non_visual_score": record["feature_values"]["max_non_visual_page_score"],
+                "best_page_grounded_non_visual_score": record["feature_values"]["max_grounded_non_visual_page_score"],
+                "best_page_balance_score": record["feature_values"]["max_balance_score"],
+                "stage1_base_doc_rank": record["stage1_base_doc_rank"],
+                "baseline_doc_rank": record["baseline_doc_rank"],
+                "learned_doc_score": float(learned_score),
+                "candidate_page_count": record["candidate_page_count"],
+            }
+        )
+
+    ranked_pages = sorted(
+        page_features,
+        key=lambda item: (
+            -doc_rank_map[item.doc_id],
+            item.base_page_score,
+            item.visual_page_score,
+            item.non_visual_page_score,
+        ),
+        reverse=True,
+    )
+    reranked_pages: list[dict] = []
+    for rank, item in enumerate(ranked_pages, start=1):
+        payload = asdict(item)
+        payload["fused_page_score"] = float(doc_score_map[item.doc_id]) + 1e-6 * float(item.base_page_score)
+        payload["learned_doc_score"] = float(doc_score_map[item.doc_id])
+        payload["doc_rank"] = int(doc_rank_map[item.doc_id])
+        payload["rank"] = rank
+        reranked_pages.append(payload)
+
+    return reranked_docs, reranked_pages, doc_records
 
 
 def build_rankings(
