@@ -81,6 +81,9 @@ class PageFeature:
     page_uid: str
     base_page_score: float
     visual_page_score: float
+    visual_labeled_page_score: float
+    visual_fallback_page_score: float
+    visual_effective_uses_fallback: bool
     non_visual_page_score: float
     visual_avg_score: float
     non_visual_avg_score: float
@@ -115,6 +118,9 @@ def make_base_only_page_feature(
         page_uid=f"{doc_id}_page{page_idx}",
         base_page_score=float(base_page_score),
         visual_page_score=0.0,
+        visual_labeled_page_score=0.0,
+        visual_fallback_page_score=0.0,
+        visual_effective_uses_fallback=False,
         non_visual_page_score=0.0,
         visual_avg_score=0.0,
         non_visual_avg_score=0.0,
@@ -1296,6 +1302,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--visual-fallback-all-token-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional fallback for the visual channel. When > 0, also score visual query tokens "
+            "against all page tokens and use max(visual_labeled_score, weight * visual_all_token_score) "
+            "as the effective visual page score."
+        ),
+    )
+    parser.add_argument(
         "--nonspatial-token-position",
         default="suffix",
         choices=["prefix", "suffix"],
@@ -1745,6 +1761,7 @@ def compute_page_feature(
     page_token_classes: list[str],
     doc_id: str,
     page_idx: int,
+    visual_fallback_all_token_weight: float = 0.0,
     base_score_override: float | None = None,
 ) -> PageFeature:
     import torch
@@ -1781,7 +1798,23 @@ def compute_page_feature(
         masked_scores = score_matrix.index_select(0, page_index_tensor).index_select(1, query_index_tensor)
         return float(masked_scores.max(dim=0).values.sum().item())
 
-    visual_page_score = masked_channel_score(visual_page_indices, visual_query_indices)
+    visual_labeled_page_score = masked_channel_score(visual_page_indices, visual_query_indices)
+    visual_fallback_page_score = 0.0
+    if visual_fallback_all_token_weight > 0.0 and visual_query_indices:
+        visual_fallback_page_score = masked_channel_score(
+            list(range(len(page_token_classes))),
+            visual_query_indices,
+        )
+    weighted_visual_fallback_page_score = (
+        visual_fallback_all_token_weight * visual_fallback_page_score
+    )
+    visual_effective_uses_fallback = (
+        weighted_visual_fallback_page_score > visual_labeled_page_score + 1e-8
+    )
+    visual_page_score = max(
+        visual_labeled_page_score,
+        weighted_visual_fallback_page_score,
+    )
     non_visual_page_score = masked_channel_score(non_visual_page_indices, non_visual_query_indices)
 
     visual_avg_score = (
@@ -1820,6 +1853,9 @@ def compute_page_feature(
         page_uid=f"{doc_id}_page{page_idx}",
         base_page_score=base_page_score,
         visual_page_score=visual_page_score,
+        visual_labeled_page_score=visual_labeled_page_score,
+        visual_fallback_page_score=visual_fallback_page_score,
+        visual_effective_uses_fallback=visual_effective_uses_fallback,
         non_visual_page_score=non_visual_page_score,
         visual_avg_score=visual_avg_score,
         non_visual_avg_score=non_visual_avg_score,
@@ -2160,6 +2196,7 @@ def apply_visual_rerank_to_top_pages(
     require_informative_visual_query: bool = False,
     filter_to_informative_visual_query: bool = False,
     preserve_stage1_base_score: bool = False,
+    visual_fallback_all_token_weight: float = 0.0,
 ) -> list[PageFeature]:
     if top_pages <= 0 or not page_features:
         return page_features
@@ -2210,6 +2247,7 @@ def apply_visual_rerank_to_top_pages(
                 page_token_classes=page_token_classes,
                 doc_id=feature.doc_id,
                 page_idx=feature.page_idx,
+                visual_fallback_all_token_weight=visual_fallback_all_token_weight,
                 base_score_override=feature.base_page_score if preserve_stage1_base_score else None,
             )
         )
@@ -2230,6 +2268,7 @@ def apply_visual_rerank_to_top_docs(
     require_informative_visual_query: bool = False,
     filter_to_informative_visual_query: bool = False,
     preserve_stage1_base_score: bool = False,
+    visual_fallback_all_token_weight: float = 0.0,
 ) -> list[PageFeature]:
     if top_docs <= 0 or not page_features:
         return page_features
@@ -2280,6 +2319,7 @@ def apply_visual_rerank_to_top_docs(
                 page_token_classes=page_token_classes,
                 doc_id=feature.doc_id,
                 page_idx=feature.page_idx,
+                visual_fallback_all_token_weight=visual_fallback_all_token_weight,
                 base_score_override=feature.base_page_score if preserve_stage1_base_score else None,
             )
         )
@@ -2692,6 +2732,8 @@ def main() -> None:
         )
     if args.gated_visual_top_docs < 0:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
+    if args.visual_fallback_all_token_weight < 0.0:
+        raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
 
     import torch
 
@@ -2779,6 +2821,7 @@ def main() -> None:
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+            "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
@@ -2971,6 +3014,7 @@ def main() -> None:
                         page_token_classes=page_token_classes,
                         doc_id=doc_id,
                         page_idx=page_idx,
+                        visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                         base_score_override=(
                             baseline_page_score_map.get(page_uid)
                             if args.base_score_source == "baseline_pred"
@@ -3018,6 +3062,7 @@ def main() -> None:
                 require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                 filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                 preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
+                visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
             )
         else:
             page_features = apply_visual_rerank_to_top_docs(
@@ -3032,6 +3077,7 @@ def main() -> None:
                 require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                 filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                 preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
+                visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
             )
 
     if args.gated_visual_top_docs > 0 and stage1_base_doc_rank_map is None:
@@ -3092,6 +3138,7 @@ def main() -> None:
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+        "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
@@ -3142,6 +3189,7 @@ def main() -> None:
                 "visual_rerank_top_docs": args.visual_rerank_top_docs,
                 "gated_visual_top_docs": args.gated_visual_top_docs,
                 "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+                "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
                 "patch_label_path": args.splice_patch_labels_jsonl,
@@ -3168,6 +3216,7 @@ def main() -> None:
     print(f"two_stage_exact_top_pages: {args.two_stage_exact_top_pages}")
     print(f"gated_visual_top_docs: {args.gated_visual_top_docs}")
     print(f"scale_auxiliary_by_base_score: {args.scale_auxiliary_by_base_score}")
+    print(f"visual_fallback_all_token_weight: {args.visual_fallback_all_token_weight}")
     print(f"ignore_pad_scores_in_final_ranking: {args.ignore_pad_scores_in_final_ranking}")
     print(f"candidate_doc_count: {len(candidate_doc_ids)}")
     print(f"candidate_page_count: {len(page_features)}")

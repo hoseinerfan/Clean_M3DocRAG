@@ -261,6 +261,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--visual-fallback-all-token-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional fallback for the visual channel. When > 0, also score visual query tokens "
+            "against all page tokens and use max(visual_labeled_score, weight * visual_all_token_score) "
+            "as the effective visual page score."
+        ),
+    )
+    parser.add_argument(
         "--ignore-pad-scores-in-final-ranking",
         action="store_true",
     )
@@ -556,6 +566,8 @@ def main() -> None:
         )
     if args.gated_visual_top_docs < 0:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
+    if args.visual_fallback_all_token_weight < 0.0:
+        raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
 
     fixed_weights = WeightConfig(
         base=args.weight_base,
@@ -789,6 +801,7 @@ def main() -> None:
                                 page_token_classes=page_token_classes,
                                 doc_id=doc_id,
                                 page_idx=page_idx,
+                                visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                                 base_score_override=(
                                     baseline_page_score_map.get(page_uid)
                                     if args.base_score_source == "baseline_pred"
@@ -830,6 +843,7 @@ def main() -> None:
                         require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                         filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                         preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
+                        visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                     )
                 else:
                     page_features = apply_visual_rerank_to_top_docs(
@@ -844,6 +858,7 @@ def main() -> None:
                         require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
                         filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
                         preserve_stage1_base_score=args.visual_rerank_preserve_stage1_base_score,
+                        visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                     )
             if args.gated_visual_top_docs > 0 and stage1_base_doc_rank_map is None:
                 stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
@@ -920,6 +935,7 @@ def main() -> None:
             "visual_rerank_top_docs": args.visual_rerank_top_docs,
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+            "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
             "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
             "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
             "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
@@ -982,6 +998,7 @@ def main() -> None:
         "visual_rerank_top_docs": args.visual_rerank_top_docs,
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+        "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
