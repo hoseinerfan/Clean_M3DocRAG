@@ -303,6 +303,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--vlm-rerank-pages-per-doc",
+        type=int,
+        default=1,
+        help=(
+            "How many top stage-1 pages to evaluate per shortlisted doc during VLM late reranking. "
+            "The best VLM-scored page becomes the doc's evidence page."
+        ),
+    )
+    parser.add_argument(
         "--vlm-model-name-or-path",
         default="Qwen2-VL-7B-Instruct",
         help="Local path or model name for the VLM late reranker.",
@@ -630,6 +639,7 @@ def build_vlm_late_reranked_results(
     query_text: str,
     top_docs: int,
     bonus: float,
+    pages_per_doc: int,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     stage1_ranked_docs, _stage1_ranked_pages = build_rankings(
         page_features=page_features,
@@ -638,6 +648,9 @@ def build_vlm_late_reranked_results(
     )
     stage1_doc_rank_map = {item["doc_id"]: item["rank"] for item in stage1_ranked_docs}
     stage1_doc_payload = {item["doc_id"]: item for item in stage1_ranked_docs}
+    stage1_pages_by_doc: dict[str, list] = {}
+    for feature in sorted(page_features, key=lambda item: item.base_page_score, reverse=True):
+        stage1_pages_by_doc.setdefault(feature.doc_id, []).append(feature)
 
     selected_doc_ids = [item["doc_id"] for item in stage1_ranked_docs[:top_docs]]
     selected_doc_id_set = set(selected_doc_ids)
@@ -647,28 +660,49 @@ def build_vlm_late_reranked_results(
 
     for doc_id in selected_doc_ids:
         stage1_item = stage1_doc_payload[doc_id]
-        page_idx = int(stage1_item["best_page_idx"])
         if doc_id not in page_image_cache:
             page_image_cache[doc_id] = dataset.get_images_from_doc_id(doc_id)
         page_images = page_image_cache[doc_id]
-        if page_idx < 0 or page_idx >= len(page_images):
-            raise IndexError(
-                f"Page index out of range for VLM rerank: {doc_id}:{page_idx} not in [0, {len(page_images) - 1}]"
+        candidate_page_features = stage1_pages_by_doc.get(doc_id, [])[:pages_per_doc]
+        if not candidate_page_features:
+            continue
+        page_candidates: list[dict] = []
+        for feature in candidate_page_features:
+            page_idx = int(feature.page_idx)
+            if page_idx < 0 or page_idx >= len(page_images):
+                raise IndexError(
+                    f"Page index out of range for VLM rerank: {doc_id}:{page_idx} not in [0, {len(page_images) - 1}]"
+                )
+            response_text = vqa_model.generate(images=[page_images[page_idx]], question=prompt)
+            evidence_score, normalized_response = parse_vlm_evidence_score(response_text)
+            page_candidates.append(
+                {
+                    "page_uid": feature.page_uid,
+                    "page_idx": page_idx,
+                    "base_page_score": float(feature.base_page_score),
+                    "vlm_response": str(response_text).strip(),
+                    "vlm_response_normalized": normalized_response,
+                    "vlm_evidence_score": float(evidence_score),
+                }
             )
-        response_text = vqa_model.generate(images=[page_images[page_idx]], question=prompt)
-        evidence_score, normalized_response = parse_vlm_evidence_score(response_text)
-        final_score = float(stage1_item["fused_doc_score"]) + float(bonus) * evidence_score
+        best_page = max(
+            page_candidates,
+            key=lambda item: (item["vlm_evidence_score"], item["base_page_score"]),
+        )
+        final_score = float(stage1_item["fused_doc_score"]) + float(bonus) * float(best_page["vlm_evidence_score"])
         vlm_records.append(
             {
                 "doc_id": doc_id,
                 "stage1_base_doc_rank": int(stage1_item["rank"]),
-                "best_page_uid": stage1_item["best_page_uid"],
-                "best_page_idx": page_idx,
+                "best_page_uid": best_page["page_uid"],
+                "best_page_idx": best_page["page_idx"],
                 "stage1_base_doc_score": float(stage1_item["fused_doc_score"]),
-                "vlm_response": str(response_text).strip(),
-                "vlm_response_normalized": normalized_response,
-                "vlm_evidence_score": float(evidence_score),
+                "vlm_response": best_page["vlm_response"],
+                "vlm_response_normalized": best_page["vlm_response_normalized"],
+                "vlm_evidence_score": float(best_page["vlm_evidence_score"]),
                 "vlm_final_doc_score": float(final_score),
+                "vlm_pages_per_doc": int(pages_per_doc),
+                "vlm_page_candidates": page_candidates,
             }
         )
 
@@ -728,8 +762,14 @@ def build_vlm_late_reranked_results(
                     if feature.doc_id in vlm_record_map
                     else None
                 ),
+                "vlm_selected_page": (
+                    feature.doc_id in vlm_record_map
+                    and feature.page_uid == vlm_record_map[feature.doc_id]["best_page_uid"]
+                ),
                 "fused_page_score": (
-                    float(vlm_record_map[feature.doc_id]["vlm_final_doc_score"]) + 1e-6 * float(feature.base_page_score)
+                    float(vlm_record_map[feature.doc_id]["vlm_final_doc_score"])
+                    + (1e-3 if feature.doc_id in vlm_record_map and feature.page_uid == vlm_record_map[feature.doc_id]["best_page_uid"] else 0.0)
+                    + 1e-6 * float(feature.base_page_score)
                     if feature.doc_id in vlm_record_map
                     else -float(doc_rank_map[feature.doc_id]) + 1e-6 * float(feature.base_page_score)
                 ),
@@ -738,6 +778,7 @@ def build_vlm_late_reranked_results(
         ],
         key=lambda item: (
             -item["doc_rank"],
+            item["vlm_selected_page"],
             item["base_page_score"],
             item["visual_page_score"],
             item["non_visual_page_score"],
@@ -894,6 +935,8 @@ def main() -> None:
         raise ValueError("--learned-doc-reranker-top-docs must be >= 0.")
     if args.vlm_rerank_top_docs < 0:
         raise ValueError("--vlm-rerank-top-docs must be >= 0.")
+    if args.vlm_rerank_pages_per_doc <= 0:
+        raise ValueError("--vlm-rerank-pages-per-doc must be > 0.")
 
     fixed_weights = WeightConfig(
         base=args.weight_base,
@@ -1374,6 +1417,7 @@ def main() -> None:
                 query_text=query_text,
                 top_docs=args.vlm_rerank_top_docs,
                 bonus=args.vlm_rerank_bonus,
+                pages_per_doc=args.vlm_rerank_pages_per_doc,
             )
         elif learned_doc_reranker_active:
             reranked_docs, reranked_pages, _doc_records = build_learned_doc_rankings(
@@ -1442,6 +1486,7 @@ def main() -> None:
             "learned_doc_reranker_top_docs": args.learned_doc_reranker_top_docs,
             "vlm_rerank_top_docs": args.vlm_rerank_top_docs,
             "vlm_rerank_bonus": args.vlm_rerank_bonus,
+            "vlm_rerank_pages_per_doc": args.vlm_rerank_pages_per_doc,
             "vlm_model_name_or_path": args.vlm_model_name_or_path,
             "vlm_model_type": args.vlm_model_type or None,
             "vlm_bits": args.vlm_bits,
@@ -1534,6 +1579,7 @@ def main() -> None:
         "output_doc_feature_jsonl": args.output_doc_feature_jsonl,
         "vlm_rerank_top_docs": args.vlm_rerank_top_docs,
         "vlm_rerank_bonus": args.vlm_rerank_bonus,
+        "vlm_rerank_pages_per_doc": args.vlm_rerank_pages_per_doc,
         "vlm_model_name_or_path": args.vlm_model_name_or_path,
         "vlm_model_type": args.vlm_model_type or None,
         "vlm_bits": args.vlm_bits,
