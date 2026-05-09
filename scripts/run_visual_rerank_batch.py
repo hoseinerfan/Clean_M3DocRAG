@@ -37,9 +37,12 @@ from scripts.rerank_target_docs_visual_aware import (
     compute_base_only_page_features,
     compute_base_only_page_feature,
     compute_page_feature,
+    decide_query_route,
+    extract_query_route_features,
     grid_search_weights,
     is_base_only_weights,
     load_patch_axis_classes_for_pages,
+    load_query_route_config,
     load_splice_query_axis_classes,
     make_base_only_page_feature,
     make_query_score_mask,
@@ -241,6 +244,13 @@ def parse_args() -> argparse.Namespace:
             "When staged visual reranking is active, keep the stage-1 base score for shortlisted "
             "pages and recompute only the visual/non-visual/balance channels. This makes the "
             "second stage a late tie-breaker instead of a partial exact-base replacement."
+        ),
+    )
+    parser.add_argument(
+        "--query-route-config-json",
+        help=(
+            "Optional JSON config for binary query routing. When provided, each qid chooses "
+            "between plain stage-1 base-only output and the staged visual rerank arm."
         ),
     )
     parser.add_argument(
@@ -611,6 +621,11 @@ def main() -> None:
         (not args.grid_search)
         and (args.visual_rerank_top_pages > 0 or args.visual_rerank_top_docs > 0)
     )
+    if args.query_route_config_json and not staged_visual_rerank:
+        raise ValueError(
+            "--query-route-config-json requires --visual-rerank-top-pages > 0 "
+            "or --visual-rerank-top-docs > 0."
+        )
     if (
         args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
         and not (fixed_base_only or staged_visual_rerank)
@@ -633,6 +648,8 @@ def main() -> None:
     qids = load_qids(Path(args.qid_jsonl), args.qid_field, args.max_qids)
     gold_rows = load_gold_rows(Path(args.gold), set(qids))
     baseline_payload = load_baseline_payload(Path(args.baseline_pred), set(qids))
+    route_config = load_query_route_config(args.query_route_config_json)
+    default_route_decision = "visual" if staged_visual_rerank else "base"
 
     torch = None
     retrieval_model = None
@@ -662,11 +679,14 @@ def main() -> None:
     unchanged_doc = 0
     reranked_top4_doc = 0
     baseline_top4_doc = 0
+    routed_to_visual_qids = 0
+    routed_to_base_qids = 0
 
     for idx, qid in enumerate(qids, start=1):
         gold_row = gold_rows[qid]
         gold_doc_ids = sorted({str(item["doc_id"]).strip() for item in gold_row.get("supporting_context", [])})
         gold_doc_id_set = set(gold_doc_ids)
+        question_type = str(gold_row.get("metadata", {}).get("type", "UNKNOWN")).strip() or "UNKNOWN"
 
         baseline_rows = baseline_payload[qid].get("page_retrieval_results", [])
         candidate_doc_ids, baseline_page_uids, baseline_doc_rank_map, _, baseline_page_score_map = build_baseline_pool(
@@ -677,6 +697,18 @@ def main() -> None:
 
         query_text = gold_row["question"]
         stage1_base_doc_rank_map: dict[str, int] | None = None
+        route_features: dict = {
+            "question_type": question_type,
+            "visual_query_token_count": 0,
+            "non_visual_query_token_count": 0,
+            "informative_visual_query_count": 0,
+            "informative_visual_query_tokens": [],
+        }
+        route_info = (
+            decide_query_route(route_config=route_config, route_features=route_features)
+            if route_config is not None
+            else {"route_decision": default_route_decision, "matched_rule_index": None, "matched_rule": None}
+        )
         if fixed_base_only and args.base_score_source == "baseline_pred":
             query_axis_classes = []
             page_features = []
@@ -690,6 +722,16 @@ def main() -> None:
                         base_page_score=baseline_page_score_map[page_uid],
                     )
                 )
+            route_features = extract_query_route_features(
+                question_type=question_type,
+                query_axis_classes=query_axis_classes,
+                query_token_labels=[],
+            )
+            route_info = (
+                decide_query_route(route_config=route_config, route_features=route_features)
+                if route_config is not None
+                else {"route_decision": default_route_decision, "matched_rule_index": None, "matched_rule": None}
+            )
         else:
             docid2embs = load_doc_embeddings_for_doc_ids(candidate_doc_ids, args.embedding_name)
             page_specs, page_meta = build_page_id_metadata(
@@ -739,6 +781,16 @@ def main() -> None:
                     )
                 else:
                     query_axis_classes = []
+                route_features = extract_query_route_features(
+                    question_type=question_type,
+                    query_axis_classes=query_axis_classes,
+                    query_token_labels=query_token_labels,
+                )
+                route_info = (
+                    decide_query_route(route_config=route_config, route_features=route_features)
+                    if route_config is not None
+                    else {"route_decision": default_route_decision, "matched_rule_index": None, "matched_rule": None}
+                )
             else:
                 query_axis_classes = load_splice_query_axis_classes(
                     query_labels_path=args.splice_query_token_labels,
@@ -749,6 +801,16 @@ def main() -> None:
                 patch_axis_classes_by_uid = load_patch_axis_classes_for_pages(
                     labels_jsonl=args.splice_patch_labels_jsonl,
                     page_meta=page_meta,
+                )
+                route_features = extract_query_route_features(
+                    question_type=question_type,
+                    query_axis_classes=query_axis_classes,
+                    query_token_labels=query_token_labels,
+                )
+                route_info = (
+                    decide_query_route(route_config=route_config, route_features=route_features)
+                    if route_config is not None
+                    else {"route_decision": default_route_decision, "matched_rule_index": None, "matched_rule": None}
                 )
 
             page_features = []
@@ -860,9 +922,16 @@ def main() -> None:
                     query_score_mask=query_score_mask,
                     top_docs=args.two_stage_exact_top_docs,
                 )
-            if args.gated_visual_top_docs > 0 and staged_visual_rerank:
+            apply_staged_visual_rerank = staged_visual_rerank and route_info["route_decision"] == "visual"
+            if route_config is not None:
+                if route_info["route_decision"] == "visual":
+                    routed_to_visual_qids += 1
+                elif route_info["route_decision"] == "base":
+                    routed_to_base_qids += 1
+
+            if args.gated_visual_top_docs > 0 and apply_staged_visual_rerank:
                 stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
-            if staged_visual_rerank:
+            if apply_staged_visual_rerank:
                 assert page_token_classes_by_uid is not None
                 if args.visual_rerank_top_pages > 0:
                     page_features = apply_visual_rerank_to_top_pages(
@@ -896,7 +965,7 @@ def main() -> None:
                         balance_score_mode=args.balance_score_mode,
                         visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                     )
-            if args.gated_visual_top_docs > 0 and stage1_base_doc_rank_map is None:
+            if args.gated_visual_top_docs > 0 and apply_staged_visual_rerank and stage1_base_doc_rank_map is None:
                 stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
         if args.grid_search:
             weights, best_grid_record, _grid_leaderboard = grid_search_weights(
@@ -950,6 +1019,7 @@ def main() -> None:
         row = {
             "qid": qid,
             "question": query_text,
+            "question_type": question_type,
             "answers": [str(item["answer"]) for item in gold_row.get("answers", [])],
             "gold_doc_ids": gold_doc_ids,
             "candidate_doc_count": len(candidate_doc_ids),
@@ -969,6 +1039,7 @@ def main() -> None:
             "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
             "visual_rerank_top_pages": args.visual_rerank_top_pages,
             "visual_rerank_top_docs": args.visual_rerank_top_docs,
+            "query_route_config_json": args.query_route_config_json,
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "balance_score_mode": args.balance_score_mode,
@@ -978,6 +1049,11 @@ def main() -> None:
             "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
             "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
             "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
+            "route_features": route_features,
+            "route_decision": route_info["route_decision"],
+            "route_matched_rule_index": route_info["matched_rule_index"],
+            "route_matched_rule": route_info["matched_rule"],
+            "staged_visual_rerank_applied": apply_staged_visual_rerank if not (fixed_base_only and args.base_score_source == "baseline_pred") else False,
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
@@ -1035,6 +1111,7 @@ def main() -> None:
         "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
         "visual_rerank_top_pages": args.visual_rerank_top_pages,
         "visual_rerank_top_docs": args.visual_rerank_top_docs,
+        "query_route_config_json": args.query_route_config_json,
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
         "balance_score_mode": args.balance_score_mode,
@@ -1048,6 +1125,8 @@ def main() -> None:
         "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
         "grid_search_enabled": args.grid_search,
         "fixed_weights": asdict(fixed_weights),
+        "routed_to_visual_qid_count": routed_to_visual_qids,
+        "routed_to_base_qid_count": routed_to_base_qids,
         "grid_base_values": grid_base_values,
         "grid_visual_values": grid_visual_values,
         "grid_non_visual_values": grid_non_visual_values,

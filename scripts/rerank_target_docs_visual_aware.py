@@ -302,6 +302,115 @@ def filter_query_axis_classes_to_informative_visual(
     return filtered
 
 
+def extract_query_route_features(
+    *,
+    question_type: str | None,
+    query_axis_classes: list[str] | None,
+    query_token_labels: list[str] | None,
+) -> dict:
+    informative_visual_query_indices = _select_informative_visual_query_indices(
+        query_axis_classes=query_axis_classes,
+        query_token_labels=query_token_labels,
+    )
+    informative_visual_query_tokens: list[str] = []
+    seen_tokens: set[str] = set()
+    if query_token_labels is not None:
+        for idx in informative_visual_query_indices:
+            if not (0 <= idx < len(query_token_labels)):
+                continue
+            token = _normalize_query_axis_text(query_token_labels[idx])
+            if not token or token in seen_tokens:
+                continue
+            seen_tokens.add(token)
+            informative_visual_query_tokens.append(token)
+
+    counts = axis_class_counts(query_axis_classes or [])
+    normalized_question_type = str(question_type or "UNKNOWN").strip() or "UNKNOWN"
+    return {
+        "question_type": normalized_question_type,
+        "visual_query_token_count": int(counts["visual"]),
+        "non_visual_query_token_count": int(counts["non_visual"]),
+        "informative_visual_query_count": int(len(informative_visual_query_indices)),
+        "informative_visual_query_tokens": informative_visual_query_tokens,
+    }
+
+
+def load_query_route_config(path: str | None) -> dict | None:
+    if not path:
+        return None
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Route config must be a JSON object: {path}")
+    visual_rules = payload.get("visual_rules", [])
+    if visual_rules is None:
+        visual_rules = []
+    if not isinstance(visual_rules, list):
+        raise ValueError(f"'visual_rules' must be a list in route config: {path}")
+    payload["visual_rules"] = visual_rules
+    payload["default_route"] = str(payload.get("default_route", "base")).strip().lower() or "base"
+    return payload
+
+
+def route_rule_matches(
+    *,
+    route_features: dict,
+    rule: dict,
+) -> bool:
+    question_types = [str(value).strip() for value in rule.get("question_types", []) if str(value).strip()]
+    if question_types and route_features.get("question_type") not in question_types:
+        return False
+
+    min_informative_visual_count = rule.get("min_informative_visual_count")
+    if min_informative_visual_count is not None:
+        if int(route_features.get("informative_visual_query_count", 0)) < int(min_informative_visual_count):
+            return False
+
+    min_visual_query_token_count = rule.get("min_visual_query_token_count")
+    if min_visual_query_token_count is not None:
+        if int(route_features.get("visual_query_token_count", 0)) < int(min_visual_query_token_count):
+            return False
+
+    any_informative_visual_tokens = {
+        _normalize_query_axis_text(str(value))
+        for value in rule.get("any_informative_visual_tokens", [])
+        if _normalize_query_axis_text(str(value))
+    }
+    if any_informative_visual_tokens:
+        query_tokens = set(route_features.get("informative_visual_query_tokens", []) or [])
+        if not (query_tokens & any_informative_visual_tokens):
+            return False
+
+    return True
+
+
+def decide_query_route(
+    *,
+    route_config: dict | None,
+    route_features: dict,
+) -> dict:
+    if route_config is None:
+        return {
+            "route_decision": "visual",
+            "matched_rule_index": None,
+            "matched_rule": None,
+        }
+
+    visual_rules = route_config.get("visual_rules", [])
+    for idx, rule in enumerate(visual_rules):
+        if isinstance(rule, dict) and route_rule_matches(route_features=route_features, rule=rule):
+            return {
+                "route_decision": "visual",
+                "matched_rule_index": idx,
+                "matched_rule": rule,
+            }
+
+    return {
+        "route_decision": str(route_config.get("default_route", "base")).strip().lower() or "base",
+        "matched_rule_index": None,
+        "matched_rule": None,
+    }
+
+
 def select_page_token_indices_for_base_only(
     *,
     page_emb: torch.Tensor,
@@ -1282,6 +1391,22 @@ def parse_args() -> argparse.Namespace:
             "When staged visual reranking is active, keep the stage-1 base score for shortlisted "
             "pages and recompute only the visual/non-visual/balance channels. This makes the "
             "second stage a late tie-breaker instead of a partial exact-base replacement."
+        ),
+    )
+    parser.add_argument(
+        "--query-route-config-json",
+        help=(
+            "Optional JSON config for binary query routing. When provided, the run chooses "
+            "between plain stage-1 base-only output and the staged visual rerank arm on a "
+            "per-query basis."
+        ),
+    )
+    parser.add_argument(
+        "--question-type",
+        default="",
+        help=(
+            "Optional explicit question type for free-form --query mode when using "
+            "--query-route-config-json."
         ),
     )
     parser.add_argument(
@@ -2805,6 +2930,17 @@ def main() -> None:
 
     from m3docrag.retrieval import ColPaliRetrievalModel
 
+    question_type = str(args.question_type or "UNKNOWN").strip() or "UNKNOWN"
+    if args.qid:
+        route_gold_row = load_gold_row_from_qid(
+            SimpleNamespace(
+                qid=args.qid,
+                gold=args.gold,
+                data_name=args.data_name,
+                split=args.split,
+            )
+        )
+        question_type = str(route_gold_row.get("metadata", {}).get("type", question_type)).strip() or question_type
     query_text, gold_doc_ids = load_query_text_and_gold_doc_ids(args)
     gold_page_uids = [str(value).strip() for value in args.gold_page_uid if str(value).strip()]
     candidate_doc_ids, explicit_page_uids, baseline_doc_rank_map, baseline_page_score_map = collect_candidate_sources(args)
@@ -2819,6 +2955,11 @@ def main() -> None:
         (not args.grid_search)
         and (args.visual_rerank_top_pages > 0 or args.visual_rerank_top_docs > 0)
     )
+    if args.query_route_config_json and not staged_visual_rerank:
+        raise ValueError(
+            "--query-route-config-json requires --visual-rerank-top-pages > 0 "
+            "or --visual-rerank-top-docs > 0."
+        )
     if (
         args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
         and not (fixed_base_only or staged_visual_rerank)
@@ -2837,6 +2978,8 @@ def main() -> None:
             "--visual-rerank-top-pages / --visual-rerank-top-docs are currently only supported "
             "with fixed weights."
         )
+    route_config = load_query_route_config(args.query_route_config_json)
+    default_route_decision = "visual" if staged_visual_rerank else "base"
 
     if fixed_base_only and args.base_score_source == "baseline_pred":
         page_features = []
@@ -2858,6 +3001,16 @@ def main() -> None:
         query_axis_classes = []
         query_token_labels = []
         query_raw_tokens = []
+        route_features = extract_query_route_features(
+            question_type=question_type,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+        )
+        route_info = (
+            decide_query_route(route_config=route_config, route_features=route_features)
+            if route_config is not None
+            else {"route_decision": default_route_decision, "matched_rule_index": None, "matched_rule": None}
+        )
         best_grid_record = None
         grid_leaderboard = []
         weights = fixed_weights
@@ -2874,6 +3027,7 @@ def main() -> None:
         summary = {
             "qid": args.qid,
             "query": query_text,
+            "question_type": question_type,
             "query_token_filter": args.query_token_filter,
             "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
             "base_score_source": args.base_score_source,
@@ -2885,6 +3039,7 @@ def main() -> None:
             "base_only_page_batch_size": args.base_only_page_batch_size,
             "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
+            "query_route_config_json": args.query_route_config_json,
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
             "balance_score_mode": args.balance_score_mode,
@@ -2899,6 +3054,11 @@ def main() -> None:
             "gold_page_uids": gold_page_uids,
             **gold_page_summary,
             "weights": asdict(weights),
+            "route_features": route_features,
+            "route_decision": route_info["route_decision"],
+            "route_matched_rule_index": route_info["matched_rule_index"],
+            "route_matched_rule": route_info["matched_rule"],
+            "staged_visual_rerank_applied": False,
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,
             "grid_search_leaderboard": grid_leaderboard,
@@ -3007,6 +3167,16 @@ def main() -> None:
             query_token_labels=query_token_labels,
             query_raw_tokens=query_raw_tokens,
         )
+    route_features = extract_query_route_features(
+        question_type=question_type,
+        query_axis_classes=query_axis_classes,
+        query_token_labels=query_token_labels,
+    )
+    route_info = (
+        decide_query_route(route_config=route_config, route_features=route_features)
+        if route_config is not None
+        else {"route_decision": default_route_decision, "matched_rule_index": None, "matched_rule": None}
+    )
     query_score_mask = make_query_score_mask(
         query_raw_tokens=query_raw_tokens,
         ignore_pad_scores_in_final_ranking=args.ignore_pad_scores_in_final_ranking,
@@ -3116,10 +3286,11 @@ def main() -> None:
         )
 
     stage1_base_doc_rank_map: dict[str, int] | None = None
-    if args.gated_visual_top_docs > 0 and staged_visual_rerank:
+    apply_staged_visual_rerank = staged_visual_rerank and route_info["route_decision"] == "visual"
+    if args.gated_visual_top_docs > 0 and apply_staged_visual_rerank:
         stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
 
-    if staged_visual_rerank:
+    if apply_staged_visual_rerank:
         assert page_token_classes_by_uid is not None
         if args.visual_rerank_top_pages > 0:
             page_features = apply_visual_rerank_to_top_pages(
@@ -3154,7 +3325,7 @@ def main() -> None:
                 visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
             )
 
-    if args.gated_visual_top_docs > 0 and stage1_base_doc_rank_map is None:
+    if args.gated_visual_top_docs > 0 and apply_staged_visual_rerank and stage1_base_doc_rank_map is None:
         stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
 
     if args.grid_search:
@@ -3191,6 +3362,7 @@ def main() -> None:
     summary = {
         "qid": args.qid,
         "query": query_text,
+        "question_type": question_type,
         "embedding_name": args.embedding_name,
         "query_token_filter": args.query_token_filter,
         "base_score_source": args.base_score_source,
@@ -3207,6 +3379,7 @@ def main() -> None:
         "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
         "visual_rerank_top_pages": args.visual_rerank_top_pages,
         "visual_rerank_top_docs": args.visual_rerank_top_docs,
+        "query_route_config_json": args.query_route_config_json,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
@@ -3228,6 +3401,11 @@ def main() -> None:
         "query_axis_class_counts": axis_class_counts(query_axis_classes),
         "query_score_active_token_count": int(query_score_mask.sum().item()),
         "weights": asdict(weights),
+        "route_features": route_features,
+        "route_decision": route_info["route_decision"],
+        "route_matched_rule_index": route_info["matched_rule_index"],
+        "route_matched_rule": route_info["matched_rule"],
+        "staged_visual_rerank_applied": apply_staged_visual_rerank,
         "grid_search": {
             "enabled": args.grid_search,
             "best": best_grid_record,
@@ -3264,6 +3442,7 @@ def main() -> None:
                 "two_stage_exact_top_docs": args.two_stage_exact_top_docs,
                 "visual_rerank_top_pages": args.visual_rerank_top_pages,
                 "visual_rerank_top_docs": args.visual_rerank_top_docs,
+                "query_route_config_json": args.query_route_config_json,
                 "gated_visual_top_docs": args.gated_visual_top_docs,
                 "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
                 "balance_score_mode": args.balance_score_mode,
@@ -3294,6 +3473,7 @@ def main() -> None:
     print(f"base_only_page_batch_size: {args.base_only_page_batch_size}")
     print(f"approx_base_page_token_coarse_dtype: {args.approx_base_page_token_coarse_dtype}")
     print(f"two_stage_exact_top_pages: {args.two_stage_exact_top_pages}")
+    print(f"query_route_config_json: {args.query_route_config_json}")
     print(f"gated_visual_top_docs: {args.gated_visual_top_docs}")
     print(f"scale_auxiliary_by_base_score: {args.scale_auxiliary_by_base_score}")
     print(f"balance_score_mode: {args.balance_score_mode}")
@@ -3313,6 +3493,7 @@ def main() -> None:
         print(f"first_gold_page_rank: {gold_page_summary['first_gold_page_rank']}")
         print(f"gold_page_hits_at_4: {gold_page_summary['gold_page_hits_at_4']}")
     print(f"weights: {asdict(weights)}")
+    print(f"route_decision: {route_info['route_decision']}")
     print("top_reranked_docs:")
     for item in reranked_docs[: min(args.report_topn, 10)]:
         print(
