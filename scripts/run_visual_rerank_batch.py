@@ -140,6 +140,8 @@ def parse_args() -> argparse.Namespace:
             "Token-selection strategy used before top-K approximate MaxSim pruning. "
             "'global_topk' is the current global-only selection. "
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
+            "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
+            "distinct informative query tokens before filling the rest globally. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
             "informative visual query tokens and visual-labeled page patches. "
             "'visual_patch_query_prior' only boosts visual-labeled page patches using "
@@ -162,6 +164,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "When --approx-base-page-token-selector=query_label_mix, reserve this many "
             "token slots for pruning against the query's visual-token subset."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-coverage-reserve",
+        type=int,
+        default=64,
+        help=(
+            "When --approx-base-page-token-selector=query_coverage_mix, reserve this many "
+            "token slots for per-query-token coverage before filling the rest globally."
         ),
     )
     parser.add_argument(
@@ -859,6 +870,14 @@ def main() -> None:
             "--approx-base-page-token-selector=query_label_mix."
         )
     if (
+        args.approx_base_page_token_selector != "query_coverage_mix"
+        and args.approx_base_page_token_coverage_reserve != 64
+    ):
+        raise ValueError(
+            "--approx-base-page-token-coverage-reserve is only valid with "
+            "--approx-base-page-token-selector=query_coverage_mix."
+        )
+    if (
         args.approx_base_page_token_selector not in {"soft_label_prior", "visual_patch_query_prior"}
         and args.approx_base_page_token_soft_visual_query_weight != 0.5
     ):
@@ -1246,6 +1265,7 @@ def main() -> None:
                         query_axis_classes=query_axis_classes,
                         query_token_labels=query_token_labels,
                         page_token_classes_by_uid=page_token_classes_by_uid,
+                        approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                         approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
@@ -1272,6 +1292,7 @@ def main() -> None:
                         query_axis_classes=query_axis_classes,
                         query_token_labels=query_token_labels,
                         page_token_classes_by_uid=page_token_classes_by_uid,
+                        approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                         approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
@@ -1487,6 +1508,7 @@ def main() -> None:
             "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
             "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+            "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
             "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
             "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
             "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
@@ -1580,6 +1602,7 @@ def main() -> None:
         "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
         "approx_base_page_token_selector": args.approx_base_page_token_selector,
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+        "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,

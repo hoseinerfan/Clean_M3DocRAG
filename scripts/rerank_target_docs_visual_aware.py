@@ -33,6 +33,7 @@ APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = (
 APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = (
     "global_topk",
     "spatial_quadrant_mix",
+    "query_coverage_mix",
     "query_label_mix",
     "soft_label_prior",
     "visual_patch_query_prior",
@@ -370,6 +371,19 @@ def _is_informative_visual_query_token(token_label: str) -> bool:
     return True
 
 
+def _is_informative_query_token(token_label: str) -> bool:
+    normalized = _normalize_query_axis_text(token_label)
+    if not normalized:
+        return False
+    if normalized in {"[bos]", "[eos]", "[pad]", "[ws]"}:
+        return False
+    if normalized in SOFT_VISUAL_QUERY_STOPWORDS:
+        return False
+    if not any(ch.isalnum() for ch in normalized):
+        return False
+    return True
+
+
 def _select_informative_visual_query_indices(
     *,
     query_axis_classes: list[str] | None,
@@ -386,6 +400,32 @@ def _select_informative_visual_query_indices(
         for idx, axis_class in enumerate(query_axis_classes)
         if axis_class == "visual" and _is_informative_visual_query_token(query_token_labels[idx])
     ]
+
+
+def _select_informative_coverage_query_indices(
+    *,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor | None,
+    query_token_labels: list[str] | None,
+) -> list[int]:
+    active_indices: list[int] = []
+    if query_score_mask is not None and int(query_score_mask.numel()) == int(query_emb.shape[0]):
+        active_indices = [idx for idx, keep in enumerate(query_score_mask.tolist()) if bool(keep)]
+    else:
+        active_indices = list(range(int(query_emb.shape[0])))
+
+    if (
+        query_token_labels is None
+        or len(query_token_labels) != int(query_emb.shape[0])
+    ):
+        return active_indices
+
+    informative_indices = [
+        idx
+        for idx in active_indices
+        if _is_informative_query_token(query_token_labels[idx])
+    ]
+    return informative_indices or active_indices
 
 
 def filter_query_axis_classes_to_informative_visual(
@@ -531,6 +571,7 @@ def select_page_token_indices_for_base_only(
     query_axis_classes: list[str] | None,
     query_token_labels: list[str] | None,
     page_token_classes: list[str] | None,
+    approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
@@ -552,6 +593,76 @@ def select_page_token_indices_for_base_only(
 
     if approx_page_token_selector == "global_topk":
         return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+
+    if approx_page_token_selector == "query_coverage_mix":
+        coverage_reserve = min(max(int(approx_page_token_coverage_reserve), 0), topk)
+        coverage_query_indices = _select_informative_coverage_query_indices(
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+            query_token_labels=query_token_labels,
+        )
+        if coverage_reserve <= 0 or not coverage_query_indices:
+            return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+
+        if coarse_score_dtype == "fp32" or page_emb.device.type != "cuda":
+            page_emb_coarse = page_emb
+            query_emb_coarse = query_emb
+        else:
+            dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
+            page_emb_coarse = page_emb.to(dtype=dtype)
+            query_emb_coarse = query_emb.to(dtype=dtype)
+
+        coverage_query_index_tensor = torch.tensor(
+            coverage_query_indices,
+            device=query_emb_coarse.device,
+            dtype=torch.long,
+        )
+        coverage_query_emb = query_emb_coarse.index_select(0, coverage_query_index_tensor)
+        coverage_score_matrix = page_emb_coarse @ coverage_query_emb.T
+        per_query_ranked = torch.topk(
+            coverage_score_matrix,
+            k=min(topk, int(page_emb.shape[0])),
+            dim=0,
+            largest=True,
+            sorted=True,
+        ).indices
+
+        query_priority = coverage_score_matrix.max(dim=0).values.argsort(descending=True).tolist()
+        global_budget = topk - coverage_reserve
+        selected: set[int] = set()
+        if global_budget > 0:
+            selected.update(_topk_indices_from_scores(scores=coarse_scores, k=global_budget))
+
+        query_offsets = [0 for _ in range(len(coverage_query_indices))]
+        added_coverage = 0
+        while len(selected) < topk and added_coverage < coverage_reserve:
+            progressed = False
+            for q_local_idx in query_priority:
+                cursor = query_offsets[q_local_idx]
+                while cursor < int(per_query_ranked.shape[0]):
+                    candidate_idx = int(per_query_ranked[cursor, q_local_idx].item())
+                    cursor += 1
+                    if candidate_idx in selected:
+                        continue
+                    selected.add(candidate_idx)
+                    added_coverage += 1
+                    progressed = True
+                    break
+                query_offsets[q_local_idx] = cursor
+                if len(selected) >= topk or added_coverage >= coverage_reserve:
+                    break
+            if not progressed:
+                break
+
+        if len(selected) < topk:
+            ranked_all = _topk_indices_from_scores(scores=coarse_scores, k=int(coarse_scores.shape[0]))
+            for idx in ranked_all:
+                selected.add(idx)
+                if len(selected) >= topk:
+                    break
+
+        ranked_selected = sorted(selected, key=lambda idx: float(coarse_scores[idx].item()), reverse=True)
+        return ranked_selected[:topk]
 
     if approx_page_token_selector == "visual_patch_query_prior":
         informative_visual_query_indices = _select_informative_visual_query_indices(
@@ -728,6 +839,7 @@ def maybe_prune_page_tokens_for_base_only(
     query_axis_classes: list[str] | None,
     query_token_labels: list[str] | None,
     page_token_classes: list[str] | None,
+    approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
@@ -752,6 +864,7 @@ def maybe_prune_page_tokens_for_base_only(
         query_axis_classes=query_axis_classes,
         query_token_labels=query_token_labels,
         page_token_classes=page_token_classes,
+        approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
@@ -1399,6 +1512,8 @@ def parse_args() -> argparse.Namespace:
             "Token-selection strategy used before top-K approximate MaxSim pruning. "
             "'global_topk' is the current global-only selection. "
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
+            "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
+            "distinct informative query tokens before filling the rest globally. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
             "informative visual query tokens and visual-labeled page patches. "
             "'visual_patch_query_prior' only boosts visual-labeled page patches using "
@@ -1421,6 +1536,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "When --approx-base-page-token-selector=query_label_mix, reserve this many "
             "token slots for pruning against the query's visual-token subset."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-coverage-reserve",
+        type=int,
+        default=64,
+        help=(
+            "When --approx-base-page-token-selector=query_coverage_mix, reserve this many "
+            "token slots for per-query-token coverage before filling the rest globally."
         ),
     )
     parser.add_argument(
@@ -2319,6 +2443,7 @@ def compute_base_only_page_feature(
     query_axis_classes: list[str] | None = None,
     query_token_labels: list[str] | None = None,
     page_token_classes: list[str] | None = None,
+    approx_page_token_coverage_reserve: int = 64,
     approx_page_token_label_reserve: int = 64,
     approx_page_token_soft_visual_query_weight: float = 0.5,
     approx_page_token_soft_patch_visual_bonus: float = 0.2,
@@ -2336,6 +2461,7 @@ def compute_base_only_page_feature(
         query_axis_classes=query_axis_classes,
         query_token_labels=query_token_labels,
         page_token_classes=page_token_classes,
+        approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
@@ -2432,6 +2558,7 @@ def compute_base_only_page_features(
     query_axis_classes: list[str] | None,
     query_token_labels: list[str] | None,
     page_token_classes_by_uid: dict[str, list[str]] | None,
+    approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
@@ -2477,6 +2604,7 @@ def compute_base_only_page_features(
                             if page_token_classes_by_uid is None
                             else page_token_classes_by_uid.get(f"{doc_id}_page{page_idx}")
                         ),
+                        approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
                         approx_page_token_label_reserve=approx_page_token_label_reserve,
                         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
@@ -3390,6 +3518,14 @@ def main() -> None:
             "--approx-base-page-token-selector=query_label_mix."
         )
     if (
+        args.approx_base_page_token_selector != "query_coverage_mix"
+        and args.approx_base_page_token_coverage_reserve != 64
+    ):
+        raise ValueError(
+            "--approx-base-page-token-coverage-reserve is only valid with "
+            "--approx-base-page-token-selector=query_coverage_mix."
+        )
+    if (
         args.approx_base_page_token_selector not in {"soft_label_prior", "visual_patch_query_prior"}
         and args.approx_base_page_token_soft_visual_query_weight != 0.5
     ):
@@ -3585,6 +3721,7 @@ def main() -> None:
             "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
             "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+            "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
             "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
             "base_only_page_batch_size": args.base_only_page_batch_size,
             "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
@@ -3758,6 +3895,7 @@ def main() -> None:
                 query_axis_classes=query_axis_classes,
                 query_token_labels=query_token_labels,
                 page_token_classes_by_uid=page_token_classes_by_uid,
+                approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                 approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
@@ -3784,6 +3922,7 @@ def main() -> None:
                 query_axis_classes=query_axis_classes,
                 query_token_labels=query_token_labels,
                 page_token_classes_by_uid=page_token_classes_by_uid,
+                approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                 approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
@@ -3925,11 +4064,12 @@ def main() -> None:
         "embedding_name": args.embedding_name,
         "query_token_filter": args.query_token_filter,
         "base_score_source": args.base_score_source,
-            "approx_base_page_token_topk": args.approx_base_page_token_topk,
-            "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
-            "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
-            "approx_base_page_token_selector": args.approx_base_page_token_selector,
+        "approx_base_page_token_topk": args.approx_base_page_token_topk,
+        "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+        "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
+        "approx_base_page_token_selector": args.approx_base_page_token_selector,
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+        "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
@@ -3997,6 +4137,7 @@ def main() -> None:
                 "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
                 "approx_base_page_token_selector": args.approx_base_page_token_selector,
                 "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
+                "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
                 "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
                 "base_only_page_batch_size": args.base_only_page_batch_size,
                 "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
@@ -4033,6 +4174,7 @@ def main() -> None:
     print(f"approx_base_page_token_query_prototypes: {args.approx_base_page_token_query_prototypes}")
     print(f"approx_base_page_token_selector: {args.approx_base_page_token_selector}")
     print(f"approx_base_page_token_spatial_reserve: {args.approx_base_page_token_spatial_reserve}")
+    print(f"approx_base_page_token_coverage_reserve: {args.approx_base_page_token_coverage_reserve}")
     print(f"approx_base_page_token_label_reserve: {args.approx_base_page_token_label_reserve}")
     print(f"base_only_page_batch_size: {args.base_only_page_batch_size}")
     print(f"approx_base_page_token_coarse_dtype: {args.approx_base_page_token_coarse_dtype}")
