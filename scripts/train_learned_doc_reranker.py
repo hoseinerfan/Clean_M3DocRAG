@@ -128,6 +128,13 @@ def evaluate_grouped_rows(
     }
 
 
+def metric_key(metrics: dict) -> tuple[float, float]:
+    return (
+        float(metrics.get("top4_doc_count", 0.0)),
+        float(metrics.get("top1_doc_count", 0.0)),
+    )
+
+
 def main() -> None:
     args = parse_args()
     if torch is None or F is None:
@@ -161,6 +168,23 @@ def main() -> None:
 
     qids = list(train_grouped.keys())
     epoch_history = []
+    best_weights = weights.detach().clone()
+    best_bias = bias.detach().clone()
+    best_epoch = 0
+    best_train_metrics = evaluate_grouped_rows(
+        train_grouped,
+        weights=weights.detach(),
+        bias=bias.detach(),
+        means=feature_means,
+        stds=feature_stds,
+    )
+    best_eval_metrics = evaluate_grouped_rows(
+        eval_grouped,
+        weights=weights.detach(),
+        bias=bias.detach(),
+        means=feature_means,
+        stds=feature_stds,
+    )
     for epoch in range(args.epochs):
         random.shuffle(qids)
         optimizer.zero_grad()
@@ -195,30 +219,45 @@ def main() -> None:
         loss = total_loss / pair_count
         loss.backward()
         optimizer.step()
-        epoch_history.append({"epoch": epoch + 1, "loss": float(loss.item())})
+        current_train_metrics = evaluate_grouped_rows(
+            train_grouped,
+            weights=weights.detach(),
+            bias=bias.detach(),
+            means=feature_means,
+            stds=feature_stds,
+        )
+        current_eval_metrics = evaluate_grouped_rows(
+            eval_grouped,
+            weights=weights.detach(),
+            bias=bias.detach(),
+            means=feature_means,
+            stds=feature_stds,
+        )
+        epoch_history.append(
+            {
+                "epoch": epoch + 1,
+                "loss": float(loss.item()),
+                "train_top4_doc_count": int(current_train_metrics["top4_doc_count"]),
+                "eval_top4_doc_count": int(current_eval_metrics["top4_doc_count"]),
+            }
+        )
+        if metric_key(current_train_metrics) > metric_key(best_train_metrics):
+            best_weights = weights.detach().clone()
+            best_bias = bias.detach().clone()
+            best_epoch = epoch + 1
+            best_train_metrics = current_train_metrics
+            best_eval_metrics = current_eval_metrics
 
-    train_metrics = evaluate_grouped_rows(
-        train_grouped,
-        weights=weights.detach(),
-        bias=bias.detach(),
-        means=feature_means,
-        stds=feature_stds,
-    )
-    eval_metrics = evaluate_grouped_rows(
-        eval_grouped,
-        weights=weights.detach(),
-        bias=bias.detach(),
-        means=feature_means,
-        stds=feature_stds,
-    )
+    train_metrics = best_train_metrics
+    eval_metrics = best_eval_metrics
 
     model_payload = {
         "model_type": "linear_pairwise_doc_reranker",
         "feature_names": list(LEARNED_DOC_RERANKER_FEATURE_NAMES),
         "feature_means": [float(value) for value in feature_means.tolist()],
         "feature_stds": [float(value) for value in feature_stds.tolist()],
-        "weights": [float(value) for value in weights.detach().tolist()],
-        "bias": float(bias.detach().item()),
+        "weights": [float(value) for value in best_weights.tolist()],
+        "bias": float(best_bias.item()),
         "training_args": {
             "doc_features_jsonl": args.doc_features_jsonl,
             "eval_doc_features_jsonl": args.eval_doc_features_jsonl,
@@ -240,6 +279,7 @@ def main() -> None:
         "output_model_json": str(output_model_json),
         "train_metrics": train_metrics,
         "eval_metrics": eval_metrics,
+        "best_epoch": best_epoch,
         "final_loss": epoch_history[-1]["loss"] if epoch_history else None,
         "epoch_history_tail": epoch_history[-10:],
     }
