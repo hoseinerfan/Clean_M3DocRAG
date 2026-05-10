@@ -165,6 +165,7 @@ class PageFeature:
     page_idx: int
     page_uid: str
     base_page_score: float
+    coarse_page_score: float | None
     visual_page_score: float
     visual_labeled_page_score: float
     visual_fallback_page_score: float
@@ -200,12 +201,14 @@ def make_base_only_page_feature(
     doc_id: str,
     page_idx: int,
     base_page_score: float,
+    coarse_page_score: float | None = None,
 ) -> PageFeature:
     return PageFeature(
         doc_id=doc_id,
         page_idx=page_idx,
         page_uid=f"{doc_id}_page{page_idx}",
         base_page_score=float(base_page_score),
+        coarse_page_score=None if coarse_page_score is None else float(coarse_page_score),
         visual_page_score=0.0,
         visual_labeled_page_score=0.0,
         visual_fallback_page_score=0.0,
@@ -450,6 +453,81 @@ def compute_approx_base_page_score(
         query_emb=query_emb,
         query_score_mask=query_score_mask,
     )
+
+
+def compute_approx_base_page_score_with_coarse_diagnostic(
+    *,
+    page_emb: torch.Tensor,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor,
+    approx_page_token_topk: int,
+    approx_page_token_scorer: str,
+    approx_page_token_query_prototypes: int,
+    approx_page_token_selector: str,
+    approx_page_token_spatial_reserve: int,
+    query_axis_classes: list[str] | None,
+    query_token_labels: list[str] | None,
+    page_token_classes: list[str] | None,
+    page_meta: dict | None,
+    approx_page_token_coverage_reserve: int,
+    approx_page_token_label_reserve: int,
+    approx_page_token_redundancy_lambda: float,
+    approx_page_token_adaptive_k_mode: str,
+    approx_page_token_adaptive_k_min: int,
+    approx_page_token_adaptive_k_max: int,
+    approx_page_token_informative_visual_weight: float,
+    approx_page_token_soft_visual_query_weight: float,
+    approx_page_token_soft_patch_visual_bonus: float,
+    learned_token_selector_model: dict | None = None,
+    coarse_score_dtype: str = "fp32",
+) -> tuple[float, float]:
+    import torch
+
+    coarse_scores = compute_coarse_page_token_scores(
+        page_emb=page_emb,
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+        approx_page_token_scorer=approx_page_token_scorer,
+        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+        query_axis_classes=query_axis_classes,
+        query_token_labels=query_token_labels,
+        informative_visual_query_weight=approx_page_token_informative_visual_weight,
+        coarse_score_dtype=coarse_score_dtype,
+    )
+    top_indices = select_page_token_indices_for_base_only(
+        page_emb=page_emb,
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+        approx_page_token_topk=approx_page_token_topk,
+        approx_page_token_scorer=approx_page_token_scorer,
+        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+        approx_page_token_selector=approx_page_token_selector,
+        approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+        query_axis_classes=query_axis_classes,
+        query_token_labels=query_token_labels,
+        page_token_classes=page_token_classes,
+        page_meta=page_meta,
+        approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
+        approx_page_token_label_reserve=approx_page_token_label_reserve,
+        approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
+        approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
+        approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
+        approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+        approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
+        approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
+        approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        learned_token_selector_model=learned_token_selector_model,
+        coarse_score_dtype=coarse_score_dtype,
+    )
+    top_index_tensor = torch.tensor(top_indices, device=page_emb.device, dtype=torch.long)
+    pruned_page_emb = page_emb.index_select(0, top_index_tensor)
+    coarse_page_score = float(coarse_scores.index_select(0, top_index_tensor).sum().item())
+    exact_page_score = compute_exact_base_page_score(
+        page_emb=pruned_page_emb,
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+    )
+    return exact_page_score, coarse_page_score
 
 
 def _topk_indices_from_scores(
@@ -2992,6 +3070,7 @@ def compute_page_feature(
         page_idx=page_idx,
         page_uid=f"{doc_id}_page{page_idx}",
         base_page_score=base_page_score,
+        coarse_page_score=None,
         visual_page_score=visual_page_score,
         visual_labeled_page_score=visual_labeled_page_score,
         visual_fallback_page_score=visual_fallback_page_score,
@@ -3026,6 +3105,7 @@ def compute_base_only_page_feature(
     page_emb: torch.Tensor,
     query_emb: torch.Tensor,
     query_score_mask: torch.Tensor,
+    base_score_source: str,
     doc_id: str,
     page_idx: int,
     base_score_override: float | None = None,
@@ -3050,36 +3130,72 @@ def compute_base_only_page_feature(
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
 ) -> PageFeature:
-    exact_base_page_score = compute_approx_base_page_score(
-        page_emb=page_emb,
-        query_emb=query_emb,
-        query_score_mask=query_score_mask,
-        approx_page_token_topk=approx_page_token_topk,
-        approx_page_token_scorer=approx_page_token_scorer,
-        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
-        approx_page_token_selector=approx_page_token_selector,
-        approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
-        query_axis_classes=query_axis_classes,
-        query_token_labels=query_token_labels,
-        page_token_classes=page_token_classes,
-        page_meta=page_meta,
-        approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
-        approx_page_token_label_reserve=approx_page_token_label_reserve,
-        approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
-        approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
-        approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
-        approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
-        approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
-        approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
-        approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
-        learned_token_selector_model=learned_token_selector_model,
-        coarse_score_dtype=coarse_score_dtype,
-    )
+    exact_base_page_score: float
+    coarse_page_score: float | None = None
+    if base_score_source == "exact_page_maxsim":
+        exact_base_page_score = compute_exact_base_page_score(
+            page_emb=page_emb,
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+        )
+    elif base_score_override is None:
+        exact_base_page_score, coarse_page_score = compute_approx_base_page_score_with_coarse_diagnostic(
+            page_emb=page_emb,
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+            approx_page_token_topk=approx_page_token_topk,
+            approx_page_token_scorer=approx_page_token_scorer,
+            approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+            approx_page_token_selector=approx_page_token_selector,
+            approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+            page_token_classes=page_token_classes,
+            page_meta=page_meta,
+            approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
+            approx_page_token_label_reserve=approx_page_token_label_reserve,
+            approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
+            approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
+            approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
+            approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+            approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
+            approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
+            approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+            learned_token_selector_model=learned_token_selector_model,
+            coarse_score_dtype=coarse_score_dtype,
+        )
+    else:
+        exact_base_page_score = compute_approx_base_page_score(
+            page_emb=page_emb,
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+            approx_page_token_topk=approx_page_token_topk,
+            approx_page_token_scorer=approx_page_token_scorer,
+            approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+            approx_page_token_selector=approx_page_token_selector,
+            approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+            page_token_classes=page_token_classes,
+            page_meta=page_meta,
+            approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
+            approx_page_token_label_reserve=approx_page_token_label_reserve,
+            approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
+            approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
+            approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
+            approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+            approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
+            approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
+            approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+            learned_token_selector_model=learned_token_selector_model,
+            coarse_score_dtype=coarse_score_dtype,
+        )
     base_page_score = exact_base_page_score if base_score_override is None else float(base_score_override)
     return make_base_only_page_feature(
         doc_id=doc_id,
         page_idx=page_idx,
         base_page_score=base_page_score,
+        coarse_page_score=coarse_page_score,
     )
 
 
@@ -3096,14 +3212,15 @@ def compute_base_only_page_feature_scores_batched(
     query_token_labels: list[str] | None,
     approx_page_token_informative_visual_weight: float,
     coarse_score_dtype: str,
-) -> list[float]:
+) -> tuple[list[float], list[float | None]]:
     import torch
 
     if base_score_source == "exact_page_maxsim":
         score_matrix = batch_page_embs @ query_emb.T
         full_best_scores = score_matrix.max(dim=1).values
         active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
-        return active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+        exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+        return exact_scores, [None for _ in exact_scores]
 
     if base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}:
         raise ValueError(f"Unsupported batched base score source: {base_score_source!r}")
@@ -3153,11 +3270,14 @@ def compute_base_only_page_feature_scores_batched(
     top_indices = torch.topk(coarse_scores, k=topk, dim=1, largest=True, sorted=False).indices
     gather_index = top_indices.unsqueeze(-1).expand(-1, -1, batch_page_embs.shape[-1])
     pruned_page_embs = batch_page_embs.gather(dim=1, index=gather_index)
+    coarse_selected_scores = coarse_scores.gather(dim=1, index=top_indices).sum(dim=1).to(dtype=torch.float32)
 
     score_matrix = pruned_page_embs @ query_emb.T
     full_best_scores = score_matrix.max(dim=1).values
     active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
-    return active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+    exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+    coarse_scores_out = coarse_selected_scores.tolist()
+    return exact_scores, coarse_scores_out
 
 
 def compute_base_only_page_features(
@@ -3215,6 +3335,7 @@ def compute_base_only_page_features(
                         page_emb=page_emb,
                         query_emb=query_emb,
                         query_score_mask=query_score_mask,
+                        base_score_source=base_score_source,
                         doc_id=doc_id,
                         page_idx=page_idx,
                         base_score_override=base_score_override,
@@ -3250,7 +3371,7 @@ def compute_base_only_page_features(
                 )
         else:
             batch_tensor = torch.stack(batch_embs, dim=0)
-            batch_scores = compute_base_only_page_feature_scores_batched(
+            batch_scores, batch_coarse_scores = compute_base_only_page_feature_scores_batched(
                 batch_page_embs=batch_tensor,
                 query_emb=query_emb,
                 query_score_mask=query_score_mask,
@@ -3263,13 +3384,18 @@ def compute_base_only_page_features(
                 approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
                 coarse_score_dtype=coarse_score_dtype,
             )
-            for (doc_id, page_idx, base_score_override), batch_score in zip(batch_meta, batch_scores):
+            for (doc_id, page_idx, base_score_override), batch_score, coarse_score in zip(
+                batch_meta,
+                batch_scores,
+                batch_coarse_scores,
+            ):
                 base_page_score = float(batch_score) if base_score_override is None else float(base_score_override)
                 features.append(
                     make_base_only_page_feature(
                         doc_id=doc_id,
                         page_idx=page_idx,
                         base_page_score=base_page_score,
+                        coarse_page_score=coarse_score,
                     )
                 )
 
@@ -3991,6 +4117,90 @@ def build_rankings(
             item["fused_doc_score"],
             item["best_page_base_score"],
             float(item["second_page_fused_score"] or 0.0),
+        ),
+        reverse=True,
+    )
+    for rank, item in enumerate(reranked_docs, start=1):
+        item["rank"] = rank
+
+    return reranked_docs, reranked_pages
+
+
+def build_scalar_page_score_rankings(
+    page_features: list[PageFeature],
+    baseline_doc_rank_map: dict[str, int],
+    page_score_attr: str,
+    doc_aggregation_mode: str = "best_page",
+    doc_aggregation_second_page_weight: float = 0.25,
+) -> tuple[list[dict], list[dict]]:
+    if doc_aggregation_mode not in DOC_AGGREGATION_MODE_CHOICES:
+        raise ValueError(
+            f"Unsupported doc_aggregation_mode={doc_aggregation_mode!r}; "
+            f"expected one of {DOC_AGGREGATION_MODE_CHOICES}."
+        )
+
+    def page_score(item: PageFeature) -> float:
+        value = getattr(item, page_score_attr, None)
+        return float("-inf") if value is None else float(value)
+
+    ranked_pages = sorted(
+        page_features,
+        key=lambda item: (
+            page_score(item),
+            item.base_page_score,
+            item.page_uid,
+        ),
+        reverse=True,
+    )
+
+    reranked_pages: list[dict] = []
+    for rank, item in enumerate(ranked_pages, start=1):
+        payload = asdict(item)
+        payload["diagnostic_page_score"] = None if getattr(item, page_score_attr, None) is None else float(getattr(item, page_score_attr))
+        payload["diagnostic_page_score_attr"] = page_score_attr
+        payload["rank"] = rank
+        reranked_pages.append(payload)
+
+    pages_by_doc: dict[str, list[dict]] = {}
+    for item in reranked_pages:
+        pages_by_doc.setdefault(item["doc_id"], []).append(item)
+
+    reranked_docs: list[dict] = []
+    for doc_id, doc_pages in pages_by_doc.items():
+        best_page = doc_pages[0]
+        second_page = doc_pages[1] if len(doc_pages) > 1 else None
+        fused_doc_score = float(best_page["diagnostic_page_score"])
+        if doc_aggregation_mode == "top2_weighted" and second_page is not None:
+            fused_doc_score += (
+                float(doc_aggregation_second_page_weight) * float(second_page["diagnostic_page_score"])
+            )
+        reranked_docs.append(
+            {
+                "doc_id": doc_id,
+                "rank": None,
+                "fused_doc_score": fused_doc_score,
+                "diagnostic_page_score_attr": page_score_attr,
+                "doc_aggregation_mode": doc_aggregation_mode,
+                "doc_aggregation_second_page_weight": float(doc_aggregation_second_page_weight),
+                "best_page_uid": best_page["page_uid"],
+                "best_page_idx": best_page["page_idx"],
+                "best_page_base_score": best_page["base_page_score"],
+                "best_page_diagnostic_page_score": best_page["diagnostic_page_score"],
+                "second_page_uid": None if second_page is None else second_page["page_uid"],
+                "second_page_idx": None if second_page is None else second_page["page_idx"],
+                "second_page_diagnostic_page_score": None
+                if second_page is None
+                else second_page["diagnostic_page_score"],
+                "candidate_page_count": len(doc_pages),
+                "baseline_doc_rank": baseline_doc_rank_map.get(doc_id),
+            }
+        )
+
+    reranked_docs.sort(
+        key=lambda item: (
+            item["fused_doc_score"],
+            float(item["best_page_base_score"]),
+            float(item["second_page_diagnostic_page_score"] or 0.0),
         ),
         reverse=True,
     )

@@ -40,6 +40,7 @@ from scripts.rerank_target_docs_visual_aware import (
     compute_base_only_page_features,
     compute_base_only_page_feature,
     build_doc_feature_records,
+    build_scalar_page_score_rankings,
     build_learned_doc_rankings,
     compute_page_feature,
     decide_query_route,
@@ -526,6 +527,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-visual", type=float, default=0.0)
     parser.add_argument("--weight-non-visual", type=float, default=0.0)
     parser.add_argument("--weight-balance", type=float, default=0.0)
+    parser.add_argument(
+        "--diagnose-coarse-pre-exact",
+        action="store_true",
+        help=(
+            "In base-only approx_page_maxsim_topk mode, also rank docs/pages using a coarse-only "
+            "diagnostic score computed from the selected top-K page tokens before the exact MaxSim "
+            "step. This reports how much the exact post-pruning score changes top-4."
+        ),
+    )
     parser.add_argument(
         "--grid-search",
         action="store_true",
@@ -1134,6 +1144,16 @@ def main() -> None:
         raise ValueError("--vlm-rerank-top-docs cannot be combined with --learned-doc-reranker-model.")
     if vlm_rerank_active and args.base_score_source == "baseline_pred":
         raise ValueError("--vlm-rerank-top-docs is not supported with --base-score-source=baseline_pred.")
+    if args.diagnose_coarse_pre_exact and not fixed_base_only:
+        raise ValueError("--diagnose-coarse-pre-exact currently requires base-only weights without grid search.")
+    if args.diagnose_coarse_pre_exact and args.base_score_source != "approx_page_maxsim_topk":
+        raise ValueError("--diagnose-coarse-pre-exact currently requires --base-score-source=approx_page_maxsim_topk.")
+    if args.diagnose_coarse_pre_exact and staged_visual_rerank:
+        raise ValueError("--diagnose-coarse-pre-exact cannot be combined with staged visual reranking.")
+    if args.diagnose_coarse_pre_exact and learned_doc_reranker_active:
+        raise ValueError("--diagnose-coarse-pre-exact cannot be combined with --learned-doc-reranker-model.")
+    if args.diagnose_coarse_pre_exact and vlm_rerank_active:
+        raise ValueError("--diagnose-coarse-pre-exact cannot be combined with --vlm-rerank-top-docs.")
     if (
         args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
         and not (fixed_base_only or staged_visual_rerank or learned_doc_reranker_active or vlm_rerank_active)
@@ -1222,6 +1242,13 @@ def main() -> None:
     baseline_top4_doc = 0
     routed_to_visual_qids = 0
     routed_to_base_qids = 0
+    coarse_pre_exact_top4_doc = 0
+    coarse_pre_exact_doc_ranks: list[int] = []
+    coarse_pre_exact_page_ranks: list[int] = []
+    exact_vs_coarse_improved_doc = 0
+    exact_vs_coarse_worsened_doc = 0
+    exact_vs_coarse_unchanged_doc = 0
+    coarse_pre_exact_top4_qids: list[str] = []
 
     for idx, qid in enumerate(qids, start=1):
         gold_row = gold_rows[qid]
@@ -1593,6 +1620,8 @@ def main() -> None:
                 all_doc_feature_rows.append(export_row)
 
         vlm_records: list[dict] = []
+        coarse_pre_exact_docs: list[dict] = []
+        coarse_pre_exact_pages: list[dict] = []
         if vlm_rerank_active:
             assert vlm_dataset is not None
             assert vlm_model is not None
@@ -1624,7 +1653,20 @@ def main() -> None:
                 doc_aggregation_mode=args.doc_aggregation_mode,
                 doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
             )
+        if args.diagnose_coarse_pre_exact:
+            coarse_pre_exact_docs, coarse_pre_exact_pages = build_scalar_page_score_rankings(
+                page_features=page_features,
+                baseline_doc_rank_map=baseline_doc_rank_map,
+                page_score_attr="coarse_page_score",
+                doc_aggregation_mode=args.doc_aggregation_mode,
+                doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
+            )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
+        coarse_gold_doc_summary = (
+            summarize_gold_doc_ranks(coarse_pre_exact_docs, gold_doc_ids)
+            if args.diagnose_coarse_pre_exact
+            else None
+        )
 
         baseline_page_hits = baseline_gold_page_hits(baseline_rows, gold_doc_id_set)
         baseline_first_gold_doc_rank = min((baseline_doc_rank_map.get(doc_id) for doc_id in gold_doc_ids if doc_id in baseline_doc_rank_map), default=None)
@@ -1632,8 +1674,19 @@ def main() -> None:
 
         reranked_page_hits = reranked_gold_page_hits(reranked_pages, gold_doc_id_set)
         reranked_first_gold_page_rank = reranked_page_hits[0]["rank"] if reranked_page_hits else None
+        coarse_pre_exact_page_hits = (
+            reranked_gold_page_hits(coarse_pre_exact_pages, gold_doc_id_set)
+            if args.diagnose_coarse_pre_exact
+            else []
+        )
+        coarse_pre_exact_first_gold_page_rank = (
+            coarse_pre_exact_page_hits[0]["rank"] if coarse_pre_exact_page_hits else None
+        )
 
         reranked_first_gold_doc_rank = gold_doc_summary["first_gold_doc_rank"]
+        coarse_pre_exact_first_gold_doc_rank = (
+            None if coarse_gold_doc_summary is None else coarse_gold_doc_summary["first_gold_doc_rank"]
+        )
         if baseline_first_gold_doc_rank is not None and reranked_first_gold_doc_rank is not None:
             if reranked_first_gold_doc_rank < baseline_first_gold_doc_rank:
                 improved_doc += 1
@@ -1641,6 +1694,21 @@ def main() -> None:
                 worsened_doc += 1
             else:
                 unchanged_doc += 1
+        if args.diagnose_coarse_pre_exact:
+            if coarse_pre_exact_first_gold_doc_rank is not None and coarse_pre_exact_first_gold_doc_rank <= 4:
+                coarse_pre_exact_top4_doc += 1
+                coarse_pre_exact_top4_qids.append(qid)
+            if coarse_pre_exact_first_gold_doc_rank is not None:
+                coarse_pre_exact_doc_ranks.append(coarse_pre_exact_first_gold_doc_rank)
+            if coarse_pre_exact_first_gold_page_rank is not None:
+                coarse_pre_exact_page_ranks.append(coarse_pre_exact_first_gold_page_rank)
+            if coarse_pre_exact_first_gold_doc_rank is not None and reranked_first_gold_doc_rank is not None:
+                if reranked_first_gold_doc_rank < coarse_pre_exact_first_gold_doc_rank:
+                    exact_vs_coarse_improved_doc += 1
+                elif reranked_first_gold_doc_rank > coarse_pre_exact_first_gold_doc_rank:
+                    exact_vs_coarse_worsened_doc += 1
+                else:
+                    exact_vs_coarse_unchanged_doc += 1
 
         if baseline_first_gold_doc_rank is not None and baseline_first_gold_doc_rank <= 4:
             baseline_top4_doc += 1
@@ -1716,6 +1784,15 @@ def main() -> None:
             "baseline_first_gold_doc_rank": baseline_first_gold_doc_rank,
             "baseline_first_gold_page_rank": baseline_first_gold_page_rank,
             "baseline_gold_page_hits_top10": baseline_page_hits[:10],
+            "coarse_pre_exact_first_gold_doc_rank": coarse_pre_exact_first_gold_doc_rank,
+            "coarse_pre_exact_gold_doc_hits_at_4": (
+                [] if coarse_gold_doc_summary is None else coarse_gold_doc_summary["gold_doc_hits_at_4"]
+            ),
+            "coarse_pre_exact_first_gold_page_rank_any_gold_doc_page": coarse_pre_exact_first_gold_page_rank,
+            "coarse_pre_exact_gold_page_hits_top10_any_gold_doc_page": coarse_pre_exact_page_hits[:10],
+            "coarse_pre_exact_gold_doc_ranks": (
+                [] if coarse_gold_doc_summary is None else coarse_gold_doc_summary["gold_doc_ranks"]
+            ),
             "reranked_first_gold_doc_rank": reranked_first_gold_doc_rank,
             "reranked_gold_doc_hits_at_4": gold_doc_summary["gold_doc_hits_at_4"],
             "reranked_first_gold_page_rank_any_gold_doc_page": reranked_first_gold_page_rank,
@@ -1819,14 +1896,35 @@ def main() -> None:
         "grid_balance_values": grid_balance_values,
         "num_qids": len(all_rows),
         "baseline_top4_doc_count": baseline_top4_doc,
+        "coarse_pre_exact_top4_doc_count": (
+            coarse_pre_exact_top4_doc if args.diagnose_coarse_pre_exact else None
+        ),
         "reranked_top4_doc_count": reranked_top4_doc,
         "improved_doc_rank_count": improved_doc,
         "worsened_doc_rank_count": worsened_doc,
         "unchanged_doc_rank_count": unchanged_doc,
+        "exact_vs_coarse_improved_doc_rank_count": (
+            exact_vs_coarse_improved_doc if args.diagnose_coarse_pre_exact else None
+        ),
+        "exact_vs_coarse_worsened_doc_rank_count": (
+            exact_vs_coarse_worsened_doc if args.diagnose_coarse_pre_exact else None
+        ),
+        "exact_vs_coarse_unchanged_doc_rank_count": (
+            exact_vs_coarse_unchanged_doc if args.diagnose_coarse_pre_exact else None
+        ),
         "baseline_doc_rank_median": median_or_none(baseline_doc_ranks),
+        "coarse_pre_exact_doc_rank_median": (
+            median_or_none(coarse_pre_exact_doc_ranks) if args.diagnose_coarse_pre_exact else None
+        ),
         "reranked_doc_rank_median": median_or_none(reranked_doc_ranks),
         "baseline_page_rank_median": median_or_none(baseline_page_ranks),
+        "coarse_pre_exact_page_rank_median": (
+            median_or_none(coarse_pre_exact_page_ranks) if args.diagnose_coarse_pre_exact else None
+        ),
         "reranked_page_rank_median": median_or_none(reranked_page_ranks),
+        "coarse_pre_exact_top4_doc_qids": (
+            coarse_pre_exact_top4_qids if args.diagnose_coarse_pre_exact else []
+        ),
         "top4_doc_qids": [row["qid"] for row in all_rows if row["reranked_first_gold_doc_rank"] is not None and row["reranked_first_gold_doc_rank"] <= 4],
     }
 
@@ -1838,6 +1936,8 @@ def main() -> None:
     print(f"saved_summary: {output_summary_json}")
     print(f"num_qids: {len(all_rows)}")
     print(f"improved_doc_rank_count: {improved_doc}")
+    if args.diagnose_coarse_pre_exact:
+        print(f"coarse_pre_exact_top4_doc_count: {coarse_pre_exact_top4_doc}")
     print(f"reranked_top4_doc_count: {reranked_top4_doc}")
 
 
