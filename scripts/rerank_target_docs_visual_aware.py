@@ -84,6 +84,24 @@ SOFT_VISUAL_QUERY_STOPWORDS = {
     "who",
     "with",
 }
+INFORMATIVE_QUERY_STOPWORDS = SOFT_VISUAL_QUERY_STOPWORDS | {
+    "be",
+    "been",
+    "being",
+    "did",
+    "do",
+    "does",
+    "had",
+    "has",
+    "have",
+    "how",
+    "what",
+    "when",
+    "where",
+    "why",
+    "whom",
+    "whose",
+}
 LEARNED_DOC_RERANKER_FEATURE_NAMES = (
     "stage1_base_doc_rank",
     "baseline_doc_rank",
@@ -490,7 +508,7 @@ def _is_informative_visual_query_token(token_label: str) -> bool:
         return False
     if normalized in {"[bos]", "[eos]", "[pad]", "[ws]"}:
         return False
-    if normalized in SOFT_VISUAL_QUERY_STOPWORDS:
+    if normalized in INFORMATIVE_QUERY_STOPWORDS:
         return False
     if not any(ch.isalnum() for ch in normalized):
         return False
@@ -503,7 +521,7 @@ def _is_informative_query_token(token_label: str) -> bool:
         return False
     if normalized in {"[bos]", "[eos]", "[pad]", "[ws]"}:
         return False
-    if normalized in SOFT_VISUAL_QUERY_STOPWORDS:
+    if normalized in INFORMATIVE_QUERY_STOPWORDS:
         return False
     if not any(ch.isalnum() for ch in normalized):
         return False
