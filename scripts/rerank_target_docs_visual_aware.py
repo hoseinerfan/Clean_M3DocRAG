@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import math
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -137,6 +138,16 @@ LEARNED_TOKEN_SELECTOR_FEATURE_NAMES = (
     "patch_row_norm",
     "patch_col_norm",
     "patch_center_dist",
+)
+LEARNED_QUERY_ROUTE_NUMERIC_FEATURE_NAMES = (
+    "visual_query_token_count",
+    "non_visual_query_token_count",
+    "unknown_query_token_count",
+    "total_query_token_count",
+    "informative_visual_query_count",
+    "has_any_informative_visual_token",
+    "informative_visual_fraction_of_visual",
+    "informative_visual_fraction_of_total",
 )
 
 
@@ -617,13 +628,81 @@ def extract_query_route_features(
 
     counts = axis_class_counts(query_axis_classes or [])
     normalized_question_type = str(question_type or "UNKNOWN").strip() or "UNKNOWN"
+    total_query_token_count = int(sum(counts.values()))
+    informative_visual_query_count = int(len(informative_visual_query_indices))
     return {
         "question_type": normalized_question_type,
         "visual_query_token_count": int(counts["visual"]),
         "non_visual_query_token_count": int(counts["non_visual"]),
-        "informative_visual_query_count": int(len(informative_visual_query_indices)),
+        "unknown_query_token_count": int(counts["unknown"]),
+        "total_query_token_count": total_query_token_count,
+        "informative_visual_query_count": informative_visual_query_count,
         "informative_visual_query_tokens": informative_visual_query_tokens,
     }
+
+
+def _query_route_numeric_feature_map(route_features: dict) -> dict[str, float]:
+    visual_count = float(int(route_features.get("visual_query_token_count", 0)))
+    non_visual_count = float(int(route_features.get("non_visual_query_token_count", 0)))
+    unknown_count = float(int(route_features.get("unknown_query_token_count", 0)))
+    total_count = float(int(route_features.get("total_query_token_count", 0)))
+    if total_count <= 0.0:
+        total_count = visual_count + non_visual_count + unknown_count
+    informative_count = float(int(route_features.get("informative_visual_query_count", 0)))
+    return {
+        "visual_query_token_count": visual_count,
+        "non_visual_query_token_count": non_visual_count,
+        "unknown_query_token_count": unknown_count,
+        "total_query_token_count": total_count,
+        "informative_visual_query_count": informative_count,
+        "has_any_informative_visual_token": 1.0 if informative_count > 0.0 else 0.0,
+        "informative_visual_fraction_of_visual": informative_count / max(1.0, visual_count),
+        "informative_visual_fraction_of_total": informative_count / max(1.0, total_count),
+    }
+
+
+def build_learned_query_route_feature_vector(
+    *,
+    route_features: dict,
+    route_config: dict,
+) -> list[float]:
+    numeric_feature_names = [
+        str(value)
+        for value in route_config.get("numeric_feature_names", LEARNED_QUERY_ROUTE_NUMERIC_FEATURE_NAMES)
+    ]
+    numeric_feature_means = [float(value) for value in route_config.get("numeric_feature_means", [])]
+    numeric_feature_stds = [float(value) for value in route_config.get("numeric_feature_stds", [])]
+    question_type_vocabulary = [
+        str(value).strip()
+        for value in route_config.get("question_type_vocabulary", [])
+        if str(value).strip()
+    ]
+    token_vocabulary = [
+        _normalize_query_axis_text(str(value))
+        for value in route_config.get("token_vocabulary", [])
+        if _normalize_query_axis_text(str(value))
+    ]
+
+    numeric_values = _query_route_numeric_feature_map(route_features)
+    vector: list[float] = []
+    for idx, feature_name in enumerate(numeric_feature_names):
+        raw_value = float(numeric_values.get(feature_name, 0.0))
+        if idx < len(numeric_feature_means):
+            raw_value -= numeric_feature_means[idx]
+        if idx < len(numeric_feature_stds) and numeric_feature_stds[idx] > 0.0:
+            raw_value /= numeric_feature_stds[idx]
+        vector.append(raw_value)
+
+    question_type = str(route_features.get("question_type", "UNKNOWN")).strip() or "UNKNOWN"
+    vector.extend(1.0 if question_type == candidate else 0.0 for candidate in question_type_vocabulary)
+
+    informative_token_set = {
+        _normalize_query_axis_text(str(value))
+        for value in route_features.get("informative_visual_query_tokens", []) or []
+        if _normalize_query_axis_text(str(value))
+    }
+    vector.extend(1.0 if token in informative_token_set else 0.0 for token in token_vocabulary)
+    return vector
 
 
 def load_query_route_config(path: str | None) -> dict | None:
@@ -632,13 +711,52 @@ def load_query_route_config(path: str | None) -> dict | None:
     payload = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError(f"Route config must be a JSON object: {path}")
-    visual_rules = payload.get("visual_rules", [])
-    if visual_rules is None:
-        visual_rules = []
-    if not isinstance(visual_rules, list):
-        raise ValueError(f"'visual_rules' must be a list in route config: {path}")
-    payload["visual_rules"] = visual_rules
+    router_type = str(payload.get("router_type", "rule_or")).strip().lower() or "rule_or"
+    payload["router_type"] = router_type
     payload["default_route"] = str(payload.get("default_route", "base")).strip().lower() or "base"
+    payload["candidate_route"] = str(payload.get("candidate_route", "visual")).strip().lower() or "visual"
+    if router_type == "rule_or":
+        visual_rules = payload.get("visual_rules", [])
+        if visual_rules is None:
+            visual_rules = []
+        if not isinstance(visual_rules, list):
+            raise ValueError(f"'visual_rules' must be a list in route config: {path}")
+        payload["visual_rules"] = visual_rules
+    elif router_type == "learned_linear":
+        weights = payload.get("weights", [])
+        if not isinstance(weights, list) or not weights:
+            raise ValueError(f"'weights' must be a non-empty list in learned route config: {path}")
+        payload["weights"] = [float(value) for value in weights]
+        payload["bias"] = float(payload.get("bias", 0.0))
+        payload["probability_threshold"] = float(payload.get("probability_threshold", 0.5))
+        payload["numeric_feature_names"] = [
+            str(value)
+            for value in payload.get("numeric_feature_names", LEARNED_QUERY_ROUTE_NUMERIC_FEATURE_NAMES)
+        ]
+        payload["numeric_feature_means"] = [float(value) for value in payload.get("numeric_feature_means", [])]
+        payload["numeric_feature_stds"] = [float(value) for value in payload.get("numeric_feature_stds", [])]
+        payload["question_type_vocabulary"] = [
+            str(value).strip()
+            for value in payload.get("question_type_vocabulary", [])
+            if str(value).strip()
+        ]
+        payload["token_vocabulary"] = [
+            _normalize_query_axis_text(str(value))
+            for value in payload.get("token_vocabulary", [])
+            if _normalize_query_axis_text(str(value))
+        ]
+        expected_dim = (
+            len(payload["numeric_feature_names"])
+            + len(payload["question_type_vocabulary"])
+            + len(payload["token_vocabulary"])
+        )
+        if len(payload["weights"]) != expected_dim:
+            raise ValueError(
+                f"Learned route config weight dimension mismatch: got {len(payload['weights'])}, "
+                f"expected {expected_dim} from numeric/question/token vocabularies."
+            )
+    else:
+        raise ValueError(f"Unsupported router_type in route config: {router_type!r}")
     return payload
 
 
@@ -686,20 +804,51 @@ def decide_query_route(
             "matched_rule": None,
         }
 
-    visual_rules = route_config.get("visual_rules", [])
-    for idx, rule in enumerate(visual_rules):
-        if isinstance(rule, dict) and route_rule_matches(route_features=route_features, rule=rule):
-            return {
-                "route_decision": "visual",
-                "matched_rule_index": idx,
-                "matched_rule": rule,
-            }
+    router_type = str(route_config.get("router_type", "rule_or")).strip().lower() or "rule_or"
+    if router_type == "rule_or":
+        visual_rules = route_config.get("visual_rules", [])
+        for idx, rule in enumerate(visual_rules):
+            if isinstance(rule, dict) and route_rule_matches(route_features=route_features, rule=rule):
+                return {
+                    "route_decision": "visual",
+                    "matched_rule_index": idx,
+                    "matched_rule": rule,
+                    "route_probability": None,
+                    "route_logit": None,
+                }
+        return {
+            "route_decision": str(route_config.get("default_route", "base")).strip().lower() or "base",
+            "matched_rule_index": None,
+            "matched_rule": None,
+            "route_probability": None,
+            "route_logit": None,
+        }
 
-    return {
-        "route_decision": str(route_config.get("default_route", "base")).strip().lower() or "base",
-        "matched_rule_index": None,
-        "matched_rule": None,
-    }
+    if router_type == "learned_linear":
+        feature_vector = build_learned_query_route_feature_vector(
+            route_features=route_features,
+            route_config=route_config,
+        )
+        weights = route_config["weights"]
+        logit = float(route_config.get("bias", 0.0))
+        for weight, value in zip(weights, feature_vector):
+            logit += float(weight) * float(value)
+        probability = 1.0 / (1.0 + math.exp(-logit)) if logit >= 0 else math.exp(logit) / (1.0 + math.exp(logit))
+        threshold = float(route_config.get("probability_threshold", 0.5))
+        route_decision = (
+            str(route_config.get("candidate_route", "visual")).strip().lower() or "visual"
+            if probability >= threshold
+            else str(route_config.get("default_route", "base")).strip().lower() or "base"
+        )
+        return {
+            "route_decision": route_decision,
+            "matched_rule_index": None,
+            "matched_rule": None,
+            "route_probability": probability,
+            "route_logit": logit,
+        }
+
+    raise ValueError(f"Unsupported router_type for decide_query_route: {router_type!r}")
 
 
 def select_page_token_indices_for_base_only(
