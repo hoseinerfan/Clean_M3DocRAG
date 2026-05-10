@@ -58,24 +58,31 @@ def load_grouped_rows(path: Path) -> dict[str, list[dict]]:
     return grouped
 
 
-def feature_tensor(rows: list[dict], means: torch.Tensor | None = None, stds: torch.Tensor | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def feature_tensor(
+    rows: list[dict],
+    means: torch.Tensor | None = None,
+    stds: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     vectors = []
     labels = []
     stage1_ranks = []
+    base_scores = []
     for row in rows:
         feature_values = row["feature_values"]
         vectors.append([float(feature_values[name]) for name in LEARNED_DOC_RERANKER_FEATURE_NAMES])
         labels.append(1.0 if row.get("label_is_gold") else 0.0)
         stage1_ranks.append(float(row.get("stage1_base_doc_rank", 10**6)))
+        base_scores.append(float(feature_values.get("max_base_page_score", 0.0)))
     x = torch.tensor(vectors, dtype=torch.float32)
     y = torch.tensor(labels, dtype=torch.float32)
     stage1 = torch.tensor(stage1_ranks, dtype=torch.float32)
+    base = torch.tensor(base_scores, dtype=torch.float32)
     if means is None:
         means = x.mean(dim=0)
     if stds is None:
         stds = x.std(dim=0, unbiased=False)
     stds = torch.where(stds > 1e-6, stds, torch.ones_like(stds))
-    return (x - means) / stds, y, stage1
+    return (x - means) / stds, y, stage1, base
 
 
 def evaluate_grouped_rows(
@@ -91,8 +98,9 @@ def evaluate_grouped_rows(
     improved_vs_stage1_top4 = 0
     total = 0
     for rows in grouped_rows.values():
-        x, y, stage1_ranks = feature_tensor(rows, means=means, stds=stds)
-        scores = (x @ weights) + bias
+        x, y, stage1_ranks, base_scores = feature_tensor(rows, means=means, stds=stds)
+        learned_delta = (x @ weights) + bias
+        scores = base_scores + learned_delta
         ranked_indices = sorted(
             range(len(rows)),
             key=lambda idx: (float(scores[idx]), -float(stage1_ranks[idx])),
@@ -137,7 +145,6 @@ def main() -> None:
     )
 
     all_train_rows = [row for rows in train_grouped.values() for row in rows]
-    train_x, _train_y, _train_stage1 = feature_tensor(all_train_rows)
     feature_means = torch.tensor(
         [[float(row["feature_values"][name]) for name in LEARNED_DOC_RERANKER_FEATURE_NAMES] for row in all_train_rows],
         dtype=torch.float32,
@@ -162,8 +169,9 @@ def main() -> None:
 
         for qid in qids:
             rows = train_grouped[qid]
-            x, y, stage1_ranks = feature_tensor(rows, means=feature_means, stds=feature_stds)
-            scores = (x @ weights) + bias
+            x, y, stage1_ranks, base_scores = feature_tensor(rows, means=feature_means, stds=feature_stds)
+            learned_delta = (x @ weights) + bias
+            scores = base_scores + learned_delta
 
             positive_indices = [idx for idx, label in enumerate(y.tolist()) if label > 0.5]
             negative_indices = [idx for idx, label in enumerate(y.tolist()) if label <= 0.5]

@@ -3335,8 +3335,10 @@ def build_learned_doc_rankings(
     remaining_records: list[dict] = []
     for record in doc_records:
         record_copy = dict(record)
-        learned_score = score_doc_feature_record(record_copy, model_payload)
-        record_copy["learned_doc_score"] = learned_score
+        learned_delta = score_doc_feature_record(record_copy, model_payload)
+        final_doc_score = float(record_copy["feature_values"]["max_base_page_score"]) + learned_delta
+        record_copy["learned_doc_score"] = learned_delta
+        record_copy["final_doc_score"] = final_doc_score
         if record_copy["doc_id"] in selected_doc_ids:
             selected_records.append(record_copy)
         else:
@@ -3344,7 +3346,7 @@ def build_learned_doc_rankings(
 
     selected_records.sort(
         key=lambda item: (
-            item["learned_doc_score"],
+            item["final_doc_score"],
             -float(item["feature_values"]["stage1_base_doc_rank"]),
             item["feature_values"]["max_base_page_score"],
         ),
@@ -3353,7 +3355,7 @@ def build_learned_doc_rankings(
     remaining_records.sort(key=lambda item: (item["stage1_base_doc_rank"], item["doc_id"]))
 
     min_selected_score = (
-        min((item["learned_doc_score"] for item in selected_records), default=0.0)
+        min((item["final_doc_score"] for item in selected_records), default=0.0)
     )
     final_doc_records = selected_records + remaining_records
     doc_score_map: dict[str, float] = {}
@@ -3361,16 +3363,16 @@ def build_learned_doc_rankings(
     reranked_docs: list[dict] = []
     for rank, record in enumerate(final_doc_records, start=1):
         doc_id = record["doc_id"]
-        learned_score = record.get("learned_doc_score")
-        if learned_score is None:
-            learned_score = min_selected_score - float(rank)
-        doc_score_map[doc_id] = float(learned_score)
+        final_score = record.get("final_doc_score")
+        if final_score is None:
+            final_score = min_selected_score - float(rank)
+        doc_score_map[doc_id] = float(final_score)
         doc_rank_map[doc_id] = rank
         reranked_docs.append(
             {
                 "doc_id": doc_id,
                 "rank": rank,
-                "fused_doc_score": float(learned_score),
+                "fused_doc_score": float(final_score),
                 "best_page_uid": record["best_page_uid"],
                 "best_page_idx": record["best_page_idx"],
                 "best_page_base_score": record["feature_values"]["max_base_page_score"],
@@ -3380,7 +3382,7 @@ def build_learned_doc_rankings(
                 "best_page_balance_score": record["feature_values"]["max_balance_score"],
                 "stage1_base_doc_rank": record["stage1_base_doc_rank"],
                 "baseline_doc_rank": record["baseline_doc_rank"],
-                "learned_doc_score": float(learned_score),
+                "learned_doc_score": float(record.get("learned_doc_score", 0.0)),
                 "candidate_page_count": record["candidate_page_count"],
             }
         )
