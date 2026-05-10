@@ -6,6 +6,7 @@ import argparse
 import itertools
 import json
 import math
+import statistics
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -33,6 +34,7 @@ APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = (
 )
 APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = (
     "global_topk",
+    "maxsim_greedy",
     "redundancy_aware_topk",
     "spatial_quadrant_mix",
     "query_coverage_mix",
@@ -45,6 +47,7 @@ COARSE_SCORE_DTYPE_CHOICES = ("fp32", "bf16", "fp16")
 APPROX_BASE_PAGE_TOKEN_ADAPTIVE_K_MODE_CHOICES = (
     "disabled",
     "coarse_entropy",
+    "maxsim_mass",
 )
 BALANCE_SCORE_MODE_CHOICES = (
     "min_avg",
@@ -186,6 +189,38 @@ class PageFeature:
     non_visual_patch_count: int
     grounded_non_visual_patch_count: int
     visual_anchor_patch_count: int
+    selector_selected_token_count: int | None = None
+    selector_candidate_token_count: int | None = None
+    selector_full_token_count: int | None = None
+    selector_active_query_token_count: int | None = None
+    selector_full_exact_page_score: float | None = None
+    selector_pruned_exact_page_score: float | None = None
+    selector_exact_score_loss: float | None = None
+    selector_shifted_full_page_score: float | None = None
+    selector_shifted_pruned_page_score: float | None = None
+    selector_shifted_score_preservation_ratio: float | None = None
+    selector_argmax_retention_count: int | None = None
+    selector_argmax_retention_ratio: float | None = None
+    selector_candidate_argmax_coverage_count: int | None = None
+    selector_candidate_argmax_coverage_ratio: float | None = None
+
+
+@dataclass(frozen=True)
+class TokenPruningDiagnostics:
+    selected_token_count: int
+    candidate_token_count: int
+    full_token_count: int
+    active_query_token_count: int
+    full_exact_page_score: float
+    pruned_exact_page_score: float
+    exact_score_loss: float
+    shifted_full_page_score: float
+    shifted_pruned_page_score: float
+    shifted_score_preservation_ratio: float | None
+    argmax_retention_count: int
+    argmax_retention_ratio: float | None
+    candidate_argmax_coverage_count: int
+    candidate_argmax_coverage_ratio: float | None
 
 
 def is_base_only_weights(weights: WeightConfig) -> bool:
@@ -202,6 +237,7 @@ def make_base_only_page_feature(
     page_idx: int,
     base_page_score: float,
     coarse_page_score: float | None = None,
+    token_pruning_diagnostics: TokenPruningDiagnostics | None = None,
 ) -> PageFeature:
     return PageFeature(
         doc_id=doc_id,
@@ -229,6 +265,54 @@ def make_base_only_page_feature(
         non_visual_patch_count=0,
         grounded_non_visual_patch_count=0,
         visual_anchor_patch_count=0,
+        selector_selected_token_count=(
+            None if token_pruning_diagnostics is None else int(token_pruning_diagnostics.selected_token_count)
+        ),
+        selector_candidate_token_count=(
+            None if token_pruning_diagnostics is None else int(token_pruning_diagnostics.candidate_token_count)
+        ),
+        selector_full_token_count=(
+            None if token_pruning_diagnostics is None else int(token_pruning_diagnostics.full_token_count)
+        ),
+        selector_active_query_token_count=(
+            None if token_pruning_diagnostics is None else int(token_pruning_diagnostics.active_query_token_count)
+        ),
+        selector_full_exact_page_score=(
+            None if token_pruning_diagnostics is None else float(token_pruning_diagnostics.full_exact_page_score)
+        ),
+        selector_pruned_exact_page_score=(
+            None if token_pruning_diagnostics is None else float(token_pruning_diagnostics.pruned_exact_page_score)
+        ),
+        selector_exact_score_loss=(
+            None if token_pruning_diagnostics is None else float(token_pruning_diagnostics.exact_score_loss)
+        ),
+        selector_shifted_full_page_score=(
+            None if token_pruning_diagnostics is None else float(token_pruning_diagnostics.shifted_full_page_score)
+        ),
+        selector_shifted_pruned_page_score=(
+            None if token_pruning_diagnostics is None else float(token_pruning_diagnostics.shifted_pruned_page_score)
+        ),
+        selector_shifted_score_preservation_ratio=(
+            None
+            if token_pruning_diagnostics is None or token_pruning_diagnostics.shifted_score_preservation_ratio is None
+            else float(token_pruning_diagnostics.shifted_score_preservation_ratio)
+        ),
+        selector_argmax_retention_count=(
+            None if token_pruning_diagnostics is None else int(token_pruning_diagnostics.argmax_retention_count)
+        ),
+        selector_argmax_retention_ratio=(
+            None
+            if token_pruning_diagnostics is None or token_pruning_diagnostics.argmax_retention_ratio is None
+            else float(token_pruning_diagnostics.argmax_retention_ratio)
+        ),
+        selector_candidate_argmax_coverage_count=(
+            None if token_pruning_diagnostics is None else int(token_pruning_diagnostics.candidate_argmax_coverage_count)
+        ),
+        selector_candidate_argmax_coverage_ratio=(
+            None
+            if token_pruning_diagnostics is None or token_pruning_diagnostics.candidate_argmax_coverage_ratio is None
+            else float(token_pruning_diagnostics.candidate_argmax_coverage_ratio)
+        ),
     )
 
 
@@ -397,6 +481,181 @@ def compute_exact_base_page_score(
     return float(active_best_scores.sum().item())
 
 
+def _select_active_query_embeddings(
+    *,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    import torch
+
+    if query_score_mask is not None and int(query_score_mask.numel()) == int(query_emb.shape[0]):
+        query_mask_device = query_score_mask.to(device=query_emb.device, dtype=torch.bool)
+        if bool(query_mask_device.any()):
+            return query_emb[query_mask_device], query_mask_device
+    return query_emb, None
+
+
+def _build_token_pruning_diagnostics(
+    *,
+    score_matrix_active: torch.Tensor,
+    selected_indices: list[int],
+    candidate_indices: list[int],
+) -> TokenPruningDiagnostics:
+    import torch
+
+    active_query_token_count = int(score_matrix_active.shape[1])
+    full_token_count = int(score_matrix_active.shape[0])
+    selected_token_count = len(selected_indices)
+    candidate_token_count = len(candidate_indices)
+
+    if active_query_token_count <= 0 or full_token_count <= 0 or selected_token_count <= 0:
+        return TokenPruningDiagnostics(
+            selected_token_count=selected_token_count,
+            candidate_token_count=candidate_token_count,
+            full_token_count=full_token_count,
+            active_query_token_count=active_query_token_count,
+            full_exact_page_score=0.0,
+            pruned_exact_page_score=0.0,
+            exact_score_loss=0.0,
+            shifted_full_page_score=0.0,
+            shifted_pruned_page_score=0.0,
+            shifted_score_preservation_ratio=None,
+            argmax_retention_count=0,
+            argmax_retention_ratio=None,
+            candidate_argmax_coverage_count=0,
+            candidate_argmax_coverage_ratio=None,
+        )
+
+    full_best_scores, full_best_indices = score_matrix_active.max(dim=0)
+    selected_index_tensor = torch.tensor(selected_indices, device=score_matrix_active.device, dtype=torch.long)
+    pruned_best_scores = score_matrix_active.index_select(0, selected_index_tensor).max(dim=0).values
+
+    column_shift = torch.clamp(-score_matrix_active.min(dim=0).values, min=0.0)
+    shifted_score_matrix = score_matrix_active + column_shift.unsqueeze(0)
+    shifted_full_best_scores = shifted_score_matrix.max(dim=0).values
+    shifted_pruned_best_scores = shifted_score_matrix.index_select(0, selected_index_tensor).max(dim=0).values
+
+    selected_index_set = {int(idx) for idx in selected_indices}
+    candidate_index_set = {int(idx) for idx in candidate_indices}
+    full_argmax_indices = [int(idx) for idx in full_best_indices.tolist()]
+    argmax_retention_count = sum(1 for idx in full_argmax_indices if idx in selected_index_set)
+    candidate_argmax_coverage_count = sum(1 for idx in full_argmax_indices if idx in candidate_index_set)
+
+    full_exact_page_score = float(full_best_scores.sum().item())
+    pruned_exact_page_score = float(pruned_best_scores.sum().item())
+    exact_score_loss = float((full_best_scores - pruned_best_scores).sum().item())
+    shifted_full_page_score = float(shifted_full_best_scores.sum().item())
+    shifted_pruned_page_score = float(shifted_pruned_best_scores.sum().item())
+    shifted_score_preservation_ratio = (
+        shifted_pruned_page_score / shifted_full_page_score
+        if shifted_full_page_score > 1e-8
+        else None
+    )
+    argmax_retention_ratio = argmax_retention_count / float(active_query_token_count)
+    candidate_argmax_coverage_ratio = candidate_argmax_coverage_count / float(active_query_token_count)
+
+    return TokenPruningDiagnostics(
+        selected_token_count=selected_token_count,
+        candidate_token_count=candidate_token_count,
+        full_token_count=full_token_count,
+        active_query_token_count=active_query_token_count,
+        full_exact_page_score=full_exact_page_score,
+        pruned_exact_page_score=pruned_exact_page_score,
+        exact_score_loss=exact_score_loss,
+        shifted_full_page_score=shifted_full_page_score,
+        shifted_pruned_page_score=shifted_pruned_page_score,
+        shifted_score_preservation_ratio=shifted_score_preservation_ratio,
+        argmax_retention_count=argmax_retention_count,
+        argmax_retention_ratio=argmax_retention_ratio,
+        candidate_argmax_coverage_count=candidate_argmax_coverage_count,
+        candidate_argmax_coverage_ratio=candidate_argmax_coverage_ratio,
+    )
+
+
+def _select_maxsim_greedy_token_indices(
+    *,
+    score_matrix_active: torch.Tensor,
+    coarse_scores: torch.Tensor,
+    k: int,
+    candidate_budget: int,
+    adaptive_k_mode: str,
+    adaptive_k_min: int,
+    adaptive_k_max: int,
+    preservation_target: float,
+) -> tuple[list[int], list[int]]:
+    import torch
+
+    token_count = int(score_matrix_active.shape[0])
+    if token_count <= 0 or k <= 0:
+        return [], []
+
+    candidate_indices = list(range(token_count))
+    if candidate_budget > 0 and candidate_budget < token_count:
+        candidate_indices = _topk_indices_from_scores(scores=coarse_scores, k=candidate_budget)
+    candidate_count = len(candidate_indices)
+    if candidate_count <= 0:
+        return [], []
+
+    candidate_index_tensor = torch.tensor(candidate_indices, device=score_matrix_active.device, dtype=torch.long)
+    candidate_scores = score_matrix_active.index_select(0, candidate_index_tensor)
+    column_shift = torch.clamp(-score_matrix_active.min(dim=0).values, min=0.0)
+    shifted_candidate_scores = candidate_scores + column_shift.unsqueeze(0)
+    shifted_full_best_scores = (score_matrix_active + column_shift.unsqueeze(0)).max(dim=0).values
+    shifted_full_score = float(shifted_full_best_scores.sum().item())
+
+    if adaptive_k_mode == "maxsim_mass":
+        target_min = min(max(int(adaptive_k_min), 1), candidate_count)
+        target_max = min(max(int(adaptive_k_max), target_min), candidate_count)
+        target_k = target_max
+    else:
+        target_min = 0
+        target_max = min(max(int(k), 0), candidate_count)
+        target_k = target_max
+
+    if target_k <= 0:
+        return [], candidate_indices
+
+    selected_local: list[int] = []
+    available_mask = torch.ones(candidate_count, dtype=torch.bool, device=score_matrix_active.device)
+    current_best = torch.zeros(
+        int(score_matrix_active.shape[1]),
+        dtype=shifted_candidate_scores.dtype,
+        device=score_matrix_active.device,
+    )
+    neg_inf = torch.tensor(float("-inf"), dtype=shifted_candidate_scores.dtype, device=score_matrix_active.device)
+
+    while len(selected_local) < target_k:
+        marginal_gain = torch.relu(shifted_candidate_scores - current_best.unsqueeze(0)).sum(dim=1)
+        utility = torch.where(available_mask, marginal_gain, neg_inf)
+        next_local_idx = int(torch.argmax(utility).item())
+        if not bool(available_mask[next_local_idx]):
+            break
+        selected_local.append(next_local_idx)
+        available_mask[next_local_idx] = False
+        current_best = torch.maximum(current_best, shifted_candidate_scores[next_local_idx])
+        if (
+            adaptive_k_mode == "maxsim_mass"
+            and len(selected_local) >= target_min
+            and shifted_full_score > 1e-8
+        ):
+            preserved_ratio = float(current_best.sum().item()) / shifted_full_score
+            if preserved_ratio >= float(preservation_target):
+                break
+
+    if len(selected_local) < target_k:
+        coarse_scores_candidate = coarse_scores.index_select(0, candidate_index_tensor)
+        for local_idx in _topk_indices_from_scores(scores=coarse_scores_candidate, k=candidate_count):
+            local_idx = int(local_idx)
+            if local_idx in selected_local:
+                continue
+            selected_local.append(local_idx)
+            if len(selected_local) >= target_k:
+                break
+
+    selected_indices = [candidate_indices[local_idx] for local_idx in selected_local[:target_k]]
+    return selected_indices, candidate_indices
+
+
 def compute_approx_base_page_score(
     *,
     page_emb: torch.Tensor,
@@ -420,10 +679,13 @@ def compute_approx_base_page_score(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_maxsim_greedy_candidate_budget: int,
+    approx_page_token_maxsim_preservation_target: float,
+    report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
 ) -> float:
-    pruned_page_emb = maybe_prune_page_tokens_for_base_only(
+    pruned_page_emb, _diagnostics = maybe_prune_page_tokens_for_base_only(
         page_emb=page_emb,
         query_emb=query_emb,
         query_score_mask=query_score_mask,
@@ -445,6 +707,9 @@ def compute_approx_base_page_score(
         approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+        approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
+        report_pruning_diagnostics=report_pruning_diagnostics,
         learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
     )
@@ -478,9 +743,12 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_maxsim_greedy_candidate_budget: int,
+    approx_page_token_maxsim_preservation_target: float,
+    report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
-) -> tuple[float, float]:
+) -> tuple[float, float, TokenPruningDiagnostics | None]:
     import torch
 
     coarse_scores = compute_coarse_page_token_scores(
@@ -494,7 +762,7 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
         informative_visual_query_weight=approx_page_token_informative_visual_weight,
         coarse_score_dtype=coarse_score_dtype,
     )
-    top_indices = select_page_token_indices_for_base_only(
+    top_indices, diagnostics = select_page_token_indices_for_base_only(
         page_emb=page_emb,
         query_emb=query_emb,
         query_score_mask=query_score_mask,
@@ -516,6 +784,9 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
         approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+        approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
+        report_pruning_diagnostics=report_pruning_diagnostics,
         learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
     )
@@ -527,7 +798,7 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
         query_emb=query_emb,
         query_score_mask=query_score_mask,
     )
-    return exact_page_score, coarse_page_score
+    return exact_page_score, coarse_page_score, diagnostics
 
 
 def _topk_indices_from_scores(
@@ -1017,9 +1288,12 @@ def select_page_token_indices_for_base_only(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_maxsim_greedy_candidate_budget: int,
+    approx_page_token_maxsim_preservation_target: float,
+    report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
-) -> list[int]:
+) -> tuple[list[int], TokenPruningDiagnostics | None]:
     import torch
 
     coarse_scores = compute_coarse_page_token_scores(
@@ -1033,6 +1307,43 @@ def select_page_token_indices_for_base_only(
         informative_visual_query_weight=approx_page_token_informative_visual_weight,
         coarse_score_dtype=coarse_score_dtype,
     )
+    diagnostics: TokenPruningDiagnostics | None = None
+    selector_candidate_indices = list(range(int(page_emb.shape[0])))
+
+    if approx_page_token_selector == "maxsim_greedy":
+        query_emb_active, _query_mask_device = _select_active_query_embeddings(
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+        )
+        score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+        if approx_page_token_adaptive_k_mode == "maxsim_mass":
+            topk = min(max(int(approx_page_token_adaptive_k_max), 1), int(page_emb.shape[0]))
+        else:
+            topk = _resolve_adaptive_page_token_topk(
+                coarse_scores=coarse_scores,
+                base_topk=int(approx_page_token_topk),
+                adaptive_k_mode=approx_page_token_adaptive_k_mode,
+                adaptive_k_min=approx_page_token_adaptive_k_min,
+                adaptive_k_max=approx_page_token_adaptive_k_max,
+            )
+        selected_indices, selector_candidate_indices = _select_maxsim_greedy_token_indices(
+            score_matrix_active=score_matrix_active,
+            coarse_scores=coarse_scores,
+            k=topk,
+            candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+            adaptive_k_mode=approx_page_token_adaptive_k_mode,
+            adaptive_k_min=approx_page_token_adaptive_k_min,
+            adaptive_k_max=approx_page_token_adaptive_k_max,
+            preservation_target=approx_page_token_maxsim_preservation_target,
+        )
+        if report_pruning_diagnostics:
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
+
     topk = _resolve_adaptive_page_token_topk(
         coarse_scores=coarse_scores,
         base_topk=int(approx_page_token_topk),
@@ -1041,18 +1352,54 @@ def select_page_token_indices_for_base_only(
         adaptive_k_max=approx_page_token_adaptive_k_max,
     )
     if topk >= int(page_emb.shape[0]):
-        return list(range(int(page_emb.shape[0])))
+        selected_indices = list(range(int(page_emb.shape[0])))
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     if approx_page_token_selector == "global_topk":
-        return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+        selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     if approx_page_token_selector == "redundancy_aware_topk":
-        return _select_redundancy_aware_token_indices(
+        selected_indices = _select_redundancy_aware_token_indices(
             page_emb=page_emb,
             coarse_scores=coarse_scores,
             k=topk,
             redundancy_lambda=approx_page_token_redundancy_lambda,
         )
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     if approx_page_token_selector == "learned_token_topk":
         if learned_token_selector_model is None:
@@ -1072,7 +1419,19 @@ def select_page_token_indices_for_base_only(
             model_payload=learned_token_selector_model,
             coarse_score_dtype=coarse_score_dtype,
         )
-        return _topk_indices_from_scores(scores=learned_scores, k=topk)
+        selected_indices = _topk_indices_from_scores(scores=learned_scores, k=topk)
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     if approx_page_token_selector == "query_coverage_mix":
         coverage_reserve = min(max(int(approx_page_token_coverage_reserve), 0), topk)
@@ -1082,7 +1441,19 @@ def select_page_token_indices_for_base_only(
             query_token_labels=query_token_labels,
         )
         if coverage_reserve <= 0 or not coverage_query_indices:
-            return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            if report_pruning_diagnostics:
+                query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                )
+                score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+                diagnostics = _build_token_pruning_diagnostics(
+                    score_matrix_active=score_matrix_active,
+                    selected_indices=selected_indices,
+                    candidate_indices=selector_candidate_indices,
+                )
+            return selected_indices, diagnostics
 
         if coarse_score_dtype == "fp32" or page_emb.device.type != "cuda":
             page_emb_coarse = page_emb
@@ -1142,7 +1513,19 @@ def select_page_token_indices_for_base_only(
                     break
 
         ranked_selected = sorted(selected, key=lambda idx: float(coarse_scores[idx].item()), reverse=True)
-        return ranked_selected[:topk]
+        selected_indices = ranked_selected[:topk]
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     if approx_page_token_selector == "visual_patch_query_prior":
         informative_visual_query_indices = _select_informative_visual_query_indices(
@@ -1150,15 +1533,51 @@ def select_page_token_indices_for_base_only(
             query_token_labels=query_token_labels,
         )
         if not informative_visual_query_indices:
-            return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            if report_pruning_diagnostics:
+                query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                )
+                score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+                diagnostics = _build_token_pruning_diagnostics(
+                    score_matrix_active=score_matrix_active,
+                    selected_indices=selected_indices,
+                    candidate_indices=selector_candidate_indices,
+                )
+            return selected_indices, diagnostics
         if page_token_classes is None or len(page_token_classes) != int(page_emb.shape[0]):
-            return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            if report_pruning_diagnostics:
+                query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                )
+                score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+                diagnostics = _build_token_pruning_diagnostics(
+                    score_matrix_active=score_matrix_active,
+                    selected_indices=selected_indices,
+                    candidate_indices=selector_candidate_indices,
+                )
+            return selected_indices, diagnostics
 
         visual_token_indices = [
             idx for idx, axis_class in enumerate(page_token_classes) if axis_class == "visual"
         ]
         if not visual_token_indices:
-            return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            if report_pruning_diagnostics:
+                query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                )
+                score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+                diagnostics = _build_token_pruning_diagnostics(
+                    score_matrix_active=score_matrix_active,
+                    selected_indices=selected_indices,
+                    candidate_indices=selector_candidate_indices,
+                )
+            return selected_indices, diagnostics
 
         combined_scores = coarse_scores.clone()
         visual_query_index_tensor = torch.tensor(
@@ -1188,7 +1607,19 @@ def select_page_token_indices_for_base_only(
             combined_scores[visual_token_index_tensor] += float(
                 approx_page_token_soft_patch_visual_bonus
             )
-        return _topk_indices_from_scores(scores=combined_scores, k=topk)
+        selected_indices = _topk_indices_from_scores(scores=combined_scores, k=topk)
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     if approx_page_token_selector == "soft_label_prior":
         combined_scores = coarse_scores.clone()
@@ -1225,7 +1656,19 @@ def select_page_token_indices_for_base_only(
                     patch_prior[idx] = visual_bonus
             combined_scores = combined_scores + patch_prior
 
-        return _topk_indices_from_scores(scores=combined_scores, k=topk)
+        selected_indices = _topk_indices_from_scores(scores=combined_scores, k=topk)
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     if approx_page_token_selector == "query_label_mix":
         visual_query_indices = []
@@ -1235,7 +1678,19 @@ def select_page_token_indices_for_base_only(
             ]
         label_reserve = min(max(int(approx_page_token_label_reserve), 0), topk)
         if label_reserve <= 0 or not visual_query_indices:
-            return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
+            if report_pruning_diagnostics:
+                query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                )
+                score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+                diagnostics = _build_token_pruning_diagnostics(
+                    score_matrix_active=score_matrix_active,
+                    selected_indices=selected_indices,
+                    candidate_indices=selector_candidate_indices,
+                )
+            return selected_indices, diagnostics
 
         global_budget = topk - label_reserve
         selected: set[int] = set()
@@ -1266,14 +1721,38 @@ def select_page_token_indices_for_base_only(
                     break
 
         ranked_selected = sorted(selected, key=lambda idx: float(coarse_scores[idx].item()), reverse=True)
-        return ranked_selected[:topk]
+        selected_indices = ranked_selected[:topk]
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     if approx_page_token_selector != "spatial_quadrant_mix":
         raise ValueError(f"Unsupported approx_page_token_selector: {approx_page_token_selector!r}")
 
     _prefix_tokens, quadrant_groups = _infer_spatial_quadrant_groups(int(page_emb.shape[0]))
     if not quadrant_groups:
-        return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+        selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
+        if report_pruning_diagnostics:
+            query_emb_active, _query_mask_device = _select_active_query_embeddings(
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+            score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            diagnostics = _build_token_pruning_diagnostics(
+                score_matrix_active=score_matrix_active,
+                selected_indices=selected_indices,
+                candidate_indices=selector_candidate_indices,
+            )
+        return selected_indices, diagnostics
 
     spatial_reserve = min(max(int(approx_page_token_spatial_reserve), 0), topk)
     global_budget = topk - spatial_reserve
@@ -1303,7 +1782,19 @@ def select_page_token_indices_for_base_only(
                 break
 
     ranked_selected = sorted(selected, key=lambda idx: float(coarse_scores[idx].item()), reverse=True)
-    return ranked_selected[:topk]
+    selected_indices = ranked_selected[:topk]
+    if report_pruning_diagnostics:
+        query_emb_active, _query_mask_device = _select_active_query_embeddings(
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+        )
+        score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+        diagnostics = _build_token_pruning_diagnostics(
+            score_matrix_active=score_matrix_active,
+            selected_indices=selected_indices,
+            candidate_indices=selector_candidate_indices,
+        )
+    return selected_indices, diagnostics
 
 
 def maybe_prune_page_tokens_for_base_only(
@@ -1329,17 +1820,20 @@ def maybe_prune_page_tokens_for_base_only(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_maxsim_greedy_candidate_budget: int,
+    approx_page_token_maxsim_preservation_target: float,
+    report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, TokenPruningDiagnostics | None]:
     import torch
 
     if approx_page_token_topk <= 0:
-        return page_emb
+        return page_emb, None
     topk = min(int(approx_page_token_topk), int(page_emb.shape[0]))
     if topk >= int(page_emb.shape[0]):
-        return page_emb
-    top_indices = select_page_token_indices_for_base_only(
+        return page_emb, None
+    top_indices, diagnostics = select_page_token_indices_for_base_only(
         page_emb=page_emb,
         query_emb=query_emb,
         query_score_mask=query_score_mask,
@@ -1361,11 +1855,14 @@ def maybe_prune_page_tokens_for_base_only(
         approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+        approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
+        report_pruning_diagnostics=report_pruning_diagnostics,
         learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
     )
     top_index_tensor = torch.tensor(top_indices, device=page_emb.device, dtype=torch.long)
-    return page_emb.index_select(0, top_index_tensor)
+    return page_emb.index_select(0, top_index_tensor), diagnostics
 
 
 def parse_float_list(raw: str) -> list[float]:
@@ -1984,7 +2481,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional page-level adaptive token budget. 'disabled' keeps a fixed "
             "--approx-base-page-token-topk. 'coarse_entropy' expands K for pages whose "
-            "coarse pruning scores are diffuse and shrinks K for pages whose scores are concentrated."
+            "coarse pruning scores are diffuse and shrinks K for pages whose scores are concentrated. "
+            "'maxsim_mass' is only valid with --approx-base-page-token-selector=maxsim_greedy and "
+            "stops once the shifted MaxSim mass preservation target is reached."
         ),
     )
     parser.add_argument(
@@ -2036,6 +2535,8 @@ def parse_args() -> argparse.Namespace:
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
             "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
             "distinct informative query tokens before filling the rest globally. "
+            "'maxsim_greedy' greedily selects tokens that maximize retained page-query MaxSim "
+            "mass, providing a more principled approximation to the exact objective. "
             "'learned_token_topk' scores each page token with a small learned linear selector "
             "trained from exact MaxSim token winners. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
@@ -2081,6 +2582,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-maxsim-greedy-candidate-budget",
+        type=int,
+        default=0,
+        help=(
+            "When --approx-base-page-token-selector=maxsim_greedy, optionally pre-prune the "
+            "page token pool to this many coarse-score candidates before greedy MaxSim-preserving "
+            "selection. Set 0 to use all page tokens."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-maxsim-preservation-target",
+        type=float,
+        default=0.95,
+        help=(
+            "When --approx-base-page-token-adaptive-k-mode=maxsim_mass, stop greedy selection once "
+            "the shifted MaxSim mass preservation ratio reaches this target."
+        ),
+    )
+    parser.add_argument(
         "--approx-base-page-token-informative-visual-weight",
         type=float,
         default=1.0,
@@ -2108,6 +2628,14 @@ def parse_args() -> argparse.Namespace:
             "When --approx-base-page-token-selector=soft_label_prior or "
             "visual_patch_query_prior, add this bonus to page tokens whose patch "
             "label is visual before top-K selection."
+        ),
+    )
+    parser.add_argument(
+        "--report-pruning-diagnostics",
+        action="store_true",
+        help=(
+            "Export page-level pruning diagnostics such as MaxSim score preservation and query-argmax "
+            "retention. This is useful for scientific analysis but can slow approximate reranking."
         ),
     )
     parser.add_argument(
@@ -3127,11 +3655,15 @@ def compute_base_only_page_feature(
     approx_page_token_informative_visual_weight: float = 1.0,
     approx_page_token_soft_visual_query_weight: float = 0.5,
     approx_page_token_soft_patch_visual_bonus: float = 0.2,
+    approx_page_token_maxsim_greedy_candidate_budget: int = 0,
+    approx_page_token_maxsim_preservation_target: float = 0.95,
+    report_pruning_diagnostics: bool = False,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
 ) -> PageFeature:
     exact_base_page_score: float
     coarse_page_score: float | None = None
+    token_pruning_diagnostics: TokenPruningDiagnostics | None = None
     if base_score_source == "exact_page_maxsim":
         exact_base_page_score = compute_exact_base_page_score(
             page_emb=page_emb,
@@ -3139,7 +3671,7 @@ def compute_base_only_page_feature(
             query_score_mask=query_score_mask,
         )
     elif base_score_override is None:
-        exact_base_page_score, coarse_page_score = compute_approx_base_page_score_with_coarse_diagnostic(
+        exact_base_page_score, coarse_page_score, token_pruning_diagnostics = compute_approx_base_page_score_with_coarse_diagnostic(
             page_emb=page_emb,
             query_emb=query_emb,
             query_score_mask=query_score_mask,
@@ -3161,6 +3693,9 @@ def compute_base_only_page_feature(
             approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
             approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
             approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+            approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+            approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
+            report_pruning_diagnostics=report_pruning_diagnostics,
             learned_token_selector_model=learned_token_selector_model,
             coarse_score_dtype=coarse_score_dtype,
         )
@@ -3187,6 +3722,9 @@ def compute_base_only_page_feature(
             approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
             approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
             approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+            approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+            approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
+            report_pruning_diagnostics=report_pruning_diagnostics,
             learned_token_selector_model=learned_token_selector_model,
             coarse_score_dtype=coarse_score_dtype,
         )
@@ -3196,6 +3734,7 @@ def compute_base_only_page_feature(
         page_idx=page_idx,
         base_page_score=base_page_score,
         coarse_page_score=coarse_page_score,
+        token_pruning_diagnostics=token_pruning_diagnostics,
     )
 
 
@@ -3306,6 +3845,9 @@ def compute_base_only_page_features(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_maxsim_greedy_candidate_budget: int,
+    approx_page_token_maxsim_preservation_target: float,
+    report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None,
     coarse_score_dtype: str,
     page_batch_size: int,
@@ -3317,6 +3859,7 @@ def compute_base_only_page_features(
         page_batch_size > 1
         and approx_page_token_selector == "global_topk"
         and approx_page_token_adaptive_k_mode == "disabled"
+        and not report_pruning_diagnostics
         and base_score_source in {"exact_page_maxsim", "approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
     )
 
@@ -3365,6 +3908,9 @@ def compute_base_only_page_features(
                         approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+                        approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+                        approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
+                        report_pruning_diagnostics=report_pruning_diagnostics,
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=coarse_score_dtype,
                     )
@@ -4210,6 +4756,68 @@ def build_scalar_page_score_rankings(
     return reranked_docs, reranked_pages
 
 
+def summarize_token_pruning_diagnostics(page_features: list[PageFeature]) -> dict:
+    diagnostic_pages = [
+        item for item in page_features if item.selector_selected_token_count is not None
+    ]
+    if not diagnostic_pages:
+        return {
+            "enabled": False,
+            "page_count": 0,
+        }
+
+    def values(attr: str) -> list[float]:
+        collected: list[float] = []
+        for item in diagnostic_pages:
+            value = getattr(item, attr, None)
+            if value is not None:
+                collected.append(float(value))
+        return collected
+
+    def mean_or_none(attr: str) -> float | None:
+        collected = values(attr)
+        if not collected:
+            return None
+        return float(statistics.fmean(collected))
+
+    def median_or_none(attr: str) -> float | None:
+        collected = values(attr)
+        if not collected:
+            return None
+        return float(statistics.median(collected))
+
+    return {
+        "enabled": True,
+        "page_count": len(diagnostic_pages),
+        "mean_selected_token_count": mean_or_none("selector_selected_token_count"),
+        "median_selected_token_count": median_or_none("selector_selected_token_count"),
+        "mean_candidate_token_count": mean_or_none("selector_candidate_token_count"),
+        "mean_full_token_count": mean_or_none("selector_full_token_count"),
+        "mean_active_query_token_count": mean_or_none("selector_active_query_token_count"),
+        "mean_exact_score_loss": mean_or_none("selector_exact_score_loss"),
+        "mean_shifted_score_preservation_ratio": mean_or_none(
+            "selector_shifted_score_preservation_ratio"
+        ),
+        "median_shifted_score_preservation_ratio": median_or_none(
+            "selector_shifted_score_preservation_ratio"
+        ),
+        "mean_argmax_retention_ratio": mean_or_none("selector_argmax_retention_ratio"),
+        "median_argmax_retention_ratio": median_or_none("selector_argmax_retention_ratio"),
+        "mean_candidate_argmax_coverage_ratio": mean_or_none(
+            "selector_candidate_argmax_coverage_ratio"
+        ),
+        "median_candidate_argmax_coverage_ratio": median_or_none(
+            "selector_candidate_argmax_coverage_ratio"
+        ),
+        "perfect_argmax_retention_page_count": sum(
+            1
+            for item in diagnostic_pages
+            if item.selector_argmax_retention_ratio is not None
+            and float(item.selector_argmax_retention_ratio) >= 1.0
+        ),
+    }
+
+
 def build_stage1_base_doc_rank_map(page_features: list[PageFeature]) -> dict[str, int]:
     stage1_ranked_docs, _stage1_ranked_pages = build_rankings(
         page_features=page_features,
@@ -4485,6 +5093,34 @@ def main() -> None:
         )
     if args.approx_base_page_token_redundancy_lambda < 0.0:
         raise ValueError("--approx-base-page-token-redundancy-lambda must be >= 0.")
+    if (
+        args.approx_base_page_token_selector != "maxsim_greedy"
+        and args.approx_base_page_token_maxsim_greedy_candidate_budget != 0
+    ):
+        raise ValueError(
+            "--approx-base-page-token-maxsim-greedy-candidate-budget is only valid with "
+            "--approx-base-page-token-selector=maxsim_greedy."
+        )
+    if args.approx_base_page_token_maxsim_greedy_candidate_budget < 0:
+        raise ValueError("--approx-base-page-token-maxsim-greedy-candidate-budget must be >= 0.")
+    if not (0.0 < args.approx_base_page_token_maxsim_preservation_target <= 1.0):
+        raise ValueError("--approx-base-page-token-maxsim-preservation-target must be in (0, 1].")
+    if (
+        args.approx_base_page_token_adaptive_k_mode == "maxsim_mass"
+        and args.approx_base_page_token_selector != "maxsim_greedy"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-adaptive-k-mode=maxsim_mass requires "
+            "--approx-base-page-token-selector=maxsim_greedy."
+        )
+    if (
+        args.approx_base_page_token_adaptive_k_mode != "maxsim_mass"
+        and args.approx_base_page_token_maxsim_preservation_target != 0.95
+    ):
+        raise ValueError(
+            "--approx-base-page-token-maxsim-preservation-target is only valid when "
+            "--approx-base-page-token-adaptive-k-mode=maxsim_mass."
+        )
     if args.approx_base_page_token_informative_visual_weight <= 0.0:
         raise ValueError("--approx-base-page-token-informative-visual-weight must be > 0.")
     if (
@@ -4898,6 +5534,9 @@ def main() -> None:
                 approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                approx_page_token_maxsim_greedy_candidate_budget=args.approx_base_page_token_maxsim_greedy_candidate_budget,
+                approx_page_token_maxsim_preservation_target=args.approx_base_page_token_maxsim_preservation_target,
+                report_pruning_diagnostics=args.report_pruning_diagnostics,
                 learned_token_selector_model=learned_token_selector_model,
                 coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                 page_batch_size=args.base_only_page_batch_size,
@@ -4932,6 +5571,9 @@ def main() -> None:
                 approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                approx_page_token_maxsim_greedy_candidate_budget=args.approx_base_page_token_maxsim_greedy_candidate_budget,
+                approx_page_token_maxsim_preservation_target=args.approx_base_page_token_maxsim_preservation_target,
+                report_pruning_diagnostics=args.report_pruning_diagnostics,
                 learned_token_selector_model=learned_token_selector_model,
                 coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                 page_batch_size=args.base_only_page_batch_size,
@@ -5067,6 +5709,7 @@ def main() -> None:
     )
     gold_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
     gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
+    token_pruning_diagnostic_summary = summarize_token_pruning_diagnostics(page_features)
 
     summary = {
         "qid": args.qid,
@@ -5086,9 +5729,12 @@ def main() -> None:
         "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
+        "approx_base_page_token_maxsim_greedy_candidate_budget": args.approx_base_page_token_maxsim_greedy_candidate_budget,
+        "approx_base_page_token_maxsim_preservation_target": args.approx_base_page_token_maxsim_preservation_target,
         "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
+        "report_pruning_diagnostics": args.report_pruning_diagnostics,
         "base_only_page_batch_size": args.base_only_page_batch_size,
         "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -5131,6 +5777,7 @@ def main() -> None:
             "best": best_grid_record,
             "leaderboard": grid_leaderboard,
         },
+        "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
         "gold_summary": gold_summary,
         "gold_page_summary": gold_page_summary,
         "top_reranked_docs": reranked_docs[: args.report_topn],
@@ -5162,7 +5809,12 @@ def main() -> None:
                 "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
                 "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
                 "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
+                "approx_base_page_token_maxsim_greedy_candidate_budget": args.approx_base_page_token_maxsim_greedy_candidate_budget,
+                "approx_base_page_token_maxsim_preservation_target": args.approx_base_page_token_maxsim_preservation_target,
                 "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
+                "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
+                "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
+                "report_pruning_diagnostics": args.report_pruning_diagnostics,
                 "base_only_page_batch_size": args.base_only_page_batch_size,
                 "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
                 "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -5186,6 +5838,7 @@ def main() -> None:
                 "candidate_page_count": len(page_features),
                 "gold_doc_ids": gold_doc_ids,
                 "gold_page_uids": gold_page_uids,
+                "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
             },
         )
         prediction_path = Path(args.output_prediction_json)
@@ -5205,7 +5858,18 @@ def main() -> None:
     print(f"approx_base_page_token_coverage_reserve: {args.approx_base_page_token_coverage_reserve}")
     print(f"approx_base_page_token_label_reserve: {args.approx_base_page_token_label_reserve}")
     print(f"approx_base_page_token_redundancy_lambda: {args.approx_base_page_token_redundancy_lambda}")
+    print(
+        "approx_base_page_token_maxsim_greedy_candidate_budget: "
+        f"{args.approx_base_page_token_maxsim_greedy_candidate_budget}"
+    )
+    print(
+        "approx_base_page_token_maxsim_preservation_target: "
+        f"{args.approx_base_page_token_maxsim_preservation_target}"
+    )
     print(f"approx_base_page_token_informative_visual_weight: {args.approx_base_page_token_informative_visual_weight}")
+    print(f"approx_base_page_token_soft_visual_query_weight: {args.approx_base_page_token_soft_visual_query_weight}")
+    print(f"approx_base_page_token_soft_patch_visual_bonus: {args.approx_base_page_token_soft_patch_visual_bonus}")
+    print(f"report_pruning_diagnostics: {args.report_pruning_diagnostics}")
     print(f"learned_token_selector_model: {args.learned_token_selector_model}")
     print(f"base_only_page_batch_size: {args.base_only_page_batch_size}")
     print(f"approx_base_page_token_coarse_dtype: {args.approx_base_page_token_coarse_dtype}")
@@ -5230,6 +5894,8 @@ def main() -> None:
         print(f"gold_page_uids: {gold_page_uids}")
         print(f"first_gold_page_rank: {gold_page_summary['first_gold_page_rank']}")
         print(f"gold_page_hits_at_4: {gold_page_summary['gold_page_hits_at_4']}")
+    if token_pruning_diagnostic_summary["enabled"]:
+        print(f"token_pruning_diagnostic_summary: {token_pruning_diagnostic_summary}")
     print(f"weights: {asdict(weights)}")
     print(f"route_decision: {route_info['route_decision']}")
     print("top_reranked_docs:")

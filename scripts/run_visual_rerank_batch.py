@@ -57,6 +57,7 @@ from scripts.rerank_target_docs_visual_aware import (
     make_query_score_mask,
     parse_float_list,
     resolve_model_path,
+    summarize_token_pruning_diagnostics,
     summarize_gold_doc_ranks,
 )
 
@@ -122,7 +123,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional page-level adaptive token budget. 'disabled' keeps a fixed "
             "--approx-base-page-token-topk. 'coarse_entropy' expands K for pages whose "
-            "coarse pruning scores are diffuse and shrinks K for pages whose scores are concentrated."
+            "coarse pruning scores are diffuse and shrinks K for pages whose scores are concentrated. "
+            "'maxsim_mass' is only valid with --approx-base-page-token-selector=maxsim_greedy and "
+            "stops once the shifted MaxSim mass preservation target is reached."
         ),
     )
     parser.add_argument(
@@ -174,6 +177,8 @@ def parse_args() -> argparse.Namespace:
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
             "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
             "distinct informative query tokens before filling the rest globally. "
+            "'maxsim_greedy' greedily selects tokens that maximize retained page-query MaxSim "
+            "mass, providing a more principled approximation to the exact objective. "
             "'learned_token_topk' scores each page token with a small learned linear selector "
             "trained from exact MaxSim token winners. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
@@ -219,6 +224,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-maxsim-greedy-candidate-budget",
+        type=int,
+        default=0,
+        help=(
+            "When --approx-base-page-token-selector=maxsim_greedy, optionally pre-prune the "
+            "page token pool to this many coarse-score candidates before greedy MaxSim-preserving "
+            "selection. Set 0 to use all page tokens."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-maxsim-preservation-target",
+        type=float,
+        default=0.95,
+        help=(
+            "When --approx-base-page-token-adaptive-k-mode=maxsim_mass, stop greedy selection once "
+            "the shifted MaxSim mass preservation ratio reaches this target."
+        ),
+    )
+    parser.add_argument(
         "--approx-base-page-token-informative-visual-weight",
         type=float,
         default=1.0,
@@ -246,6 +270,14 @@ def parse_args() -> argparse.Namespace:
             "When --approx-base-page-token-selector=soft_label_prior or "
             "visual_patch_query_prior, add this bonus to page tokens whose patch "
             "label is visual before top-K selection."
+        ),
+    )
+    parser.add_argument(
+        "--report-pruning-diagnostics",
+        action="store_true",
+        help=(
+            "Export page-level pruning diagnostics such as MaxSim score preservation and query-argmax "
+            "retention. This is useful for scientific analysis but can slow approximate reranking."
         ),
     )
     parser.add_argument(
@@ -672,6 +704,70 @@ def median_or_none(values: list[int]) -> float | None:
     return float(statistics.median(values))
 
 
+def aggregate_token_pruning_diagnostic_summaries(qid_summaries: list[dict]) -> dict:
+    enabled_summaries = [item for item in qid_summaries if item.get("enabled")]
+    if not enabled_summaries:
+        return {
+            "enabled": False,
+            "qid_count": 0,
+            "page_count": 0,
+        }
+
+    total_pages = sum(int(item.get("page_count", 0)) for item in enabled_summaries)
+
+    def weighted_mean(key: str) -> float | None:
+        numerator = 0.0
+        denominator = 0
+        for item in enabled_summaries:
+            value = item.get(key)
+            page_count = int(item.get("page_count", 0))
+            if value is None or page_count <= 0:
+                continue
+            numerator += float(value) * page_count
+            denominator += page_count
+        if denominator == 0:
+            return None
+        return float(numerator / denominator)
+
+    def median_of_qid_metric(key: str) -> float | None:
+        values = [float(item[key]) for item in enabled_summaries if item.get(key) is not None]
+        if not values:
+            return None
+        return float(statistics.median(values))
+
+    return {
+        "enabled": True,
+        "qid_count": len(enabled_summaries),
+        "page_count": total_pages,
+        "mean_selected_token_count": weighted_mean("mean_selected_token_count"),
+        "median_selected_token_count_across_qids": median_of_qid_metric("median_selected_token_count"),
+        "mean_candidate_token_count": weighted_mean("mean_candidate_token_count"),
+        "mean_full_token_count": weighted_mean("mean_full_token_count"),
+        "mean_active_query_token_count": weighted_mean("mean_active_query_token_count"),
+        "mean_exact_score_loss": weighted_mean("mean_exact_score_loss"),
+        "mean_shifted_score_preservation_ratio": weighted_mean(
+            "mean_shifted_score_preservation_ratio"
+        ),
+        "median_shifted_score_preservation_ratio_across_qids": median_of_qid_metric(
+            "median_shifted_score_preservation_ratio"
+        ),
+        "mean_argmax_retention_ratio": weighted_mean("mean_argmax_retention_ratio"),
+        "median_argmax_retention_ratio_across_qids": median_of_qid_metric(
+            "median_argmax_retention_ratio"
+        ),
+        "mean_candidate_argmax_coverage_ratio": weighted_mean(
+            "mean_candidate_argmax_coverage_ratio"
+        ),
+        "median_candidate_argmax_coverage_ratio_across_qids": median_of_qid_metric(
+            "median_candidate_argmax_coverage_ratio"
+        ),
+        "perfect_argmax_retention_page_count": sum(
+            int(item.get("perfect_argmax_retention_page_count", 0))
+            for item in enabled_summaries
+        ),
+    }
+
+
 def infer_vqa_model_type(model_name_or_path: str) -> str:
     lowered = model_name_or_path.lower()
     if "florence" in lowered:
@@ -994,6 +1090,34 @@ def main() -> None:
         )
     if args.approx_base_page_token_redundancy_lambda < 0.0:
         raise ValueError("--approx-base-page-token-redundancy-lambda must be >= 0.")
+    if (
+        args.approx_base_page_token_selector != "maxsim_greedy"
+        and args.approx_base_page_token_maxsim_greedy_candidate_budget != 0
+    ):
+        raise ValueError(
+            "--approx-base-page-token-maxsim-greedy-candidate-budget is only valid with "
+            "--approx-base-page-token-selector=maxsim_greedy."
+        )
+    if args.approx_base_page_token_maxsim_greedy_candidate_budget < 0:
+        raise ValueError("--approx-base-page-token-maxsim-greedy-candidate-budget must be >= 0.")
+    if not (0.0 < args.approx_base_page_token_maxsim_preservation_target <= 1.0):
+        raise ValueError("--approx-base-page-token-maxsim-preservation-target must be in (0, 1].")
+    if (
+        args.approx_base_page_token_adaptive_k_mode == "maxsim_mass"
+        and args.approx_base_page_token_selector != "maxsim_greedy"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-adaptive-k-mode=maxsim_mass requires "
+            "--approx-base-page-token-selector=maxsim_greedy."
+        )
+    if (
+        args.approx_base_page_token_adaptive_k_mode != "maxsim_mass"
+        and args.approx_base_page_token_maxsim_preservation_target != 0.95
+    ):
+        raise ValueError(
+            "--approx-base-page-token-maxsim-preservation-target is only valid when "
+            "--approx-base-page-token-adaptive-k-mode=maxsim_mass."
+        )
     if args.approx_base_page_token_informative_visual_weight <= 0.0:
         raise ValueError("--approx-base-page-token-informative-visual-weight must be > 0.")
     if (
@@ -1438,6 +1562,9 @@ def main() -> None:
                         approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                        approx_page_token_maxsim_greedy_candidate_budget=args.approx_base_page_token_maxsim_greedy_candidate_budget,
+                        approx_page_token_maxsim_preservation_target=args.approx_base_page_token_maxsim_preservation_target,
+                        report_pruning_diagnostics=args.report_pruning_diagnostics,
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                         page_batch_size=args.base_only_page_batch_size,
@@ -1472,6 +1599,9 @@ def main() -> None:
                         approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                        approx_page_token_maxsim_greedy_candidate_budget=args.approx_base_page_token_maxsim_greedy_candidate_budget,
+                        approx_page_token_maxsim_preservation_target=args.approx_base_page_token_maxsim_preservation_target,
+                        report_pruning_diagnostics=args.report_pruning_diagnostics,
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                         page_batch_size=args.base_only_page_batch_size,
@@ -1679,6 +1809,7 @@ def main() -> None:
             if args.diagnose_coarse_pre_exact
             else []
         )
+        token_pruning_diagnostic_summary = summarize_token_pruning_diagnostics(page_features)
         coarse_pre_exact_first_gold_page_rank = (
             coarse_pre_exact_page_hits[0]["rank"] if coarse_pre_exact_page_hits else None
         )
@@ -1736,9 +1867,12 @@ def main() -> None:
             "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
             "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
             "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
+            "approx_base_page_token_maxsim_greedy_candidate_budget": args.approx_base_page_token_maxsim_greedy_candidate_budget,
+            "approx_base_page_token_maxsim_preservation_target": args.approx_base_page_token_maxsim_preservation_target,
             "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
             "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
             "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
+            "report_pruning_diagnostics": args.report_pruning_diagnostics,
             "base_only_page_batch_size": args.base_only_page_batch_size,
             "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -1781,6 +1915,7 @@ def main() -> None:
             "doc_feature_record_count": len(doc_feature_records),
             "vlm_record_count": len(vlm_records),
             "vlm_records": vlm_records,
+            "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
             "baseline_first_gold_doc_rank": baseline_first_gold_doc_rank,
             "baseline_first_gold_page_rank": baseline_first_gold_page_rank,
             "baseline_gold_page_hits_top10": baseline_page_hits[:10],
@@ -1828,6 +1963,9 @@ def main() -> None:
         for row in all_rows
         if row["reranked_first_gold_page_rank_any_gold_doc_page"] is not None
     ]
+    token_pruning_diagnostic_summary = aggregate_token_pruning_diagnostic_summaries(
+        [row["token_pruning_diagnostic_summary"] for row in all_rows]
+    )
 
     summary = {
         "input_qid_jsonl": args.qid_jsonl,
@@ -1848,9 +1986,12 @@ def main() -> None:
         "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
+        "approx_base_page_token_maxsim_greedy_candidate_budget": args.approx_base_page_token_maxsim_greedy_candidate_budget,
+        "approx_base_page_token_maxsim_preservation_target": args.approx_base_page_token_maxsim_preservation_target,
         "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
+        "report_pruning_diagnostics": args.report_pruning_diagnostics,
         "base_only_page_batch_size": args.base_only_page_batch_size,
         "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -1894,6 +2035,7 @@ def main() -> None:
         "grid_visual_values": grid_visual_values,
         "grid_non_visual_values": grid_non_visual_values,
         "grid_balance_values": grid_balance_values,
+        "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
         "num_qids": len(all_rows),
         "baseline_top4_doc_count": baseline_top4_doc,
         "coarse_pre_exact_top4_doc_count": (
