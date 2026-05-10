@@ -1348,3 +1348,326 @@ If visual-aware retrieval work continues, the most justified next directions are
      - and strong non-visual relevance to the same query
 
 At this point, more small `top256` heuristic tweaks are unlikely to produce large gains by themselves.
+
+## Addendum: 2026-05-10
+
+### Reproducibility reset for `plain_top256`
+
+The old saved artifact:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/imagelistq_all_rerank_baseonly_top256_v6.summary.json`
+
+should now be treated as a legacy reference, not the main reproducible baseline.
+
+Controlled reruns showed:
+
+- old artifact:
+  - `79 / 141` top-4
+- current code on the old retrieval JSON:
+  - `78 / 141` top-4
+- current code on the current `nprobe=1` retrieval JSON:
+  - `78 / 141` top-4
+
+So the `79 -> 78` difference is not caused by retrieval-pool drift. It is a reranker-side legacy artifact difference concentrated in one boundary qid:
+
+- `4fc70c64c8abe430a1af267700e290b8`
+  - old artifact reranked gold-doc rank:
+    - `4`
+  - current rerun on the same old retrieval pool:
+    - `5`
+
+The old artifact could not be reproduced from the committed code states tested in the relevant `top256` development window, so it is best explained by a slightly different local state or invocation at the time the old file was produced.
+
+### Current reproducible `ImageListQ` scoreboard
+
+Reproducible current-code results on all `141` `ImageListQ` qids:
+
+- base-only exact page MaxSim:
+  - `78 / 141` top-4
+- base-only `top256`, current `nprobe=1` retrieval:
+  - `78 / 141` top-4
+- base-only `top256`, `nprobe=4` retrieval:
+  - `79 / 141` top-4
+- base-only `top256`, `nprobe=8` retrieval:
+  - `79 / 141` top-4
+
+Practical conclusion:
+
+- the current reproducible standalone baseline should be:
+  - base-only `top256`
+  - `nprobe = 4`
+  - `79 / 141` top-4
+- `nprobe=8` gives no extra gain over `nprobe=4`
+
+### Full-dev base-only `top256`
+
+The full MMQA dev set (`2441` qids) was first aggregated from the chunked `mmqa_dev_top256` outputs using the older `nprobe=1` retrieval pool:
+
+- old `nprobe=1` baseline top-4:
+  - `2054 / 2441`
+  - `84.15%`
+- old `nprobe=1` + base-only `top256` top-4:
+  - `2256 / 2441`
+  - `92.42%`
+- gain over old `nprobe=1` baseline:
+  - `+202` top-4 qids
+  - about `+8.28` points
+
+Old `nprobe=1` totals:
+
+- `improved_doc_rank_count = 592`
+- `worsened_doc_rank_count = 197`
+
+The same full-dev chunked run was then repeated with the stronger `nprobe=4` retrieval pool:
+
+- `nprobe=4` baseline top-4:
+  - `2193 / 2441`
+  - `89.84%`
+- `nprobe=4` + base-only `top256` top-4:
+  - `2277 / 2441`
+  - `93.28%`
+- gain over `nprobe=4` baseline:
+  - `+84` top-4 qids
+  - about `+3.44` points
+
+`nprobe=4` totals:
+
+- `improved_doc_rank_count = 425`
+- `worsened_doc_rank_count = 201`
+
+Direct comparison:
+
+- `nprobe=4` baseline vs old `nprobe=1` baseline:
+  - `+139` top-4 qids
+- `nprobe=4` + `top256` vs old `nprobe=1` + `top256`:
+  - `+21` top-4 qids
+
+Interpretation:
+
+- `nprobe=4` is clearly worth using for broad full-dev experiments
+- full-dev is much more sensitive to upstream retrieval quality than the `141` `ImageListQ` slice suggested
+- current best reproducible broad intrinsic setup is:
+  - `nprobe=4` retrieval
+  - base-only `top256`
+
+### Gold-doc coverage split: retrieval bottleneck vs reranking bottleneck
+
+Old `nprobe=1` top-1000-page-pool gold-doc coverage on the `141` `ImageListQ` qids:
+
+- average gold-doc coverage:
+  - `92.0804%`
+- full coverage qids:
+  - `129 / 141`
+- zero-coverage qids:
+  - `11 / 141`
+- histogram:
+  - `{0: 11, 25: 0, 50: 0, 75: 1, 100: 129}`
+
+On the `19` near-miss qids:
+
+- average gold-doc coverage:
+  - `100.0%`
+- full coverage qids:
+  - `19 / 19`
+- zero-coverage qids:
+  - `0 / 19`
+
+This cleanly separates the problem into:
+
+1. retrieval failures:
+   - `11` qids with zero gold-doc coverage in the fixed pool
+2. reranking failures:
+   - the `19` near-miss qids are all fully covered and are pure reranking difficulty
+
+### `nprobe` changes retrieval coverage, but only slightly improves top-4
+
+On the `141` `ImageListQ` qids, gold-doc coverage by retrieval pool:
+
+- old `nprobe=1`:
+  - average `92.0804%`
+  - full coverage `129`
+  - zero coverage `11`
+- new `nprobe=1`:
+  - same as old
+- `nprobe=4`:
+  - average `96.6903%`
+  - full coverage `135`
+  - zero coverage `4`
+- `nprobe=8`:
+  - average `96.6903%`
+  - full coverage `135`
+  - zero coverage `4`
+- `nprobe=16`:
+  - average `95.9811%`
+  - full coverage `134`
+  - zero coverage `5`
+
+Relative to old `nprobe=1`, `nprobe=4` rescued `8` of the old `11` zero-coverage qids.
+
+But the `top256` top-4 impact was small:
+
+- current `nprobe=1`:
+  - `78 / 141`
+- `nprobe=4`:
+  - `79 / 141`
+- `nprobe=8`:
+  - `79 / 141`
+
+The single strict `nprobe=4` gain over current `nprobe=1` was:
+
+- `c3bcf58405d53cdcc9b034c44541e99f`
+  - `nprobe=1` baseline gold-doc rank:
+    - `244`
+  - `nprobe=1` reranked gold-doc rank:
+    - `16`
+  - `nprobe=4` baseline gold-doc rank:
+    - `53`
+  - `nprobe=4` reranked gold-doc rank:
+    - `1`
+
+So `nprobe=4` is the best practical retrieval setting, but coverage gains rarely become large top-4 gains under the current reranker.
+
+### Exact-after-pruning is the essential ranking step
+
+The coarse-pre-exact diagnostic was added to isolate how much of `plain_top256` comes from:
+
+1. the coarse pruning score itself
+2. the final exact MaxSim on the retained tokens
+
+On all `141` `ImageListQ` qids:
+
+- baseline top-4:
+  - `53`
+- coarse pre-exact top-4:
+  - `36`
+- exact-after-pruning top-4:
+  - `78`
+
+Additional diagnostics:
+
+- `exact_vs_coarse_improved_doc_rank_count = 86`
+- `exact_vs_coarse_worsened_doc_rank_count = 30`
+- `exact_vs_coarse_unchanged_doc_rank_count = 14`
+- median gold-doc rank:
+  - coarse pre-exact:
+    - `13.0`
+  - exact-after-pruning:
+    - `3.0`
+
+Interpretation:
+
+- the coarse score is useful for selecting which page tokens to keep
+- but it is a poor global ranking score
+- the exact MaxSim step after pruning does almost all of the actual ranking work
+
+### Informative-visual query weighting for `query_mean` is active but ineffective
+
+The new informative-visual weighting branch was checked carefully.
+
+Findings:
+
+- `visqweight_1p0` matches a fresh current-code plain-top256 control exactly
+- increasing the weight to:
+  - `1.5`
+  - `2.0`
+  - `3.0`
+  did not change end-to-end top-4 results on the `19` near-miss qids
+- `18 / 19` near-miss qids do contain informative visual query tokens
+
+Page-level check on one qid (`18d374751a67eab5d836ebc2ac95ce82`) showed:
+
+- informative visual query tokens:
+  - `['eagle', 'symbol']`
+- `max_abs_score_diff = 0.0307357758`
+- `mean_abs_score_diff = 0.0062555741`
+- `top256_overlap = 246 / 256`
+- `changed_tokens = 10`
+
+So the weighting branch is not broken:
+
+- it changes coarse scores
+- it changes the retained top-256 page-token set
+- but it still does not improve final ranking on the hard near-miss subset
+
+This branch should currently be treated as:
+
+- mechanically correct
+- scientifically negative
+- not a strong standalone improvement direction
+
+### New scientific branch: principled MaxSim-preserving token pruning
+
+Commit now on `main`:
+
+- `324fc61` Add MaxSim-greedy token pruning diagnostics
+
+This adds a new selector family intended to turn `plain_top256` from a heuristic into a more paper-oriented method.
+
+New selector:
+
+- `--approx-base-page-token-selector maxsim_greedy`
+
+Idea:
+
+- greedily pick page tokens that maximize retained page-query MaxSim mass, rather than using only `query_mean` coarse ranking
+
+New adaptive mode:
+
+- `--approx-base-page-token-adaptive-k-mode maxsim_mass`
+
+Idea:
+
+- stop greedy selection once shifted MaxSim mass preservation reaches a target
+- this turns `K` into an adaptive budget rather than a fixed constant
+
+New diagnostics:
+
+- `--report-pruning-diagnostics`
+
+Recorded per-page and aggregated metrics include:
+
+- selected token count
+- candidate token count
+- full token count
+- active query token count
+- exact score loss
+- shifted MaxSim mass preservation ratio
+- argmax retention ratio
+- candidate argmax coverage ratio
+
+This is the current scientifically motivated next branch to evaluate.
+
+The branch is designed to support a stronger paper story:
+
+1. objective-aligned pruning
+   - the selector tries to preserve the exact MaxSim objective directly
+2. adaptive compute control
+   - stop once a target preservation threshold is reached
+3. measurable explanation of why pruning works
+   - score preservation
+   - argmax retention
+   - candidate coverage
+
+### Current paper-oriented recommendation
+
+If this line of work is pushed toward a peer-reviewed paper, the best next experimental ladder is:
+
+1. baseline control:
+   - current reproducible `top256`
+   - `global_topk`
+   - `nprobe=4`
+2. principled fixed-budget selector:
+   - `maxsim_greedy`
+   - fixed `K=256`
+3. adaptive selector:
+   - `maxsim_greedy`
+   - `maxsim_mass`
+   - target preservation around `0.95`
+   - adaptive `K` range like `[128, 384]`
+
+The branch is worth keeping only if one of the following happens:
+
+- it beats current reproducible `79 / 141` top-4
+- or it matches `79 / 141` while using materially fewer retained tokens on average
+
+That would provide a real accuracy-efficiency tradeoff story instead of another small heuristic tweak.
