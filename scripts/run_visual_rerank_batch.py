@@ -230,7 +230,10 @@ def parse_args() -> argparse.Namespace:
         help=(
             "When --approx-base-page-token-selector=maxsim_greedy, optionally pre-prune the "
             "page token pool to this many coarse-score candidates before greedy MaxSim-preserving "
-            "selection. Set 0 to use all page tokens."
+            "selection. Set 0 to use all page tokens. When this is > 0 and "
+            "--report-pruning-diagnostics is disabled, the selector only builds the "
+            "page-query score matrix inside this candidate pool, giving a real two-stage "
+            "approximation rather than a near-exact analysis path."
         ),
     )
     parser.add_argument(
@@ -277,7 +280,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Export page-level pruning diagnostics such as MaxSim score preservation and query-argmax "
-            "retention. This is useful for scientific analysis but can slow approximate reranking."
+            "retention. This is useful for scientific analysis but can slow approximate reranking. "
+            "For maxsim_greedy it forces a full-page diagnostic pass even when a cheaper "
+            "candidate-budgeted run would otherwise avoid that."
         ),
     )
     parser.add_argument(

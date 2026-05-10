@@ -572,35 +572,39 @@ def _build_token_pruning_diagnostics(
     )
 
 
+def _select_candidate_token_indices_from_coarse_scores(
+    *,
+    coarse_scores: torch.Tensor,
+    candidate_budget: int,
+) -> list[int]:
+    token_count = int(coarse_scores.shape[0])
+    if token_count <= 0:
+        return []
+    if candidate_budget <= 0 or candidate_budget >= token_count:
+        return list(range(token_count))
+    return _topk_indices_from_scores(scores=coarse_scores, k=candidate_budget)
+
+
 def _select_maxsim_greedy_token_indices(
     *,
-    score_matrix_active: torch.Tensor,
-    coarse_scores: torch.Tensor,
+    candidate_indices: list[int],
+    candidate_score_matrix_active: torch.Tensor,
+    coarse_scores_candidate: torch.Tensor,
     k: int,
-    candidate_budget: int,
     adaptive_k_mode: str,
     adaptive_k_min: int,
     adaptive_k_max: int,
     preservation_target: float,
-) -> tuple[list[int], list[int]]:
+) -> list[int]:
     import torch
 
-    token_count = int(score_matrix_active.shape[0])
-    if token_count <= 0 or k <= 0:
-        return [], []
-
-    candidate_indices = list(range(token_count))
-    if candidate_budget > 0 and candidate_budget < token_count:
-        candidate_indices = _topk_indices_from_scores(scores=coarse_scores, k=candidate_budget)
     candidate_count = len(candidate_indices)
-    if candidate_count <= 0:
-        return [], []
+    if candidate_count <= 0 or k <= 0:
+        return []
 
-    candidate_index_tensor = torch.tensor(candidate_indices, device=score_matrix_active.device, dtype=torch.long)
-    candidate_scores = score_matrix_active.index_select(0, candidate_index_tensor)
-    column_shift = torch.clamp(-score_matrix_active.min(dim=0).values, min=0.0)
-    shifted_candidate_scores = candidate_scores + column_shift.unsqueeze(0)
-    shifted_full_best_scores = (score_matrix_active + column_shift.unsqueeze(0)).max(dim=0).values
+    column_shift = torch.clamp(-candidate_score_matrix_active.min(dim=0).values, min=0.0)
+    shifted_candidate_scores = candidate_score_matrix_active + column_shift.unsqueeze(0)
+    shifted_full_best_scores = shifted_candidate_scores.max(dim=0).values
     shifted_full_score = float(shifted_full_best_scores.sum().item())
 
     if adaptive_k_mode == "maxsim_mass":
@@ -613,16 +617,24 @@ def _select_maxsim_greedy_token_indices(
         target_k = target_max
 
     if target_k <= 0:
-        return [], candidate_indices
+        return []
 
     selected_local: list[int] = []
-    available_mask = torch.ones(candidate_count, dtype=torch.bool, device=score_matrix_active.device)
-    current_best = torch.zeros(
-        int(score_matrix_active.shape[1]),
-        dtype=shifted_candidate_scores.dtype,
-        device=score_matrix_active.device,
+    available_mask = torch.ones(
+        candidate_count,
+        dtype=torch.bool,
+        device=candidate_score_matrix_active.device,
     )
-    neg_inf = torch.tensor(float("-inf"), dtype=shifted_candidate_scores.dtype, device=score_matrix_active.device)
+    current_best = torch.zeros(
+        int(candidate_score_matrix_active.shape[1]),
+        dtype=shifted_candidate_scores.dtype,
+        device=candidate_score_matrix_active.device,
+    )
+    neg_inf = torch.tensor(
+        float("-inf"),
+        dtype=shifted_candidate_scores.dtype,
+        device=candidate_score_matrix_active.device,
+    )
 
     while len(selected_local) < target_k:
         marginal_gain = torch.relu(shifted_candidate_scores - current_best.unsqueeze(0)).sum(dim=1)
@@ -643,7 +655,6 @@ def _select_maxsim_greedy_token_indices(
                 break
 
     if len(selected_local) < target_k:
-        coarse_scores_candidate = coarse_scores.index_select(0, candidate_index_tensor)
         for local_idx in _topk_indices_from_scores(scores=coarse_scores_candidate, k=candidate_count):
             local_idx = int(local_idx)
             if local_idx in selected_local:
@@ -653,7 +664,7 @@ def _select_maxsim_greedy_token_indices(
                 break
 
     selected_indices = [candidate_indices[local_idx] for local_idx in selected_local[:target_k]]
-    return selected_indices, candidate_indices
+    return selected_indices
 
 
 def compute_approx_base_page_score(
@@ -1315,7 +1326,10 @@ def select_page_token_indices_for_base_only(
             query_emb=query_emb,
             query_score_mask=query_score_mask,
         )
-        score_matrix_active = page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+        selector_candidate_indices = _select_candidate_token_indices_from_coarse_scores(
+            coarse_scores=coarse_scores,
+            candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+        )
         if approx_page_token_adaptive_k_mode == "maxsim_mass":
             topk = min(max(int(approx_page_token_adaptive_k_max), 1), int(page_emb.shape[0]))
         else:
@@ -1326,17 +1340,31 @@ def select_page_token_indices_for_base_only(
                 adaptive_k_min=approx_page_token_adaptive_k_min,
                 adaptive_k_max=approx_page_token_adaptive_k_max,
             )
-        selected_indices, selector_candidate_indices = _select_maxsim_greedy_token_indices(
-            score_matrix_active=score_matrix_active,
-            coarse_scores=coarse_scores,
+        candidate_index_tensor = torch.tensor(
+            selector_candidate_indices,
+            device=page_emb.device,
+            dtype=torch.long,
+        )
+        candidate_page_emb = page_emb.index_select(0, candidate_index_tensor)
+        candidate_score_matrix_active = (
+            candidate_page_emb.to(dtype=torch.float32)
+            @ query_emb_active.to(dtype=torch.float32).T
+        )
+        coarse_scores_candidate = coarse_scores.index_select(0, candidate_index_tensor)
+        selected_indices = _select_maxsim_greedy_token_indices(
+            candidate_indices=selector_candidate_indices,
+            candidate_score_matrix_active=candidate_score_matrix_active,
+            coarse_scores_candidate=coarse_scores_candidate,
             k=topk,
-            candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
             adaptive_k_mode=approx_page_token_adaptive_k_mode,
             adaptive_k_min=approx_page_token_adaptive_k_min,
             adaptive_k_max=approx_page_token_adaptive_k_max,
             preservation_target=approx_page_token_maxsim_preservation_target,
         )
         if report_pruning_diagnostics:
+            score_matrix_active = (
+                page_emb.to(dtype=torch.float32) @ query_emb_active.to(dtype=torch.float32).T
+            )
             diagnostics = _build_token_pruning_diagnostics(
                 score_matrix_active=score_matrix_active,
                 selected_indices=selected_indices,
@@ -2588,7 +2616,10 @@ def parse_args() -> argparse.Namespace:
         help=(
             "When --approx-base-page-token-selector=maxsim_greedy, optionally pre-prune the "
             "page token pool to this many coarse-score candidates before greedy MaxSim-preserving "
-            "selection. Set 0 to use all page tokens."
+            "selection. Set 0 to use all page tokens. When this is > 0 and "
+            "--report-pruning-diagnostics is disabled, the selector only builds the "
+            "page-query score matrix inside this candidate pool, giving a real two-stage "
+            "approximation rather than a near-exact analysis path."
         ),
     )
     parser.add_argument(
@@ -2635,7 +2666,9 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help=(
             "Export page-level pruning diagnostics such as MaxSim score preservation and query-argmax "
-            "retention. This is useful for scientific analysis but can slow approximate reranking."
+            "retention. This is useful for scientific analysis but can slow approximate reranking. "
+            "For maxsim_greedy it forces a full-page diagnostic pass even when a cheaper "
+            "candidate-budgeted run would otherwise avoid that."
         ),
     )
     parser.add_argument(
