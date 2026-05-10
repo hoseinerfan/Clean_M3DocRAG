@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.rerank_target_docs_visual_aware import (
     APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
     APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES,
+    APPROX_BASE_PAGE_TOKEN_ADAPTIVE_K_MODE_CHOICES,
     BALANCE_SCORE_MODE_CHOICES,
     BASE_SCORE_SOURCE_CHOICES,
     COARSE_SCORE_DTYPE_CHOICES,
@@ -110,6 +111,32 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Top-K page tokens kept for query-guided pruning when "
             "--base-score-source=approx_page_maxsim_topk in base-only mode."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-adaptive-k-mode",
+        default="disabled",
+        choices=APPROX_BASE_PAGE_TOKEN_ADAPTIVE_K_MODE_CHOICES,
+        help=(
+            "Optional page-level adaptive token budget. 'disabled' keeps a fixed "
+            "--approx-base-page-token-topk. 'coarse_entropy' expands K for pages whose "
+            "coarse pruning scores are diffuse and shrinks K for pages whose scores are concentrated."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-adaptive-k-min",
+        type=int,
+        default=128,
+        help=(
+            "Minimum page-token budget when --approx-base-page-token-adaptive-k-mode is enabled."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-adaptive-k-max",
+        type=int,
+        default=384,
+        help=(
+            "Maximum page-token budget when --approx-base-page-token-adaptive-k-mode is enabled."
         ),
     )
     parser.add_argument(
@@ -866,6 +893,26 @@ def main() -> None:
         )
     if args.approx_base_page_token_scorer == "query_prototype_max" and args.approx_base_page_token_query_prototypes <= 0:
         raise ValueError("--approx-base-page-token-query-prototypes must be > 0.")
+    if args.approx_base_page_token_adaptive_k_min <= 0:
+        raise ValueError("--approx-base-page-token-adaptive-k-min must be > 0.")
+    if args.approx_base_page_token_adaptive_k_max <= 0:
+        raise ValueError("--approx-base-page-token-adaptive-k-max must be > 0.")
+    if args.approx_base_page_token_adaptive_k_min > args.approx_base_page_token_adaptive_k_max:
+        raise ValueError(
+            "--approx-base-page-token-adaptive-k-min must be <= "
+            "--approx-base-page-token-adaptive-k-max."
+        )
+    if (
+        args.approx_base_page_token_adaptive_k_mode == "disabled"
+        and (
+            args.approx_base_page_token_adaptive_k_min != 128
+            or args.approx_base_page_token_adaptive_k_max != 384
+        )
+    ):
+        raise ValueError(
+            "--approx-base-page-token-adaptive-k-min/max are only valid when "
+            "--approx-base-page-token-adaptive-k-mode is enabled."
+        )
     if (
         args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
         and args.approx_base_page_token_selector != "global_topk"
@@ -1317,6 +1364,9 @@ def main() -> None:
                         approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                         approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                         approx_page_token_redundancy_lambda=args.approx_base_page_token_redundancy_lambda,
+                        approx_page_token_adaptive_k_mode=args.approx_base_page_token_adaptive_k_mode,
+                        approx_page_token_adaptive_k_min=args.approx_base_page_token_adaptive_k_min,
+                        approx_page_token_adaptive_k_max=args.approx_base_page_token_adaptive_k_max,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
                         learned_token_selector_model=learned_token_selector_model,
@@ -1347,6 +1397,9 @@ def main() -> None:
                         approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                         approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
                         approx_page_token_redundancy_lambda=args.approx_base_page_token_redundancy_lambda,
+                        approx_page_token_adaptive_k_mode=args.approx_base_page_token_adaptive_k_mode,
+                        approx_page_token_adaptive_k_min=args.approx_base_page_token_adaptive_k_min,
+                        approx_page_token_adaptive_k_max=args.approx_base_page_token_adaptive_k_max,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
                         learned_token_selector_model=learned_token_selector_model,
@@ -1558,6 +1611,9 @@ def main() -> None:
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
             "base_score_source": args.base_score_source,
             "approx_base_page_token_topk": args.approx_base_page_token_topk,
+            "approx_base_page_token_adaptive_k_mode": args.approx_base_page_token_adaptive_k_mode,
+            "approx_base_page_token_adaptive_k_min": args.approx_base_page_token_adaptive_k_min,
+            "approx_base_page_token_adaptive_k_max": args.approx_base_page_token_adaptive_k_max,
             "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
             "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
             "approx_base_page_token_selector": args.approx_base_page_token_selector,
@@ -1655,6 +1711,9 @@ def main() -> None:
         "query_token_filter": args.query_token_filter,
         "base_score_source": args.base_score_source,
         "approx_base_page_token_topk": args.approx_base_page_token_topk,
+        "approx_base_page_token_adaptive_k_mode": args.approx_base_page_token_adaptive_k_mode,
+        "approx_base_page_token_adaptive_k_min": args.approx_base_page_token_adaptive_k_min,
+        "approx_base_page_token_adaptive_k_max": args.approx_base_page_token_adaptive_k_max,
         "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
         "approx_base_page_token_query_prototypes": args.approx_base_page_token_query_prototypes,
         "approx_base_page_token_selector": args.approx_base_page_token_selector,
