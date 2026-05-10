@@ -32,6 +32,7 @@ APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = (
 )
 APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = (
     "global_topk",
+    "redundancy_aware_topk",
     "spatial_quadrant_mix",
     "query_coverage_mix",
     "query_label_mix",
@@ -309,6 +310,7 @@ def compute_approx_base_page_score(
     page_meta: dict | None,
     approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
+    approx_page_token_redundancy_lambda: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
     learned_token_selector_model: dict | None = None,
@@ -329,6 +331,7 @@ def compute_approx_base_page_score(
         page_meta=page_meta,
         approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
+        approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
         learned_token_selector_model=learned_token_selector_model,
@@ -354,6 +357,65 @@ def _topk_indices_from_scores(
     if k <= 0:
         return []
     return torch.topk(scores, k=k, largest=True, sorted=False).indices.tolist()
+
+
+def _select_redundancy_aware_token_indices(
+    *,
+    page_emb: torch.Tensor,
+    coarse_scores: torch.Tensor,
+    k: int,
+    redundancy_lambda: float,
+) -> list[int]:
+    import torch
+
+    token_count = int(page_emb.shape[0])
+    k = min(max(int(k), 0), token_count)
+    if k <= 0:
+        return []
+    if k >= token_count or float(redundancy_lambda) <= 0.0:
+        return _topk_indices_from_scores(scores=coarse_scores, k=k)
+
+    page_emb_fp32 = page_emb.to(dtype=torch.float32)
+    normalized_page_emb = page_emb_fp32 / page_emb_fp32.norm(dim=1, keepdim=True).clamp_min(1e-6)
+    coarse_scores_fp32 = coarse_scores.to(dtype=torch.float32)
+    selected: list[int] = []
+    available_mask = torch.ones(token_count, dtype=torch.bool, device=page_emb.device)
+    max_redundancy = torch.zeros(token_count, dtype=torch.float32, device=page_emb.device)
+    neg_inf = torch.tensor(float("-inf"), dtype=torch.float32, device=page_emb.device)
+
+    first_idx = int(torch.argmax(coarse_scores_fp32).item())
+    selected.append(first_idx)
+    available_mask[first_idx] = False
+    if k == 1:
+        return selected
+
+    max_redundancy = torch.maximum(
+        max_redundancy,
+        torch.matmul(normalized_page_emb, normalized_page_emb[first_idx]),
+    )
+
+    while len(selected) < k:
+        utility = coarse_scores_fp32 - float(redundancy_lambda) * torch.clamp(max_redundancy, min=0.0)
+        utility = torch.where(available_mask, utility, neg_inf)
+        next_idx = int(torch.argmax(utility).item())
+        if not bool(available_mask[next_idx]):
+            break
+        selected.append(next_idx)
+        available_mask[next_idx] = False
+        max_redundancy = torch.maximum(
+            max_redundancy,
+            torch.matmul(normalized_page_emb, normalized_page_emb[next_idx]),
+        )
+
+    if len(selected) < k:
+        for idx in _topk_indices_from_scores(scores=coarse_scores_fp32, k=token_count):
+            idx = int(idx)
+            if idx in selected:
+                continue
+            selected.append(idx)
+            if len(selected) >= k:
+                break
+    return selected[:k]
 
 
 def _infer_spatial_quadrant_groups(page_token_count: int) -> tuple[int, list[list[int]]]:
@@ -593,6 +655,7 @@ def select_page_token_indices_for_base_only(
     page_meta: dict | None,
     approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
+    approx_page_token_redundancy_lambda: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
     learned_token_selector_model: dict | None = None,
@@ -614,6 +677,14 @@ def select_page_token_indices_for_base_only(
 
     if approx_page_token_selector == "global_topk":
         return _topk_indices_from_scores(scores=coarse_scores, k=topk)
+
+    if approx_page_token_selector == "redundancy_aware_topk":
+        return _select_redundancy_aware_token_indices(
+            page_emb=page_emb,
+            coarse_scores=coarse_scores,
+            k=topk,
+            redundancy_lambda=approx_page_token_redundancy_lambda,
+        )
 
     if approx_page_token_selector == "learned_token_topk":
         if learned_token_selector_model is None:
@@ -883,6 +954,7 @@ def maybe_prune_page_tokens_for_base_only(
     page_meta: dict | None,
     approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
+    approx_page_token_redundancy_lambda: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
     learned_token_selector_model: dict | None = None,
@@ -910,6 +982,7 @@ def maybe_prune_page_tokens_for_base_only(
         page_meta=page_meta,
         approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
+        approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
         learned_token_selector_model=learned_token_selector_model,
@@ -1556,6 +1629,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Token-selection strategy used before top-K approximate MaxSim pruning. "
             "'global_topk' is the current global-only selection. "
+            "'redundancy_aware_topk' greedily penalizes page tokens that are too similar to "
+            "already selected tokens, so the top-K budget covers more diverse evidence. "
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
             "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
             "distinct informative query tokens before filling the rest globally. "
@@ -1592,6 +1667,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "When --approx-base-page-token-selector=query_coverage_mix, reserve this many "
             "token slots for per-query-token coverage before filling the rest globally."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-redundancy-lambda",
+        type=float,
+        default=0.1,
+        help=(
+            "When --approx-base-page-token-selector=redundancy_aware_topk, subtract this times "
+            "the maximum cosine similarity to already selected page tokens during greedy selection."
         ),
     )
     parser.add_argument(
@@ -2604,6 +2688,7 @@ def compute_base_only_page_feature(
     page_meta: dict | None = None,
     approx_page_token_coverage_reserve: int = 64,
     approx_page_token_label_reserve: int = 64,
+    approx_page_token_redundancy_lambda: float = 0.1,
     approx_page_token_soft_visual_query_weight: float = 0.5,
     approx_page_token_soft_patch_visual_bonus: float = 0.2,
     learned_token_selector_model: dict | None = None,
@@ -2624,6 +2709,7 @@ def compute_base_only_page_feature(
         page_meta=page_meta,
         approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
         approx_page_token_label_reserve=approx_page_token_label_reserve,
+        approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
         learned_token_selector_model=learned_token_selector_model,
@@ -2723,6 +2809,7 @@ def compute_base_only_page_features(
     page_meta_by_uid: dict[str, dict] | None,
     approx_page_token_coverage_reserve: int,
     approx_page_token_label_reserve: int,
+    approx_page_token_redundancy_lambda: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
     learned_token_selector_model: dict | None,
@@ -2775,6 +2862,7 @@ def compute_base_only_page_features(
                         ),
                         approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
                         approx_page_token_label_reserve=approx_page_token_label_reserve,
+                        approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
                         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
                         learned_token_selector_model=learned_token_selector_model,
@@ -3741,6 +3829,16 @@ def main() -> None:
             "--approx-base-page-token-selector=query_coverage_mix."
         )
     if (
+        args.approx_base_page_token_selector != "redundancy_aware_topk"
+        and args.approx_base_page_token_redundancy_lambda != 0.1
+    ):
+        raise ValueError(
+            "--approx-base-page-token-redundancy-lambda is only valid with "
+            "--approx-base-page-token-selector=redundancy_aware_topk."
+        )
+    if args.approx_base_page_token_redundancy_lambda < 0.0:
+        raise ValueError("--approx-base-page-token-redundancy-lambda must be >= 0.")
+    if (
         args.approx_base_page_token_selector == "learned_token_topk"
         and not args.learned_token_selector_model
     ):
@@ -4130,6 +4228,7 @@ def main() -> None:
                 page_meta_by_uid=page_meta,
                 approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                 approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
+                approx_page_token_redundancy_lambda=args.approx_base_page_token_redundancy_lambda,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
                 learned_token_selector_model=learned_token_selector_model,
@@ -4159,6 +4258,7 @@ def main() -> None:
                 page_meta_by_uid=page_meta,
                 approx_page_token_coverage_reserve=args.approx_base_page_token_coverage_reserve,
                 approx_page_token_label_reserve=args.approx_base_page_token_label_reserve,
+                approx_page_token_redundancy_lambda=args.approx_base_page_token_redundancy_lambda,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
                 learned_token_selector_model=learned_token_selector_model,
@@ -4307,6 +4407,7 @@ def main() -> None:
         "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
         "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
+        "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
         "base_only_page_batch_size": args.base_only_page_batch_size,
@@ -4376,6 +4477,7 @@ def main() -> None:
                 "approx_base_page_token_spatial_reserve": args.approx_base_page_token_spatial_reserve,
                 "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
                 "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
+                "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
                 "base_only_page_batch_size": args.base_only_page_batch_size,
                 "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
                 "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -4414,6 +4516,7 @@ def main() -> None:
     print(f"approx_base_page_token_spatial_reserve: {args.approx_base_page_token_spatial_reserve}")
     print(f"approx_base_page_token_coverage_reserve: {args.approx_base_page_token_coverage_reserve}")
     print(f"approx_base_page_token_label_reserve: {args.approx_base_page_token_label_reserve}")
+    print(f"approx_base_page_token_redundancy_lambda: {args.approx_base_page_token_redundancy_lambda}")
     print(f"learned_token_selector_model: {args.learned_token_selector_model}")
     print(f"base_only_page_batch_size: {args.base_only_page_batch_size}")
     print(f"approx_base_page_token_coarse_dtype: {args.approx_base_page_token_coarse_dtype}")
