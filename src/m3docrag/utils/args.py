@@ -49,6 +49,10 @@ class TrainingArguments(transformers.TrainingArguments):
 
     # Embedding indexing settings
     faiss_index_type: str = field(default='ivfflat', metadata={"choices": ['flatip', 'ivfflat', 'ivfpq']})
+    faiss_nprobe: int = field(
+        default=1,
+        metadata={"help": "FAISS IVF nprobe used at retrieval time. Ignored for flat indexes."},
+    )
 
 
     # Local paths

@@ -39,6 +39,12 @@ def parse_args() -> argparse.Namespace:
         default="ivfflat",
         choices=["flatip", "ivfflat", "ivfpq"],
     )
+    parser.add_argument(
+        "--faiss_nprobe",
+        type=int,
+        default=1,
+        help="FAISS IVF nprobe used at retrieval time. Ignored for flat indexes.",
+    )
     parser.add_argument("--retrieval_model_type", default="colpali", choices=["colpali"])
     parser.add_argument("--retrieval_model_name_or_path", default="colpaligemma-3b-pt-448-base")
     parser.add_argument("--retrieval_adapter_model_name_or_path", default="colpali-v1.2")
@@ -194,6 +200,10 @@ def main() -> None:
     dataset = M3DocVQADataset(dataset_args)
 
     index = faiss.read_index(str(index_dir / "index.bin"))
+    if hasattr(index, "nprobe"):
+        if args.faiss_nprobe < 1:
+            raise ValueError(f"faiss_nprobe must be >= 1, got {args.faiss_nprobe}")
+        index.nprobe = int(args.faiss_nprobe)
     docid2embs = dataset.load_all_embeddings()
     token2pageuid, all_token_embeddings = build_flattened_index_inputs(docid2embs)
     all_token_embeddings_np = all_token_embeddings.float().numpy()
@@ -220,6 +230,7 @@ def main() -> None:
         "split": args.split,
         "embedding_name": args.embedding_name,
         "faiss_index_type": args.faiss_index_type,
+        "faiss_nprobe": args.faiss_nprobe,
         "n_retrieval_pages": args.n_retrieval_pages,
         "query_token_filter": args.query_token_filter,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,

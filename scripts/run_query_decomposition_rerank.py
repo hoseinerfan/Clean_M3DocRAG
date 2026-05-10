@@ -68,6 +68,12 @@ def parse_args() -> argparse.Namespace:
         choices=["flatip", "ivfflat", "ivfpq"],
     )
     parser.add_argument(
+        "--faiss_nprobe",
+        type=int,
+        default=1,
+        help="FAISS IVF nprobe used at retrieval time. Ignored for flat indexes.",
+    )
+    parser.add_argument(
         "--query_token_filter",
         default="full",
         choices=QUERY_TOKEN_FILTER_CHOICES,
@@ -446,6 +452,10 @@ def main() -> None:
 
     index_dir = resolve_index_dir(args.embedding_name, args.faiss_index_type)
     index = faiss.read_index(str(index_dir / "index.bin"))
+    if hasattr(index, "nprobe"):
+        if args.faiss_nprobe < 1:
+            raise ValueError(f"faiss_nprobe must be >= 1, got {args.faiss_nprobe}")
+        index.nprobe = int(args.faiss_nprobe)
     token2pageuid, all_token_embeddings = build_flattened_index_inputs(docid2embs)
     all_token_embeddings_np = all_token_embeddings.float().numpy()
 
@@ -582,6 +592,7 @@ def main() -> None:
         "top_pages_per_query": args.top_pages_per_query,
         "embedding_name": args.embedding_name,
         "faiss_index_type": args.faiss_index_type,
+        "faiss_nprobe": args.faiss_nprobe,
         "query_token_filter": args.query_token_filter,
         "retrieval_query_token_filter": args.retrieval_query_token_filter,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,

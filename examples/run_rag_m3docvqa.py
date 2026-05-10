@@ -352,6 +352,11 @@ def main():
         import faiss
 
         index = faiss.read_index(str(local_index_dir / "index.bin"))
+        if hasattr(index, "nprobe"):
+            if args.faiss_nprobe < 1:
+                raise ValueError(f"faiss_nprobe must be >= 1, got {args.faiss_nprobe}")
+            index.nprobe = int(args.faiss_nprobe)
+            logger.info(f"Set FAISS nprobe={index.nprobe}")
         logger.info("Loading faiss index -- done")
 
     def list_collate_fn(batch):
@@ -397,15 +402,18 @@ def main():
     else:
         ret_name = args.retrieval_model_name_or_path
     rerank_suffix = "_ignorepadscore" if args.ignore_pad_scores_in_final_ranking else ""
+    nprobe_suffix = ""
+    if args.faiss_index_type != "flatip":
+        nprobe_suffix = f"_nprobe{args.faiss_nprobe}"
 
     if args.retrieval_only:
         pred_save_fname = (
-            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}{rerank_suffix}"
+            f"{ret_name}_{args.faiss_index_type}{nprobe_suffix}_ret{args.n_retrieval_pages}{rerank_suffix}"
             f"_{experiment_date}.json"
         )
     else:
         pred_save_fname = (
-            f"{ret_name}_{args.faiss_index_type}_ret{args.n_retrieval_pages}{rerank_suffix}"
+            f"{ret_name}_{args.faiss_index_type}{nprobe_suffix}_ret{args.n_retrieval_pages}{rerank_suffix}"
             f"_{args.model_name_or_path}_{experiment_date}.json"
         )
     results_file = save_dir / pred_save_fname
