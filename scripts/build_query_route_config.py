@@ -28,12 +28,14 @@ from scripts.rerank_target_docs_visual_aware import (
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Build a simple binary query-routing config from an existing base run and "
-            "an existing visual rerank run."
+            "Build a simple binary query-routing config from two existing run JSONLs "
+            "and optionally materialize the routed mixture offline."
         )
     )
     parser.add_argument("--baseline-run", required=True, help="Reference run_visual_rerank_batch JSONL")
-    parser.add_argument("--candidate-run", required=True, help="Candidate visual-arm run_visual_rerank_batch JSONL")
+    parser.add_argument("--candidate-run", required=True, help="Candidate-arm run_visual_rerank_batch JSONL")
+    parser.add_argument("--baseline-label", default="baseline", help="Human-readable label for --baseline-run.")
+    parser.add_argument("--candidate-label", default="candidate", help="Human-readable label for --candidate-run.")
     parser.add_argument("--gold", required=True, help="Path to MMQA_<split>.jsonl")
     parser.add_argument("--splice-query-token-labels", required=True)
     parser.add_argument("--retrieval_model_name_or_path", default="colpaligemma-3b-pt-448-base")
@@ -46,6 +48,16 @@ def parse_args() -> argparse.Namespace:
         "--output-json",
         required=True,
         help="Path to save the learned route config JSON.",
+    )
+    parser.add_argument(
+        "--output-routed-jsonl",
+        default="",
+        help="Optional JSONL path to save the offline routed mixture of --baseline-run and --candidate-run.",
+    )
+    parser.add_argument(
+        "--output-summary-json",
+        default="",
+        help="Optional JSON path to save an offline routed summary.",
     )
     return parser.parse_args()
 
@@ -151,6 +163,35 @@ def evaluate_selected_rules(
             -len(routed_visual_qids),
         ),
     }
+
+
+def build_routed_rows(
+    *,
+    qids: list[str],
+    baseline_rows: dict[str, dict],
+    candidate_rows: dict[str, dict],
+    route_features_by_qid: dict[str, dict],
+    route_config: dict,
+    baseline_label: str,
+    candidate_label: str,
+) -> list[dict]:
+    routed_rows: list[dict] = []
+    for qid in qids:
+        route_info = decide_query_route(
+            route_config=route_config,
+            route_features=route_features_by_qid[qid],
+        )
+        use_candidate = route_info["route_decision"] == "visual"
+        source_row = candidate_rows[qid] if use_candidate else baseline_rows[qid]
+        routed_row = dict(source_row)
+        routed_row["route_decision"] = route_info["route_decision"]
+        routed_row["route_matched_rule_index"] = route_info["matched_rule_index"]
+        routed_row["route_matched_rule"] = route_info["matched_rule"]
+        routed_row["route_arm_label"] = candidate_label if use_candidate else baseline_label
+        routed_row["route_baseline_label"] = baseline_label
+        routed_row["route_candidate_label"] = candidate_label
+        routed_rows.append(routed_row)
+    return routed_rows
 
 
 def candidate_rules(route_features_by_qid: dict[str, dict]) -> list[dict]:
@@ -328,9 +369,13 @@ def main() -> None:
         "router_type": "rule_or",
         "default_route": "base",
         "visual_rules": selected_rules,
+        "baseline_label": args.baseline_label,
+        "candidate_label": args.candidate_label,
         "search_summary": {
             "baseline_run": args.baseline_run,
             "candidate_run": args.candidate_run,
+            "baseline_label": args.baseline_label,
+            "candidate_label": args.candidate_label,
             "gold": args.gold,
             "splice_query_token_labels": args.splice_query_token_labels,
             "query_token_filter": args.query_token_filter,
@@ -350,6 +395,51 @@ def main() -> None:
     output_path = Path(args.output_json)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(output, indent=2) + "\n", encoding="utf-8")
+
+    routed_summary = {
+        "baseline_run": args.baseline_run,
+        "candidate_run": args.candidate_run,
+        "baseline_label": args.baseline_label,
+        "candidate_label": args.candidate_label,
+        "route_config_json": str(output_path),
+        "num_qids": len(shared_qids),
+        "baseline_top4_doc_count": baseline_top4_doc_count,
+        "candidate_top4_doc_count": candidate_top4_doc_count,
+        "oracle_top4_doc_count": oracle_top4_doc_count,
+        "routed_top4_doc_count": best_eval["routed_top4_doc_count"],
+        "improved_doc_rank_count": best_eval["improved_doc_rank_count"],
+        "worsened_doc_rank_count": best_eval["worsened_doc_rank_count"],
+        "routed_candidate_qid_count": len(best_eval["routed_visual_qids"]),
+        "routed_candidate_qids": best_eval["routed_visual_qids"],
+        "selected_rules": selected_rules,
+    }
+
+    if args.output_routed_jsonl or args.output_summary_json:
+        route_config = {
+            "default_route": "base",
+            "visual_rules": selected_rules,
+        }
+        routed_rows = build_routed_rows(
+            qids=shared_qids,
+            baseline_rows=baseline_rows,
+            candidate_rows=candidate_rows,
+            route_features_by_qid=route_features_by_qid,
+            route_config=route_config,
+            baseline_label=args.baseline_label,
+            candidate_label=args.candidate_label,
+        )
+        if args.output_routed_jsonl:
+            routed_path = Path(args.output_routed_jsonl)
+            routed_path.parent.mkdir(parents=True, exist_ok=True)
+            with routed_path.open("w", encoding="utf-8") as handle:
+                for row in routed_rows:
+                    handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            print(f"saved_jsonl: {routed_path}")
+        if args.output_summary_json:
+            summary_path = Path(args.output_summary_json)
+            summary_path.parent.mkdir(parents=True, exist_ok=True)
+            summary_path.write_text(json.dumps(routed_summary, indent=2) + "\n", encoding="utf-8")
+            print(f"saved_summary: {summary_path}")
 
     print(f"saved_route_config: {output_path}")
     print(f"num_qids: {len(shared_qids)}")
