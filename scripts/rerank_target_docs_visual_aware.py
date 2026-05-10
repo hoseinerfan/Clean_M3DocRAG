@@ -236,6 +236,9 @@ def compute_coarse_page_token_scores(
     query_score_mask: torch.Tensor | None,
     approx_page_token_scorer: str,
     approx_page_token_query_prototypes: int = 4,
+    query_axis_classes: list[str] | None = None,
+    query_token_labels: list[str] | None = None,
+    informative_visual_query_weight: float = 1.0,
     coarse_score_dtype: str = "fp32",
 ) -> torch.Tensor:
     import torch
@@ -255,7 +258,14 @@ def compute_coarse_page_token_scores(
             query_emb_active = query_emb_coarse[query_mask_device]
 
     if approx_page_token_scorer == "query_mean":
-        coarse_query = query_emb_active.mean(dim=0)
+        coarse_query = build_weighted_query_mean(
+            query_emb=query_emb_coarse,
+            query_emb_active=query_emb_active,
+            query_score_mask=query_score_mask,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+            informative_visual_query_weight=informative_visual_query_weight,
+        )
         return (page_emb_coarse @ coarse_query).to(dtype=torch.float32)
     if approx_page_token_scorer == "query_prototype_max":
         prototype_count = max(1, int(approx_page_token_query_prototypes))
@@ -269,6 +279,59 @@ def compute_coarse_page_token_scores(
         score_matrix = page_emb_coarse @ query_emb_active.T
         return score_matrix.max(dim=1).values.to(dtype=torch.float32)
     raise ValueError(f"Unsupported approx_page_token_scorer: {approx_page_token_scorer!r}")
+
+
+def build_weighted_query_mean(
+    *,
+    query_emb: torch.Tensor,
+    query_emb_active: torch.Tensor,
+    query_score_mask: torch.Tensor | None,
+    query_axis_classes: list[str] | None,
+    query_token_labels: list[str] | None,
+    informative_visual_query_weight: float,
+) -> torch.Tensor:
+    import torch
+
+    if (
+        float(informative_visual_query_weight) == 1.0
+        or query_axis_classes is None
+        or query_token_labels is None
+    ):
+        return query_emb_active.mean(dim=0)
+
+    informative_visual_indices = set(
+        _select_informative_visual_query_indices(
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+        )
+    )
+    if not informative_visual_indices:
+        return query_emb_active.mean(dim=0)
+
+    if query_score_mask is not None and int(query_score_mask.numel()) == int(query_emb.shape[0]):
+        active_indices = [
+            idx
+            for idx, keep in enumerate(query_score_mask.tolist())
+            if bool(keep)
+        ]
+    else:
+        active_indices = list(range(int(query_emb.shape[0])))
+
+    if not active_indices:
+        return query_emb_active.mean(dim=0)
+
+    weights = torch.ones(
+        len(active_indices),
+        device=query_emb_active.device,
+        dtype=query_emb_active.dtype,
+    )
+    boosted_weight = float(informative_visual_query_weight)
+    for local_idx, global_idx in enumerate(active_indices):
+        if global_idx in informative_visual_indices:
+            weights[local_idx] = boosted_weight
+
+    denom = weights.sum().clamp_min(torch.tensor(1e-6, device=weights.device, dtype=weights.dtype))
+    return (query_emb_active * weights.unsqueeze(1)).sum(dim=0) / denom
 
 
 def build_query_prototypes(
@@ -351,6 +414,7 @@ def compute_approx_base_page_score(
     approx_page_token_adaptive_k_mode: str,
     approx_page_token_adaptive_k_min: int,
     approx_page_token_adaptive_k_max: int,
+    approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
     learned_token_selector_model: dict | None = None,
@@ -375,6 +439,7 @@ def compute_approx_base_page_score(
         approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
         approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
         approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+        approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
         learned_token_selector_model=learned_token_selector_model,
@@ -871,6 +936,7 @@ def select_page_token_indices_for_base_only(
     approx_page_token_adaptive_k_mode: str,
     approx_page_token_adaptive_k_min: int,
     approx_page_token_adaptive_k_max: int,
+    approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
     learned_token_selector_model: dict | None = None,
@@ -884,6 +950,9 @@ def select_page_token_indices_for_base_only(
         query_score_mask=query_score_mask,
         approx_page_token_scorer=approx_page_token_scorer,
         approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+        query_axis_classes=query_axis_classes,
+        query_token_labels=query_token_labels,
+        informative_visual_query_weight=approx_page_token_informative_visual_weight,
         coarse_score_dtype=coarse_score_dtype,
     )
     topk = _resolve_adaptive_page_token_topk(
@@ -1179,6 +1248,7 @@ def maybe_prune_page_tokens_for_base_only(
     approx_page_token_adaptive_k_mode: str,
     approx_page_token_adaptive_k_min: int,
     approx_page_token_adaptive_k_max: int,
+    approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
     learned_token_selector_model: dict | None = None,
@@ -1210,6 +1280,7 @@ def maybe_prune_page_tokens_for_base_only(
         approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
         approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
         approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+        approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
         learned_token_selector_model=learned_token_selector_model,
@@ -1929,6 +2000,16 @@ def parse_args() -> argparse.Namespace:
         help=(
             "When --approx-base-page-token-selector=redundancy_aware_topk, subtract this times "
             "the maximum cosine similarity to already selected page tokens during greedy selection."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-informative-visual-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "When --approx-base-page-token-scorer=query_mean, multiply informative visual query "
+            "tokens from --splice-query-token-labels by this weight when building the coarse mean "
+            "query vector for page-token pruning."
         ),
     )
     parser.add_argument(
@@ -2963,6 +3044,7 @@ def compute_base_only_page_feature(
     approx_page_token_adaptive_k_mode: str = "disabled",
     approx_page_token_adaptive_k_min: int = 128,
     approx_page_token_adaptive_k_max: int = 384,
+    approx_page_token_informative_visual_weight: float = 1.0,
     approx_page_token_soft_visual_query_weight: float = 0.5,
     approx_page_token_soft_patch_visual_bonus: float = 0.2,
     learned_token_selector_model: dict | None = None,
@@ -2987,6 +3069,7 @@ def compute_base_only_page_feature(
         approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
         approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
         approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+        approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
         learned_token_selector_model=learned_token_selector_model,
@@ -3009,6 +3092,9 @@ def compute_base_only_page_feature_scores_batched(
     approx_page_token_topk: int,
     approx_page_token_scorer: str,
     approx_page_token_query_prototypes: int,
+    query_axis_classes: list[str] | None,
+    query_token_labels: list[str] | None,
+    approx_page_token_informative_visual_weight: float,
     coarse_score_dtype: str,
 ) -> list[float]:
     import torch
@@ -3041,7 +3127,14 @@ def compute_base_only_page_feature_scores_batched(
             query_emb_active = query_emb_coarse[query_mask_device]
 
     if approx_page_token_scorer == "query_mean":
-        coarse_query = query_emb_active.mean(dim=0)
+        coarse_query = build_weighted_query_mean(
+            query_emb=query_emb_coarse,
+            query_emb_active=query_emb_active,
+            query_score_mask=query_score_mask,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+            informative_visual_query_weight=approx_page_token_informative_visual_weight,
+        )
         coarse_scores = (batch_page_embs_coarse @ coarse_query).to(dtype=torch.float32)
     elif approx_page_token_scorer == "query_prototype_max":
         prototype_count = max(1, int(approx_page_token_query_prototypes))
@@ -3090,6 +3183,7 @@ def compute_base_only_page_features(
     approx_page_token_adaptive_k_mode: str,
     approx_page_token_adaptive_k_min: int,
     approx_page_token_adaptive_k_max: int,
+    approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
     learned_token_selector_model: dict | None,
@@ -3147,6 +3241,7 @@ def compute_base_only_page_features(
                         approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
                         approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
                         approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+                        approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
                         learned_token_selector_model=learned_token_selector_model,
@@ -3163,6 +3258,9 @@ def compute_base_only_page_features(
                 approx_page_token_topk=approx_page_token_topk,
                 approx_page_token_scorer=approx_page_token_scorer,
                 approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+                query_axis_classes=query_axis_classes,
+                query_token_labels=query_token_labels,
+                approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
                 coarse_score_dtype=coarse_score_dtype,
             )
             for (doc_id, page_idx, base_score_override), batch_score in zip(batch_meta, batch_scores):
@@ -4177,6 +4275,16 @@ def main() -> None:
         )
     if args.approx_base_page_token_redundancy_lambda < 0.0:
         raise ValueError("--approx-base-page-token-redundancy-lambda must be >= 0.")
+    if args.approx_base_page_token_informative_visual_weight <= 0.0:
+        raise ValueError("--approx-base-page-token-informative-visual-weight must be > 0.")
+    if (
+        args.approx_base_page_token_scorer != "query_mean"
+        and args.approx_base_page_token_informative_visual_weight != 1.0
+    ):
+        raise ValueError(
+            "--approx-base-page-token-informative-visual-weight is only valid with "
+            "--approx-base-page-token-scorer=query_mean."
+        )
     if (
         args.approx_base_page_token_selector == "learned_token_topk"
         and not args.learned_token_selector_model
@@ -4577,6 +4685,7 @@ def main() -> None:
                 approx_page_token_adaptive_k_mode=args.approx_base_page_token_adaptive_k_mode,
                 approx_page_token_adaptive_k_min=args.approx_base_page_token_adaptive_k_min,
                 approx_page_token_adaptive_k_max=args.approx_base_page_token_adaptive_k_max,
+                approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
                 learned_token_selector_model=learned_token_selector_model,
@@ -4610,6 +4719,7 @@ def main() -> None:
                 approx_page_token_adaptive_k_mode=args.approx_base_page_token_adaptive_k_mode,
                 approx_page_token_adaptive_k_min=args.approx_base_page_token_adaptive_k_min,
                 approx_page_token_adaptive_k_max=args.approx_base_page_token_adaptive_k_max,
+                approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
                 learned_token_selector_model=learned_token_selector_model,
@@ -4766,6 +4876,7 @@ def main() -> None:
         "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
+        "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
         "base_only_page_batch_size": args.base_only_page_batch_size,
@@ -4841,6 +4952,7 @@ def main() -> None:
                 "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
                 "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
                 "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
+                "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
                 "base_only_page_batch_size": args.base_only_page_batch_size,
                 "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
                 "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -4883,6 +4995,7 @@ def main() -> None:
     print(f"approx_base_page_token_coverage_reserve: {args.approx_base_page_token_coverage_reserve}")
     print(f"approx_base_page_token_label_reserve: {args.approx_base_page_token_label_reserve}")
     print(f"approx_base_page_token_redundancy_lambda: {args.approx_base_page_token_redundancy_lambda}")
+    print(f"approx_base_page_token_informative_visual_weight: {args.approx_base_page_token_informative_visual_weight}")
     print(f"learned_token_selector_model: {args.learned_token_selector_model}")
     print(f"base_only_page_batch_size: {args.base_only_page_batch_size}")
     print(f"approx_base_page_token_coarse_dtype: {args.approx_base_page_token_coarse_dtype}")

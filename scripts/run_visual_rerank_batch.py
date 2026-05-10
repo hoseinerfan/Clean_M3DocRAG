@@ -218,6 +218,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-informative-visual-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "When --approx-base-page-token-scorer=query_mean, multiply informative visual query "
+            "tokens from --splice-query-token-labels by this weight when building the coarse mean "
+            "query vector for page-token pruning."
+        ),
+    )
+    parser.add_argument(
         "--approx-base-page-token-soft-visual-query-weight",
         type=float,
         default=0.5,
@@ -974,6 +984,16 @@ def main() -> None:
         )
     if args.approx_base_page_token_redundancy_lambda < 0.0:
         raise ValueError("--approx-base-page-token-redundancy-lambda must be >= 0.")
+    if args.approx_base_page_token_informative_visual_weight <= 0.0:
+        raise ValueError("--approx-base-page-token-informative-visual-weight must be > 0.")
+    if (
+        args.approx_base_page_token_scorer != "query_mean"
+        and args.approx_base_page_token_informative_visual_weight != 1.0
+    ):
+        raise ValueError(
+            "--approx-base-page-token-informative-visual-weight is only valid with "
+            "--approx-base-page-token-scorer=query_mean."
+        )
     if (
         args.approx_base_page_token_selector == "learned_token_topk"
         and not args.learned_token_selector_model
@@ -1388,6 +1408,7 @@ def main() -> None:
                         approx_page_token_adaptive_k_mode=args.approx_base_page_token_adaptive_k_mode,
                         approx_page_token_adaptive_k_min=args.approx_base_page_token_adaptive_k_min,
                         approx_page_token_adaptive_k_max=args.approx_base_page_token_adaptive_k_max,
+                        approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
                         learned_token_selector_model=learned_token_selector_model,
@@ -1421,6 +1442,7 @@ def main() -> None:
                         approx_page_token_adaptive_k_mode=args.approx_base_page_token_adaptive_k_mode,
                         approx_page_token_adaptive_k_min=args.approx_base_page_token_adaptive_k_min,
                         approx_page_token_adaptive_k_max=args.approx_base_page_token_adaptive_k_max,
+                        approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
                         learned_token_selector_model=learned_token_selector_model,
@@ -1646,6 +1668,7 @@ def main() -> None:
             "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
             "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
             "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
+            "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
             "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
             "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
             "base_only_page_batch_size": args.base_only_page_batch_size,
@@ -1748,6 +1771,7 @@ def main() -> None:
         "approx_base_page_token_coverage_reserve": args.approx_base_page_token_coverage_reserve,
         "approx_base_page_token_label_reserve": args.approx_base_page_token_label_reserve,
         "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
+        "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
         "base_only_page_batch_size": args.base_only_page_batch_size,
