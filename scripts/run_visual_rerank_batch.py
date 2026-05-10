@@ -24,6 +24,7 @@ from scripts.rerank_target_docs_visual_aware import (
     BALANCE_SCORE_MODE_CHOICES,
     BASE_SCORE_SOURCE_CHOICES,
     COARSE_SCORE_DTYPE_CHOICES,
+    DOC_AGGREGATION_MODE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
     WeightConfig,
     apply_two_stage_exact_rerank_to_doc_features,
@@ -412,6 +413,24 @@ def parse_args() -> argparse.Namespace:
             "Scale non-base rerank channels by normalized base page score "
             "(base_page_score / max_base_page_score) so auxiliary signals help more on pages "
             "that are already strong under the base retriever."
+        ),
+    )
+    parser.add_argument(
+        "--doc-aggregation-mode",
+        default="best_page",
+        choices=DOC_AGGREGATION_MODE_CHOICES,
+        help=(
+            "How to aggregate page scores into a doc score. 'best_page' uses only the top page. "
+            "'top2_weighted' adds a weighted contribution from the second-best page."
+        ),
+    )
+    parser.add_argument(
+        "--doc-aggregation-second-page-weight",
+        type=float,
+        default=0.25,
+        help=(
+            "When --doc-aggregation-mode=top2_weighted, add this weight times the "
+            "second-best page fused score to the doc score."
         ),
     )
     parser.add_argument(
@@ -1042,6 +1061,8 @@ def main() -> None:
         )
     if args.gated_visual_top_docs < 0:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
+    if args.doc_aggregation_second_page_weight < 0:
+        raise ValueError("--doc-aggregation-second-page-weight must be >= 0.")
     if args.visual_patch_dilation_radius < 0:
         raise ValueError("--visual-patch-dilation-radius must be >= 0.")
     if args.grounded_context_radius < 0:
@@ -1528,6 +1549,8 @@ def main() -> None:
                 visual_values=grid_visual_values,
                 non_visual_values=grid_non_visual_values,
                 balance_values=grid_balance_values,
+                doc_aggregation_mode=args.doc_aggregation_mode,
+                doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
             )
         else:
             weights = fixed_weights
@@ -1576,6 +1599,8 @@ def main() -> None:
                 stage1_base_doc_rank_map=stage1_base_doc_rank_map,
                 gated_visual_top_docs=args.gated_visual_top_docs,
                 scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
+                doc_aggregation_mode=args.doc_aggregation_mode,
+                doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
             )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
 
@@ -1641,6 +1666,8 @@ def main() -> None:
             "vlm_bits": args.vlm_bits,
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+            "doc_aggregation_mode": args.doc_aggregation_mode,
+            "doc_aggregation_second_page_weight": args.doc_aggregation_second_page_weight,
             "balance_score_mode": args.balance_score_mode,
             "grounded_context_radius": args.grounded_context_radius,
             "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
@@ -1742,6 +1769,8 @@ def main() -> None:
         "vlm_bits": args.vlm_bits,
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+        "doc_aggregation_mode": args.doc_aggregation_mode,
+        "doc_aggregation_second_page_weight": args.doc_aggregation_second_page_weight,
         "balance_score_mode": args.balance_score_mode,
         "grounded_context_radius": args.grounded_context_radius,
         "visual_patch_dilation_radius": args.visual_patch_dilation_radius,

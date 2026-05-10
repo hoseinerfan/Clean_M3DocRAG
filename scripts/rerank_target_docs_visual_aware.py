@@ -50,6 +50,10 @@ BALANCE_SCORE_MODE_CHOICES = (
     "visual_x_nonvisual_avg",
     "visual_x_grounded_nonvisual_avg",
 )
+DOC_AGGREGATION_MODE_CHOICES = (
+    "best_page",
+    "top2_weighted",
+)
 BIG_RANK = 10**12
 SOFT_VISUAL_QUERY_STOPWORDS = {
     "a",
@@ -1901,6 +1905,24 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--doc-aggregation-mode",
+        default="best_page",
+        choices=DOC_AGGREGATION_MODE_CHOICES,
+        help=(
+            "How to aggregate page scores into a doc score. 'best_page' uses only the top page. "
+            "'top2_weighted' adds a weighted contribution from the second-best page."
+        ),
+    )
+    parser.add_argument(
+        "--doc-aggregation-second-page-weight",
+        type=float,
+        default=0.25,
+        help=(
+            "When --doc-aggregation-mode=top2_weighted, add this weight times the "
+            "second-best page fused score to the doc score."
+        ),
+    )
+    parser.add_argument(
         "--balance-score-mode",
         default="min_avg",
         choices=BALANCE_SCORE_MODE_CHOICES,
@@ -3599,6 +3621,8 @@ def build_rankings(
     stage1_base_doc_rank_map: dict[str, int] | None = None,
     gated_visual_top_docs: int = 0,
     scale_auxiliary_by_base_score: bool = False,
+    doc_aggregation_mode: str = "best_page",
+    doc_aggregation_second_page_weight: float = 0.25,
 ) -> tuple[list[dict], list[dict]]:
     max_base_page_score = max((item.base_page_score for item in page_features), default=0.0)
 
@@ -3645,35 +3669,64 @@ def build_rankings(
         payload["rank"] = rank
         reranked_pages.append(payload)
 
-    best_page_by_doc: dict[str, dict] = {}
+    if doc_aggregation_mode not in DOC_AGGREGATION_MODE_CHOICES:
+        raise ValueError(
+            f"Unsupported doc_aggregation_mode={doc_aggregation_mode!r}; "
+            f"expected one of {DOC_AGGREGATION_MODE_CHOICES}."
+        )
+
+    pages_by_doc: dict[str, list[dict]] = {}
     for item in reranked_pages:
-        doc_id = item["doc_id"]
-        current = best_page_by_doc.get(doc_id)
-        if current is None or item["fused_page_score"] > current["fused_doc_score"]:
-            best_page_by_doc[doc_id] = {
+        pages_by_doc.setdefault(item["doc_id"], []).append(item)
+
+    doc_records: list[dict] = []
+    for doc_id, doc_pages in pages_by_doc.items():
+        best_page = doc_pages[0]
+        second_page = doc_pages[1] if len(doc_pages) > 1 else None
+        fused_doc_score = float(best_page["fused_page_score"])
+        if doc_aggregation_mode == "top2_weighted" and second_page is not None:
+            fused_doc_score += (
+                float(doc_aggregation_second_page_weight) * float(second_page["fused_page_score"])
+            )
+        doc_records.append(
+            {
                 "doc_id": doc_id,
                 "rank": None,
-                "fused_doc_score": item["fused_page_score"],
-                "best_page_uid": item["page_uid"],
-                "best_page_idx": item["page_idx"],
-                "best_page_base_score": item["base_page_score"],
-                "best_page_visual_score": item["visual_page_score"],
-                "best_page_non_visual_score": item["non_visual_page_score"],
-                "best_page_grounded_non_visual_score": item["grounded_non_visual_page_score"],
-                "best_page_balance_score": item["balance_score"],
-                "best_page_grounded_non_visual_avg_score": item["grounded_non_visual_avg_score"],
-                "best_page_auxiliary_bonus": item["auxiliary_page_bonus"],
-                "best_page_auxiliary_scale": item["auxiliary_base_scale"],
-                "best_page_visual_anchor_patch_count": item["visual_anchor_patch_count"],
-                "best_page_grounded_non_visual_patch_count": item["grounded_non_visual_patch_count"],
-                "stage1_base_doc_rank": item["stage1_base_doc_rank"],
-                "gated_visual_applied": item["gated_visual_applied"],
+                "fused_doc_score": fused_doc_score,
+                "doc_aggregation_mode": doc_aggregation_mode,
+                "doc_aggregation_second_page_weight": float(doc_aggregation_second_page_weight),
+                "best_page_uid": best_page["page_uid"],
+                "best_page_idx": best_page["page_idx"],
+                "best_page_base_score": best_page["base_page_score"],
+                "best_page_visual_score": best_page["visual_page_score"],
+                "best_page_non_visual_score": best_page["non_visual_page_score"],
+                "best_page_grounded_non_visual_score": best_page["grounded_non_visual_page_score"],
+                "best_page_balance_score": best_page["balance_score"],
+                "best_page_grounded_non_visual_avg_score": best_page["grounded_non_visual_avg_score"],
+                "best_page_auxiliary_bonus": best_page["auxiliary_page_bonus"],
+                "best_page_auxiliary_scale": best_page["auxiliary_base_scale"],
+                "best_page_visual_anchor_patch_count": best_page["visual_anchor_patch_count"],
+                "best_page_grounded_non_visual_patch_count": best_page["grounded_non_visual_patch_count"],
+                "second_page_uid": None if second_page is None else second_page["page_uid"],
+                "second_page_idx": None if second_page is None else second_page["page_idx"],
+                "second_page_fused_score": None
+                if second_page is None
+                else second_page["fused_page_score"],
+                "second_page_base_score": None if second_page is None else second_page["base_page_score"],
+                "candidate_page_count": len(doc_pages),
+                "stage1_base_doc_rank": best_page["stage1_base_doc_rank"],
+                "gated_visual_applied": best_page["gated_visual_applied"],
                 "baseline_doc_rank": baseline_doc_rank_map.get(doc_id),
             }
+        )
 
     reranked_docs = sorted(
-        best_page_by_doc.values(),
-        key=lambda item: (item["fused_doc_score"], item["best_page_base_score"]),
+        doc_records,
+        key=lambda item: (
+            item["fused_doc_score"],
+            item["best_page_base_score"],
+            float(item["second_page_fused_score"] or 0.0),
+        ),
         reverse=True,
     )
     for rank, item in enumerate(reranked_docs, start=1):
@@ -3753,6 +3806,8 @@ def grid_search_weights(
     visual_values: list[float],
     non_visual_values: list[float],
     balance_values: list[float],
+    doc_aggregation_mode: str = "best_page",
+    doc_aggregation_second_page_weight: float = 0.25,
 ) -> tuple[WeightConfig, dict, list[dict]]:
     if not gold_doc_ids and not gold_page_uids:
         raise ValueError("--grid-search needs gold doc ids or gold page uids.")
@@ -3777,6 +3832,8 @@ def grid_search_weights(
             stage1_base_doc_rank_map=stage1_base_doc_rank_map,
             gated_visual_top_docs=gated_visual_top_docs,
             scale_auxiliary_by_base_score=scale_auxiliary_by_base_score,
+            doc_aggregation_mode=doc_aggregation_mode,
+            doc_aggregation_second_page_weight=doc_aggregation_second_page_weight,
         )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids) if gold_doc_ids else None
         gold_page_summary = summarize_gold_page_ranks(_reranked_pages, gold_page_uids) if gold_page_uids else None
@@ -4040,6 +4097,8 @@ def main() -> None:
         )
     if args.gated_visual_top_docs < 0:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
+    if args.doc_aggregation_second_page_weight < 0:
+        raise ValueError("--doc-aggregation-second-page-weight must be >= 0.")
     if args.visual_patch_dilation_radius < 0:
         raise ValueError("--visual-patch-dilation-radius must be >= 0.")
     if args.grounded_context_radius < 0:
@@ -4151,6 +4210,8 @@ def main() -> None:
             stage1_base_doc_rank_map=None,
             gated_visual_top_docs=args.gated_visual_top_docs,
             scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
+            doc_aggregation_mode=args.doc_aggregation_mode,
+            doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
         )
         gold_doc_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
         gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
@@ -4174,6 +4235,8 @@ def main() -> None:
             "query_route_config_json": args.query_route_config_json,
             "gated_visual_top_docs": args.gated_visual_top_docs,
             "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+            "doc_aggregation_mode": args.doc_aggregation_mode,
+            "doc_aggregation_second_page_weight": args.doc_aggregation_second_page_weight,
             "balance_score_mode": args.balance_score_mode,
             "grounded_context_radius": args.grounded_context_radius,
             "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
@@ -4496,6 +4559,8 @@ def main() -> None:
             visual_values=parse_float_list(args.grid_visual_values),
             non_visual_values=parse_float_list(args.grid_non_visual_values),
             balance_values=parse_float_list(args.grid_balance_values),
+            doc_aggregation_mode=args.doc_aggregation_mode,
+            doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
         )
         weights = best_weights
     else:
@@ -4510,6 +4575,8 @@ def main() -> None:
         stage1_base_doc_rank_map=stage1_base_doc_rank_map,
         gated_visual_top_docs=args.gated_visual_top_docs,
         scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
+        doc_aggregation_mode=args.doc_aggregation_mode,
+        doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
     )
     gold_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
     gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
@@ -4547,6 +4614,8 @@ def main() -> None:
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
         "gated_visual_top_docs": args.gated_visual_top_docs,
         "scale_auxiliary_by_base_score": args.scale_auxiliary_by_base_score,
+        "doc_aggregation_mode": args.doc_aggregation_mode,
+        "doc_aggregation_second_page_weight": args.doc_aggregation_second_page_weight,
         "balance_score_mode": args.balance_score_mode,
         "grounded_context_radius": args.grounded_context_radius,
         "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
