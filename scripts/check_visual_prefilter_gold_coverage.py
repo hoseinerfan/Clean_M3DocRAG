@@ -19,6 +19,7 @@ import torch
 
 from m3docrag.retrieval import ColPaliRetrievalModel
 from scripts.rerank_target_docs_visual_aware import (
+    NON_VISUAL_PAGE_MODE_CHOICES,
     VISUAL_SCORE_QUERY_MODE_CHOICES,
     VISUAL_PREFILTER_SORT_KEY_CHOICES,
     apply_visual_rerank_to_top_pages,
@@ -99,6 +100,11 @@ def parse_args() -> argparse.Namespace:
         "--visual-score-query-mode",
         default="visual_query_only",
         choices=VISUAL_SCORE_QUERY_MODE_CHOICES,
+    )
+    parser.add_argument(
+        "--non-visual-page-mode",
+        default="labeled_only",
+        choices=NON_VISUAL_PAGE_MODE_CHOICES,
     )
     parser.add_argument("--nonspatial-token-position", default="suffix", choices=["prefix", "suffix"])
     parser.add_argument("--ignore-pad-scores-in-final-ranking", action="store_true")
@@ -299,6 +305,7 @@ def main() -> None:
                 grounded_context_radius=args.grounded_context_radius,
                 visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                 visual_score_query_mode=args.visual_score_query_mode,
+                non_visual_page_mode=args.non_visual_page_mode,
             )
 
         baseline_top_pages = [
@@ -385,6 +392,8 @@ def main() -> None:
         "visual_prefilter_top_pages": args.visual_prefilter_top_pages,
         "prefilter_sort_key": args.prefilter_sort_key,
         "balance_score_mode": args.balance_score_mode,
+        "non_visual_page_mode": args.non_visual_page_mode,
+        "visual_score_query_mode": args.visual_score_query_mode,
         "grounded_context_radius": args.grounded_context_radius,
         "require_informative_visual_query": args.require_informative_visual_query,
         "filter_to_informative_visual_query": args.filter_to_informative_visual_query,
