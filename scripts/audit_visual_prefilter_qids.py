@@ -18,7 +18,6 @@ import torch
 
 from m3docrag.retrieval import ColPaliRetrievalModel
 from scripts.rerank_target_docs_visual_aware import (
-    _visual_prefilter_sort_key,
     apply_visual_rerank_to_top_pages,
     build_page_id_metadata,
     build_page_token_classes,
@@ -37,6 +36,14 @@ from scripts.run_visual_rerank_batch import (
     load_gold_rows,
     load_qids,
 )
+
+PREFILTER_SORT_KEY_CHOICES = [
+    "balance_then_visual",
+    "balance_only",
+    "visual_only",
+    "non_visual_only",
+    "grounded_non_visual_only",
+]
 
 GENERIC_VISUAL_QUERY_TOKENS = {
     "poster",
@@ -87,6 +94,12 @@ def parse_args() -> argparse.Namespace:
         default="visual_x_grounded_nonvisual_avg",
         choices=["min_avg", "visual_x_nonvisual_avg", "visual_x_grounded_nonvisual_avg"],
     )
+    parser.add_argument(
+        "--prefilter-sort-key",
+        default="balance_then_visual",
+        choices=PREFILTER_SORT_KEY_CHOICES,
+        help="How to rank pages during the visual prefilter stage.",
+    )
     parser.add_argument("--grounded-context-radius", type=int, default=2)
     parser.add_argument("--visual-fallback-all-token-weight", type=float, default=0.0)
     parser.add_argument("--nonspatial-token-position", default="suffix", choices=["prefix", "suffix"])
@@ -114,6 +127,35 @@ def summarize_group(features: list[dict]) -> dict[str, object]:
         "mean_visual_anchor_patch_count": mean_or_none([float(x["visual_anchor_patch_count"]) for x in features]),
         "mean_grounded_non_visual_patch_count": mean_or_none([float(x["grounded_non_visual_patch_count"]) for x in features]),
     }
+
+
+def prefilter_primary_score(feature, mode: str) -> float:
+    if mode == "balance_then_visual":
+        return (
+            float(feature.balance_score)
+            if float(feature.balance_score) > 0.0
+            else float(feature.visual_page_score)
+        )
+    if mode == "balance_only":
+        return float(feature.balance_score)
+    if mode == "visual_only":
+        return float(feature.visual_page_score)
+    if mode == "non_visual_only":
+        return float(feature.non_visual_page_score)
+    if mode == "grounded_non_visual_only":
+        return float(feature.grounded_non_visual_page_score)
+    raise ValueError(f"Unsupported prefilter sort mode: {mode!r}")
+
+
+def prefilter_sort_key(feature, mode: str) -> tuple[float, float, float, float, str]:
+    primary = prefilter_primary_score(feature, mode)
+    return (
+        primary,
+        float(feature.balance_score),
+        float(feature.visual_page_score),
+        float(feature.grounded_non_visual_page_score),
+        feature.page_uid,
+    )
 
 
 def build_reliability_checklist(
@@ -318,13 +360,17 @@ def main() -> None:
             page_uid: rank
             for rank, page_uid in enumerate(baseline_page_uids, start=1)
         }
-        sorted_visual_features = sorted(visual_features, key=_visual_prefilter_sort_key, reverse=True)
+        sorted_visual_features = sorted(
+            visual_features,
+            key=lambda item: prefilter_sort_key(item, args.prefilter_sort_key),
+            reverse=True,
+        )
 
         visual_trace = []
         gold_pages_all = []
         non_gold_pages_all = []
         for rank, feature in enumerate(sorted_visual_features, start=1):
-            primary = float(feature.balance_score) if float(feature.balance_score) > 0.0 else float(feature.visual_page_score)
+            primary = prefilter_primary_score(feature, args.prefilter_sort_key)
             record = {
                 "visual_rank": int(rank),
                 "baseline_rank": int(baseline_rank_map.get(feature.page_uid, -1)),
@@ -376,6 +422,7 @@ def main() -> None:
             "gold_doc_ids": gold_doc_ids,
             "route_features": route_features,
             "reliability_checklist": reliability_checklist,
+            "prefilter_sort_key": args.prefilter_sort_key,
             "visual_prefilter_top_pages": args.visual_prefilter_top_pages,
             "baseline_first_gold_page": None if best_gold_baseline is None else {
                 "page_uid": best_gold_baseline,
@@ -403,6 +450,7 @@ def main() -> None:
 
         print(
             f"[{idx}/{len(qids)}] {qid} "
+            f"mode={args.prefilter_sort_key} "
             f"informative_visual={route_features['informative_visual_query_tokens']} "
             f"best_gold_visual_rank={None if best_gold_visual is None else best_gold_visual['visual_rank']} "
             f"verdict={reliability_checklist['verdict']}"

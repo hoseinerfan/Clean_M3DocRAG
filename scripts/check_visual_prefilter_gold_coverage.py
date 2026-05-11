@@ -19,7 +19,6 @@ import torch
 
 from m3docrag.retrieval import ColPaliRetrievalModel
 from scripts.rerank_target_docs_visual_aware import (
-    _visual_prefilter_sort_key,
     apply_visual_rerank_to_top_pages,
     build_page_id_metadata,
     build_page_token_classes,
@@ -37,6 +36,14 @@ from scripts.run_visual_rerank_batch import (
     load_gold_rows,
     load_qids,
 )
+
+PREFILTER_SORT_KEY_CHOICES = [
+    "balance_then_visual",
+    "balance_only",
+    "visual_only",
+    "non_visual_only",
+    "grounded_non_visual_only",
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -82,6 +89,12 @@ def parse_args() -> argparse.Namespace:
         default="visual_x_grounded_nonvisual_avg",
         choices=["min_avg", "visual_x_nonvisual_avg", "visual_x_grounded_nonvisual_avg"],
     )
+    parser.add_argument(
+        "--prefilter-sort-key",
+        default="balance_then_visual",
+        choices=PREFILTER_SORT_KEY_CHOICES,
+        help="How to rank pages during the visual prefilter stage.",
+    )
     parser.add_argument("--grounded-context-radius", type=int, default=2)
     parser.add_argument("--visual-fallback-all-token-weight", type=float, default=0.0)
     parser.add_argument("--nonspatial-token-position", default="suffix", choices=["prefix", "suffix"])
@@ -102,6 +115,35 @@ def dedupe_doc_ids_from_pages(rows: list[dict]) -> list[str]:
         seen.add(doc_id)
         doc_ids.append(doc_id)
     return doc_ids
+
+
+def prefilter_primary_score(feature, mode: str) -> float:
+    if mode == "balance_then_visual":
+        return (
+            float(feature.balance_score)
+            if float(feature.balance_score) > 0.0
+            else float(feature.visual_page_score)
+        )
+    if mode == "balance_only":
+        return float(feature.balance_score)
+    if mode == "visual_only":
+        return float(feature.visual_page_score)
+    if mode == "non_visual_only":
+        return float(feature.non_visual_page_score)
+    if mode == "grounded_non_visual_only":
+        return float(feature.grounded_non_visual_page_score)
+    raise ValueError(f"Unsupported prefilter sort mode: {mode!r}")
+
+
+def prefilter_sort_key(feature, mode: str) -> tuple[float, float, float, float, str]:
+    primary = prefilter_primary_score(feature, mode)
+    return (
+        primary,
+        float(feature.balance_score),
+        float(feature.visual_page_score),
+        float(feature.grounded_non_visual_page_score),
+        feature.page_uid,
+    )
 
 
 def summarize_top_pages(
@@ -296,7 +338,7 @@ def main() -> None:
 
         selected_visual_features = sorted(
             visual_features,
-            key=_visual_prefilter_sort_key,
+            key=lambda item: prefilter_sort_key(item, args.prefilter_sort_key),
             reverse=True,
         )[: args.visual_prefilter_top_pages]
         visual_top_pages = [
@@ -305,14 +347,11 @@ def main() -> None:
                 "page_uid": feature.page_uid,
                 "doc_id": feature.doc_id,
                 "page_idx": int(feature.page_idx),
-                "prefilter_primary_score": (
-                    float(feature.balance_score)
-                    if float(feature.balance_score) > 0.0
-                    else float(feature.visual_page_score)
-                ),
+                "prefilter_primary_score": prefilter_primary_score(feature, args.prefilter_sort_key),
                 "base_page_score": float(feature.base_page_score),
                 "visual_page_score": float(feature.visual_page_score),
                 "grounded_non_visual_page_score": float(feature.grounded_non_visual_page_score),
+                "non_visual_page_score": float(feature.non_visual_page_score),
                 "balance_score": float(feature.balance_score),
             }
             for rank, feature in enumerate(selected_visual_features, start=1)
@@ -340,6 +379,7 @@ def main() -> None:
         all_rows.append(row)
         print(
             f"[{idx}/{len(qids)}] {qid} "
+            f"mode={args.prefilter_sort_key} "
             f"baseline_cov@{args.visual_prefilter_top_pages}={baseline_top_summary['gold_doc_coverage_ratio']:.3f} "
             f"visual_cov@{args.visual_prefilter_top_pages}={visual_top_summary['gold_doc_coverage_ratio']:.3f}"
         )
@@ -366,6 +406,7 @@ def main() -> None:
         "n_qids": len(all_rows),
         "from_baseline_top_pages": args.from_baseline_top_pages,
         "visual_prefilter_top_pages": args.visual_prefilter_top_pages,
+        "prefilter_sort_key": args.prefilter_sort_key,
         "balance_score_mode": args.balance_score_mode,
         "grounded_context_radius": args.grounded_context_radius,
         "require_informative_visual_query": args.require_informative_visual_query,
