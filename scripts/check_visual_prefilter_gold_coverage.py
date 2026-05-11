@@ -320,7 +320,7 @@ def main() -> None:
 
         selected_visual_features = sorted(
             visual_features,
-            key=lambda item: prefilter_sort_key(item, args.prefilter_sort_key),
+            key=lambda item: visual_prefilter_sort_key(item, args.prefilter_sort_key),
             reverse=True,
         )[: args.visual_prefilter_top_pages]
         visual_top_pages = [
@@ -329,7 +329,7 @@ def main() -> None:
                 "page_uid": feature.page_uid,
                 "doc_id": feature.doc_id,
                 "page_idx": int(feature.page_idx),
-                "prefilter_primary_score": prefilter_primary_score(feature, args.prefilter_sort_key),
+                "prefilter_primary_score": visual_prefilter_primary_score(feature, args.prefilter_sort_key),
                 "base_page_score": float(feature.base_page_score),
                 "visual_page_score": float(feature.visual_page_score),
                 "confirmed_visual_page_score": float(feature.confirmed_visual_page_score),

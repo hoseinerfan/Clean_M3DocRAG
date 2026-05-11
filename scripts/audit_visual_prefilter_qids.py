@@ -347,7 +347,7 @@ def main() -> None:
         }
         sorted_visual_features = sorted(
             visual_features,
-            key=lambda item: prefilter_sort_key(item, args.prefilter_sort_key),
+            key=lambda item: visual_prefilter_sort_key(item, args.prefilter_sort_key),
             reverse=True,
         )
 
@@ -355,7 +355,7 @@ def main() -> None:
         gold_pages_all = []
         non_gold_pages_all = []
         for rank, feature in enumerate(sorted_visual_features, start=1):
-            primary = prefilter_primary_score(feature, args.prefilter_sort_key)
+            primary = visual_prefilter_primary_score(feature, args.prefilter_sort_key)
             record = {
                 "visual_rank": int(rank),
                 "baseline_rank": int(baseline_rank_map.get(feature.page_uid, -1)),
