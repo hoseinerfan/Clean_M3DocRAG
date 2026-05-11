@@ -124,6 +124,8 @@ def parse_args() -> argparse.Namespace:
             "Optional page-level adaptive token budget. 'disabled' keeps a fixed "
             "--approx-base-page-token-topk. 'coarse_entropy' expands K for pages whose "
             "coarse pruning scores are diffuse and shrinks K for pages whose scores are concentrated. "
+            "'coarse_concentration' uses how quickly the top coarse tokens accumulate relevance mass, "
+            "keeping K near the minimum for compact pages and expanding only for diffuse pages. "
             "'maxsim_mass' is only valid with --approx-base-page-token-selector=maxsim_greedy and "
             "stops once the shifted MaxSim mass preservation target is reached."
         ),

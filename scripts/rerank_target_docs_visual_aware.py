@@ -47,6 +47,7 @@ COARSE_SCORE_DTYPE_CHOICES = ("fp32", "bf16", "fp16")
 APPROX_BASE_PAGE_TOKEN_ADAPTIVE_K_MODE_CHOICES = (
     "disabled",
     "coarse_entropy",
+    "coarse_concentration",
     "maxsim_mass",
 )
 BALANCE_SCORE_MODE_CHOICES = (
@@ -922,6 +923,25 @@ def _resolve_adaptive_page_token_topk(
         entropy_norm = float(entropy.item()) / max(math.log(float(token_count)), 1e-6)
         entropy_norm = min(max(entropy_norm, 0.0), 1.0)
         target = round(adaptive_k_min + entropy_norm * (adaptive_k_max - adaptive_k_min))
+        return min(max(int(target), adaptive_k_min), adaptive_k_max)
+
+    if adaptive_k_mode == "coarse_concentration":
+        # Measure how many of the top coarse tokens are needed to explain half
+        # of the coarse relevance mass. Pages whose mass concentrates early are
+        # treated as easier and stay near K_min; diffuse pages expand toward K_max.
+        top_pool = min(max(int(adaptive_k_max), 64), token_count)
+        sorted_scores = torch.topk(
+            coarse_scores.to(dtype=torch.float32),
+            k=top_pool,
+            largest=True,
+            sorted=True,
+        ).values
+        weights = torch.softmax(sorted_scores, dim=0)
+        cumulative_mass = torch.cumsum(weights, dim=0)
+        half_mass_rank = int((cumulative_mass < 0.5).sum().item()) + 1
+        difficulty = (half_mass_rank - 1) / max(top_pool - 1, 1)
+        difficulty = min(max(float(difficulty), 0.0), 1.0)
+        target = round(adaptive_k_min + difficulty * (adaptive_k_max - adaptive_k_min))
         return min(max(int(target), adaptive_k_min), adaptive_k_max)
 
     raise ValueError(f"Unsupported approx_page_token_adaptive_k_mode: {adaptive_k_mode!r}")
@@ -2520,6 +2540,8 @@ def parse_args() -> argparse.Namespace:
             "Optional page-level adaptive token budget. 'disabled' keeps a fixed "
             "--approx-base-page-token-topk. 'coarse_entropy' expands K for pages whose "
             "coarse pruning scores are diffuse and shrinks K for pages whose scores are concentrated. "
+            "'coarse_concentration' uses how quickly the top coarse tokens accumulate relevance mass, "
+            "keeping K near the minimum for compact pages and expanding only for diffuse pages. "
             "'maxsim_mass' is only valid with --approx-base-page-token-selector=maxsim_greedy and "
             "stops once the shifted MaxSim mass preservation target is reached."
         ),
