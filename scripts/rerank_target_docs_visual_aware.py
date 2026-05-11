@@ -596,6 +596,7 @@ def _select_maxsim_greedy_token_indices(
     adaptive_k_max: int,
     preservation_target: float,
 ) -> list[int]:
+    import heapq
     import torch
 
     candidate_count = len(candidate_indices)
@@ -620,46 +621,55 @@ def _select_maxsim_greedy_token_indices(
         return []
 
     selected_local: list[int] = []
-    available_mask = torch.ones(
-        candidate_count,
-        dtype=torch.bool,
-        device=candidate_score_matrix_active.device,
-    )
     current_best = torch.zeros(
         int(candidate_score_matrix_active.shape[1]),
         dtype=shifted_candidate_scores.dtype,
         device=candidate_score_matrix_active.device,
     )
-    neg_inf = torch.tensor(
-        float("-inf"),
-        dtype=shifted_candidate_scores.dtype,
-        device=candidate_score_matrix_active.device,
-    )
+    initial_marginal_gains = shifted_candidate_scores.sum(dim=1)
+    last_eval_step = [0 for _ in range(candidate_count)]
+    selected_mask = [False for _ in range(candidate_count)]
+    max_heap: list[tuple[float, int]] = [
+        (-float(initial_marginal_gains[idx].item()), idx)
+        for idx in range(candidate_count)
+    ]
+    heapq.heapify(max_heap)
 
-    while len(selected_local) < target_k:
-        marginal_gain = torch.relu(shifted_candidate_scores - current_best.unsqueeze(0)).sum(dim=1)
-        utility = torch.where(available_mask, marginal_gain, neg_inf)
-        next_local_idx = int(torch.argmax(utility).item())
-        if not bool(available_mask[next_local_idx]):
-            break
-        selected_local.append(next_local_idx)
-        available_mask[next_local_idx] = False
-        current_best = torch.maximum(current_best, shifted_candidate_scores[next_local_idx])
-        if (
-            adaptive_k_mode == "maxsim_mass"
-            and len(selected_local) >= target_min
-            and shifted_full_score > 1e-8
-        ):
-            preserved_ratio = float(current_best.sum().item()) / shifted_full_score
-            if preserved_ratio >= float(preservation_target):
-                break
+    while len(selected_local) < target_k and max_heap:
+        neg_bound, local_idx = heapq.heappop(max_heap)
+        if selected_mask[local_idx]:
+            continue
+        current_step = len(selected_local)
+        if last_eval_step[local_idx] == current_step:
+            selected_local.append(local_idx)
+            selected_mask[local_idx] = True
+            current_best = torch.maximum(current_best, shifted_candidate_scores[local_idx])
+            if (
+                adaptive_k_mode == "maxsim_mass"
+                and len(selected_local) >= target_min
+                and shifted_full_score > 1e-8
+            ):
+                preserved_ratio = float(current_best.sum().item()) / shifted_full_score
+                if preserved_ratio >= float(preservation_target):
+                    break
+            continue
+
+        refreshed_gain = float(
+            torch.relu(shifted_candidate_scores[local_idx] - current_best).sum().item()
+        )
+        last_eval_step[local_idx] = current_step
+        heapq.heappush(max_heap, (-refreshed_gain, local_idx))
 
     if len(selected_local) < target_k:
-        for local_idx in _topk_indices_from_scores(scores=coarse_scores_candidate, k=candidate_count):
+        for local_idx in _topk_indices_from_scores(
+            scores=coarse_scores_candidate,
+            k=candidate_count,
+        ):
             local_idx = int(local_idx)
-            if local_idx in selected_local:
+            if selected_mask[local_idx]:
                 continue
             selected_local.append(local_idx)
+            selected_mask[local_idx] = True
             if len(selected_local) >= target_k:
                 break
 
