@@ -33,7 +33,7 @@ from scripts.rerank_target_docs_visual_aware import (
     make_query_score_mask,
     resolve_model_path,
     visual_prefilter_primary_score,
-    visual_prefilter_sort_key,
+    visual_prefilter_sort_key_with_threshold,
 )
 from scripts.run_visual_rerank_batch import (
     build_baseline_pool,
@@ -69,6 +69,15 @@ def parse_args() -> argparse.Namespace:
         default=[],
         choices=list(VISUAL_PREFILTER_SORT_KEY_CHOICES),
         help="Optional specific prefilter mode(s) to report. Defaults to all modes.",
+    )
+    parser.add_argument(
+        "--confirmed-visual-gate-threshold",
+        type=float,
+        default=0.1,
+        help=(
+            "Threshold used by mode=non_visual_with_confirmed_visual_gate. "
+            "Pages below this confirmed_visual score are demoted behind all gated-in pages."
+        ),
     )
     parser.add_argument("--require-informative-visual-query", action="store_true")
     parser.add_argument("--filter-to-informative-visual-query", action="store_true")
@@ -233,7 +242,11 @@ def main() -> None:
     for mode in modes:
         sorted_features = sorted(
             visual_features,
-            key=lambda item: visual_prefilter_sort_key(item, mode),
+            key=lambda item: visual_prefilter_sort_key_with_threshold(
+                item,
+                mode=mode,
+                confirmed_visual_gate_threshold=args.confirmed_visual_gate_threshold,
+            ),
             reverse=True,
         )
         rank_maps[mode] = {
@@ -274,7 +287,13 @@ def main() -> None:
                 "grounded_non_visual_patch_count": int(feature.grounded_non_visual_patch_count),
                 "grounded_context_patch_count": int(feature.grounded_context_patch_count),
                 "mode_primary_scores": {
-                    mode: float(visual_prefilter_primary_score(feature, mode))
+                    mode: float(
+                        visual_prefilter_primary_score(
+                            feature,
+                            mode,
+                            confirmed_visual_gate_threshold=args.confirmed_visual_gate_threshold,
+                        )
+                    )
                     for mode in modes
                 },
                 "mode_full_ranks": {
@@ -314,6 +333,7 @@ def main() -> None:
         "route_features": route_features,
         "visual_score_query_mode": args.visual_score_query_mode,
         "non_visual_page_mode": args.non_visual_page_mode,
+        "confirmed_visual_gate_threshold": args.confirmed_visual_gate_threshold,
         "balance_score_mode": args.balance_score_mode,
         "grounded_context_radius": args.grounded_context_radius,
         "modes": modes,

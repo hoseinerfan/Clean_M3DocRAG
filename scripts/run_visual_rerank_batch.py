@@ -27,6 +27,7 @@ from scripts.rerank_target_docs_visual_aware import (
     DOC_AGGREGATION_MODE_CHOICES,
     NON_VISUAL_PAGE_MODE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
+    VISUAL_PREFILTER_SORT_KEY_CHOICES,
     VISUAL_SCORE_QUERY_MODE_CHOICES,
     WeightConfig,
     apply_two_stage_exact_rerank_to_doc_features,
@@ -560,6 +561,25 @@ def parse_args() -> argparse.Namespace:
             "Which page tokens contribute to the non-visual channel. "
             "'labeled_only' uses only page tokens labeled non_visual. "
             "'all_non_visual_patches' uses all spatial page patches except those labeled visual."
+        ),
+    )
+    parser.add_argument(
+        "--visual-prefilter-sort-key",
+        default="balance_then_visual",
+        choices=VISUAL_PREFILTER_SORT_KEY_CHOICES,
+        help=(
+            "How to rank pages during visual-prefilter selection. "
+            "'non_visual_with_confirmed_visual_gate' requires confirmed_visual >= "
+            "--confirmed-visual-gate-threshold, then ranks survivors by non_visual score."
+        ),
+    )
+    parser.add_argument(
+        "--confirmed-visual-gate-threshold",
+        type=float,
+        default=0.1,
+        help=(
+            "Threshold used by --visual-prefilter-sort-key=non_visual_with_confirmed_visual_gate. "
+            "Pages below this confirmed_visual score are demoted behind all gated-in pages."
         ),
     )
     parser.add_argument(
@@ -1425,6 +1445,8 @@ def main() -> None:
         )
     if args.visual_fallback_all_token_weight < 0.0:
         raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
+    if args.confirmed_visual_gate_threshold < 0.0:
+        raise ValueError("--confirmed-visual-gate-threshold must be >= 0.")
     if args.learned_doc_reranker_top_docs < 0:
         raise ValueError("--learned-doc-reranker-top-docs must be >= 0.")
     if args.vlm_rerank_top_docs < 0:
@@ -1892,6 +1914,8 @@ def main() -> None:
                     visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
                     visual_score_query_mode=args.visual_score_query_mode,
                     non_visual_page_mode=args.non_visual_page_mode,
+                    prefilter_sort_key_mode=args.visual_prefilter_sort_key,
+                    confirmed_visual_gate_threshold=args.confirmed_visual_gate_threshold,
                 )
             if learned_doc_reranker_active or args.output_doc_feature_jsonl:
                 assert page_token_classes_by_uid is not None
@@ -2168,6 +2192,8 @@ def main() -> None:
             "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
             "visual_score_query_mode": args.visual_score_query_mode,
             "non_visual_page_mode": args.non_visual_page_mode,
+            "visual_prefilter_sort_key": args.visual_prefilter_sort_key,
+            "confirmed_visual_gate_threshold": args.confirmed_visual_gate_threshold,
             "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
             "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
             "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
@@ -2295,6 +2321,8 @@ def main() -> None:
         "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
         "visual_score_query_mode": args.visual_score_query_mode,
         "non_visual_page_mode": args.non_visual_page_mode,
+        "visual_prefilter_sort_key": args.visual_prefilter_sort_key,
+        "confirmed_visual_gate_threshold": args.confirmed_visual_gate_threshold,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,

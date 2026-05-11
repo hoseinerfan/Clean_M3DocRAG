@@ -33,7 +33,7 @@ from scripts.rerank_target_docs_visual_aware import (
     make_query_score_mask,
     resolve_model_path,
     visual_prefilter_primary_score,
-    visual_prefilter_sort_key,
+    visual_prefilter_sort_key_with_threshold,
 )
 from scripts.run_visual_rerank_batch import (
     build_baseline_pool,
@@ -93,6 +93,15 @@ def parse_args() -> argparse.Namespace:
         default="balance_then_visual",
         choices=PREFILTER_SORT_KEY_CHOICES,
         help="How to rank pages during the visual prefilter stage.",
+    )
+    parser.add_argument(
+        "--confirmed-visual-gate-threshold",
+        type=float,
+        default=0.1,
+        help=(
+            "Threshold used by prefilter_sort_key=non_visual_with_confirmed_visual_gate. "
+            "Pages below this confirmed_visual score are demoted behind all gated-in pages."
+        ),
     )
     parser.add_argument("--grounded-context-radius", type=int, default=2)
     parser.add_argument("--visual-fallback-all-token-weight", type=float, default=0.0)
@@ -320,7 +329,11 @@ def main() -> None:
 
         selected_visual_features = sorted(
             visual_features,
-            key=lambda item: visual_prefilter_sort_key(item, args.prefilter_sort_key),
+            key=lambda item: visual_prefilter_sort_key_with_threshold(
+                item,
+                mode=args.prefilter_sort_key,
+                confirmed_visual_gate_threshold=args.confirmed_visual_gate_threshold,
+            ),
             reverse=True,
         )[: args.visual_prefilter_top_pages]
         visual_top_pages = [
@@ -329,7 +342,11 @@ def main() -> None:
                 "page_uid": feature.page_uid,
                 "doc_id": feature.doc_id,
                 "page_idx": int(feature.page_idx),
-                "prefilter_primary_score": visual_prefilter_primary_score(feature, args.prefilter_sort_key),
+                "prefilter_primary_score": visual_prefilter_primary_score(
+                    feature,
+                    args.prefilter_sort_key,
+                    confirmed_visual_gate_threshold=args.confirmed_visual_gate_threshold,
+                ),
                 "base_page_score": float(feature.base_page_score),
                 "visual_page_score": float(feature.visual_page_score),
                 "confirmed_visual_page_score": float(feature.confirmed_visual_page_score),
@@ -391,6 +408,7 @@ def main() -> None:
         "from_baseline_top_pages": args.from_baseline_top_pages,
         "visual_prefilter_top_pages": args.visual_prefilter_top_pages,
         "prefilter_sort_key": args.prefilter_sort_key,
+        "confirmed_visual_gate_threshold": args.confirmed_visual_gate_threshold,
         "balance_score_mode": args.balance_score_mode,
         "non_visual_page_mode": args.non_visual_page_mode,
         "visual_score_query_mode": args.visual_score_query_mode,

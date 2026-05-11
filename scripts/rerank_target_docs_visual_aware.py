@@ -71,6 +71,7 @@ VISUAL_PREFILTER_SORT_KEY_CHOICES = (
     "non_visual_only",
     "grounded_non_visual_only",
     "confirmed_visual_only",
+    "non_visual_with_confirmed_visual_gate",
 )
 DOC_AGGREGATION_MODE_CHOICES = (
     "best_page",
@@ -2943,6 +2944,25 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--visual-prefilter-sort-key",
+        default="balance_then_visual",
+        choices=VISUAL_PREFILTER_SORT_KEY_CHOICES,
+        help=(
+            "How to rank pages during visual-prefilter selection. "
+            "'non_visual_with_confirmed_visual_gate' requires confirmed_visual >= "
+            "--confirmed-visual-gate-threshold, then ranks survivors by non_visual score."
+        ),
+    )
+    parser.add_argument(
+        "--confirmed-visual-gate-threshold",
+        type=float,
+        default=0.1,
+        help=(
+            "Threshold used by --visual-prefilter-sort-key=non_visual_with_confirmed_visual_gate. "
+            "Pages below this confirmed_visual score are demoted behind all gated-in pages."
+        ),
+    )
+    parser.add_argument(
         "--nonspatial-token-position",
         default="suffix",
         choices=["prefix", "suffix"],
@@ -4267,6 +4287,8 @@ def apply_two_stage_exact_rerank_to_doc_features(
 def visual_prefilter_primary_score(
     feature: PageFeature,
     mode: str = "balance_then_visual",
+    *,
+    confirmed_visual_gate_threshold: float = 0.1,
 ) -> float:
     if mode == "balance_then_visual":
         return (
@@ -4284,15 +4306,42 @@ def visual_prefilter_primary_score(
         return float(feature.grounded_non_visual_page_score)
     if mode == "confirmed_visual_only":
         return float(feature.confirmed_visual_page_score)
+    if mode == "non_visual_with_confirmed_visual_gate":
+        return (
+            float(feature.non_visual_page_score)
+            if float(feature.confirmed_visual_page_score) >= float(confirmed_visual_gate_threshold)
+            else 0.0
+        )
     raise ValueError(f"Unsupported visual prefilter sort mode: {mode!r}")
 
 
 def visual_prefilter_sort_key(
     feature: PageFeature,
     mode: str = "balance_then_visual",
-) -> tuple[float, float, float, float, float, str]:
-    primary_score = visual_prefilter_primary_score(feature, mode)
+) -> tuple[float, float, float, float, float, float, str]:
+    return visual_prefilter_sort_key_with_threshold(feature, mode=mode, confirmed_visual_gate_threshold=0.1)
+
+
+def visual_prefilter_sort_key_with_threshold(
+    feature: PageFeature,
+    mode: str = "balance_then_visual",
+    *,
+    confirmed_visual_gate_threshold: float = 0.1,
+) -> tuple[float, float, float, float, float, float, str]:
+    primary_score = visual_prefilter_primary_score(
+        feature,
+        mode,
+        confirmed_visual_gate_threshold=confirmed_visual_gate_threshold,
+    )
+    gate_pass = 1.0
+    if mode == "non_visual_with_confirmed_visual_gate":
+        gate_pass = (
+            1.0
+            if float(feature.confirmed_visual_page_score) >= float(confirmed_visual_gate_threshold)
+            else 0.0
+        )
     return (
+        gate_pass,
         primary_score,
         float(feature.confirmed_visual_page_score),
         float(feature.visual_page_score),
@@ -4302,8 +4351,8 @@ def visual_prefilter_sort_key(
     )
 
 
-def _visual_prefilter_sort_key(feature: PageFeature) -> tuple[float, float, float, float, float, str]:
-    return visual_prefilter_sort_key(feature, "balance_then_visual")
+def _visual_prefilter_sort_key(feature: PageFeature) -> tuple[float, float, float, float, float, float, str]:
+    return visual_prefilter_sort_key_with_threshold(feature, mode="balance_then_visual")
 
 
 def _visual_prefilter_trace_payload(
@@ -4320,6 +4369,8 @@ def _visual_prefilter_trace_payload(
         "prefilter_primary_score": float(primary_score),
         "base_page_score": float(feature.base_page_score),
         "visual_page_score": float(feature.visual_page_score),
+        "confirmed_visual_page_score": float(feature.confirmed_visual_page_score),
+        "non_visual_page_score": float(feature.non_visual_page_score),
         "grounded_non_visual_page_score": float(feature.grounded_non_visual_page_score),
         "balance_score": float(feature.balance_score),
     }
@@ -4344,6 +4395,8 @@ def apply_visual_prefilter_exact_rerank_to_top_pages(
     visual_fallback_all_token_weight: float = 0.0,
     visual_score_query_mode: str = "visual_query_only",
     non_visual_page_mode: str = "labeled_only",
+    prefilter_sort_key_mode: str = "balance_then_visual",
+    confirmed_visual_gate_threshold: float = 0.1,
 ) -> tuple[list[PageFeature], dict[str, object] | None]:
     if visual_top_pages <= 0 or exact_top_pages <= 0 or not page_features:
         return page_features, None
@@ -4373,7 +4426,11 @@ def apply_visual_prefilter_exact_rerank_to_top_pages(
     top_exact_count = min(max(int(exact_top_pages), 0), len(visual_features))
     selected_visual_features = sorted(
         visual_features,
-        key=_visual_prefilter_sort_key,
+        key=lambda item: visual_prefilter_sort_key_with_threshold(
+            item,
+            mode=prefilter_sort_key_mode,
+            confirmed_visual_gate_threshold=confirmed_visual_gate_threshold,
+        ),
         reverse=True,
     )[:top_exact_count]
     selected_page_uids = {item.page_uid for item in selected_visual_features}
@@ -4381,10 +4438,10 @@ def apply_visual_prefilter_exact_rerank_to_top_pages(
         _visual_prefilter_trace_payload(
             feature,
             rank=rank,
-            primary_score=(
-                float(feature.balance_score)
-                if float(feature.balance_score) > 0.0
-                else float(feature.visual_page_score)
+            primary_score=visual_prefilter_primary_score(
+                feature,
+                prefilter_sort_key_mode,
+                confirmed_visual_gate_threshold=confirmed_visual_gate_threshold,
             ),
         )
         for rank, feature in enumerate(selected_visual_features, start=1)
@@ -4436,6 +4493,8 @@ def apply_visual_prefilter_exact_rerank_to_top_pages(
     return updated_features, {
         "visual_top_pages": int(visual_top_pages),
         "exact_top_pages": int(top_exact_count),
+        "prefilter_sort_key_mode": prefilter_sort_key_mode,
+        "confirmed_visual_gate_threshold": float(confirmed_visual_gate_threshold),
         "pre_exact_selected_pages": pre_exact_selected_pages,
         "post_exact_selected_pages_by_exact_score": post_exact_selected_pages,
     }
@@ -5677,6 +5736,8 @@ def main() -> None:
         )
     if args.visual_fallback_all_token_weight < 0.0:
         raise ValueError("--visual-fallback-all-token-weight must be >= 0.")
+    if args.confirmed_visual_gate_threshold < 0.0:
+        raise ValueError("--confirmed-visual-gate-threshold must be >= 0.")
 
     import torch
 
@@ -6117,6 +6178,8 @@ def main() -> None:
             visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
             visual_score_query_mode=args.visual_score_query_mode,
             non_visual_page_mode=args.non_visual_page_mode,
+            prefilter_sort_key_mode=args.visual_prefilter_sort_key,
+            confirmed_visual_gate_threshold=args.confirmed_visual_gate_threshold,
         )
 
     stage1_base_doc_rank_map: dict[str, int] | None = None
@@ -6269,6 +6332,8 @@ def main() -> None:
         "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
         "visual_score_query_mode": args.visual_score_query_mode,
         "non_visual_page_mode": args.non_visual_page_mode,
+        "visual_prefilter_sort_key": args.visual_prefilter_sort_key,
+        "confirmed_visual_gate_threshold": args.confirmed_visual_gate_threshold,
         "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
         "nonspatial_token_position": args.nonspatial_token_position,
         "candidate_doc_count": len(candidate_doc_ids),
@@ -6347,6 +6412,8 @@ def main() -> None:
                 "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
                 "visual_score_query_mode": args.visual_score_query_mode,
                 "non_visual_page_mode": args.non_visual_page_mode,
+                "visual_prefilter_sort_key": args.visual_prefilter_sort_key,
+                "confirmed_visual_gate_threshold": args.confirmed_visual_gate_threshold,
                 "ignore_pad_scores_in_final_ranking": args.ignore_pad_scores_in_final_ranking,
                 "query_label_path": args.splice_query_token_labels,
                 "patch_label_path": args.splice_patch_labels_jsonl,

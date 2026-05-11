@@ -33,7 +33,7 @@ from scripts.rerank_target_docs_visual_aware import (
     make_query_score_mask,
     resolve_model_path,
     visual_prefilter_primary_score,
-    visual_prefilter_sort_key,
+    visual_prefilter_sort_key_with_threshold,
 )
 from scripts.run_visual_rerank_batch import (
     build_baseline_pool,
@@ -98,6 +98,15 @@ def parse_args() -> argparse.Namespace:
         default="balance_then_visual",
         choices=PREFILTER_SORT_KEY_CHOICES,
         help="How to rank pages during the visual prefilter stage.",
+    )
+    parser.add_argument(
+        "--confirmed-visual-gate-threshold",
+        type=float,
+        default=0.1,
+        help=(
+            "Threshold used by prefilter_sort_key=non_visual_with_confirmed_visual_gate. "
+            "Pages below this confirmed_visual score are demoted behind all gated-in pages."
+        ),
     )
     parser.add_argument("--grounded-context-radius", type=int, default=2)
     parser.add_argument("--visual-fallback-all-token-weight", type=float, default=0.0)
@@ -347,7 +356,11 @@ def main() -> None:
         }
         sorted_visual_features = sorted(
             visual_features,
-            key=lambda item: visual_prefilter_sort_key(item, args.prefilter_sort_key),
+            key=lambda item: visual_prefilter_sort_key_with_threshold(
+                item,
+                mode=args.prefilter_sort_key,
+                confirmed_visual_gate_threshold=args.confirmed_visual_gate_threshold,
+            ),
             reverse=True,
         )
 
@@ -355,7 +368,11 @@ def main() -> None:
         gold_pages_all = []
         non_gold_pages_all = []
         for rank, feature in enumerate(sorted_visual_features, start=1):
-            primary = visual_prefilter_primary_score(feature, args.prefilter_sort_key)
+            primary = visual_prefilter_primary_score(
+                feature,
+                args.prefilter_sort_key,
+                confirmed_visual_gate_threshold=args.confirmed_visual_gate_threshold,
+            )
             record = {
                 "visual_rank": int(rank),
                 "baseline_rank": int(baseline_rank_map.get(feature.page_uid, -1)),
@@ -411,6 +428,7 @@ def main() -> None:
             "route_features": route_features,
             "reliability_checklist": reliability_checklist,
             "prefilter_sort_key": args.prefilter_sort_key,
+            "confirmed_visual_gate_threshold": args.confirmed_visual_gate_threshold,
             "non_visual_page_mode": args.non_visual_page_mode,
             "visual_score_query_mode": args.visual_score_query_mode,
             "visual_prefilter_top_pages": args.visual_prefilter_top_pages,
