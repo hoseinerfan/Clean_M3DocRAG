@@ -1671,3 +1671,480 @@ The branch is worth keeping only if one of the following happens:
 - or it matches `79 / 141` while using materially fewer retained tokens on average
 
 That would provide a real accuracy-efficiency tradeoff story instead of another small heuristic tweak.
+
+## 2026-05-11 Addendum
+
+### Fixed-`K` sweep around `256`: stronger pruning is better on the `141`
+
+Using the current reproducible `nprobe=4` retrieval pool on the `141` `ImageListQ` qids, plain base-only `global_topk` behaved as follows:
+
+- `K=224`
+  - `81 / 141`
+  - `improved_doc_rank_count = 68`
+- `K=240`
+  - `79 / 141`
+  - `improved_doc_rank_count = 69`
+- `K=256`
+  - `79 / 141`
+  - `improved_doc_rank_count = 67`
+- `K=272`
+  - `79 / 141`
+  - `improved_doc_rank_count = 70`
+- `K=288`
+  - `78 / 141`
+  - `improved_doc_rank_count = 70`
+
+Interpretation:
+
+- `256` is not a local optimum on this slice
+- `224` is the best fixed budget seen so far on the `141`
+- larger `K` tends to drift back toward exact-MaxSim behavior and loses some early-precision regularization benefit
+
+### QID sensitivity split: most unstable qids prefer tighter pruning
+
+The `224..288` sweep was bucketed by qid-level rank trajectories:
+
+- `49` qids:
+  - `tight_pruning_prefers`
+- `17` qids:
+  - `loose_pruning_prefers`
+- `75` qids:
+  - stable
+
+This was not random noise. Many qids moved smoothly as `K` changed.
+
+The main scientific interpretation is:
+
+- one global `K` is a compromise
+- many qids with compact, iconic visual evidence prefer smaller budgets
+- a smaller set of more diffuse/contextual qids prefer larger budgets
+
+This supports the adaptive-budget motivation in principle, but the concrete adaptive rules below did not work well enough.
+
+### Adaptive `K`: entropy collapsed, concentration moved but did not separate useful qids
+
+#### `coarse_entropy`
+
+The old `coarse_entropy` adaptive mode was effectively degenerate.
+
+On a probe subset it behaved like:
+
+- fixed `K=256`
+  - top-4 `12`
+  - mean selected `256`
+- adaptive entropy
+  - top-4 `12`
+  - mean selected `384`
+
+with identical preservation / argmax-retention metrics.
+
+On the full `141`, entropy-adaptive runs also collapsed to the upper cap:
+
+- `224..272`
+  - mean selected `272.0`
+- `224..288`
+  - mean selected `288.0`
+
+So `coarse_entropy` should be treated as a negative result for this use case.
+
+#### `coarse_concentration`
+
+A new adaptive mode was added:
+
+- `9c84b00` Add concentration-based adaptive token budget
+
+This mode was mechanically non-degenerate:
+
+- adaptive concentration `224..272`
+  - `79 / 141`
+  - `improved_doc_rank_count = 68`
+  - mean selected `247.14`
+  - median selected `247.0`
+
+Additional ranking-focused diagnostics were added in:
+
+- `dfea652` Add ranking-focused pruning diagnostics
+
+Those diagnostics showed that the adaptive rule still behaved like a near-fixed budget:
+
+- mean top-1 selected token count:
+  - `246.80`
+- mean selected token count on top-10 pages:
+  - `246.90`
+- mean selected token count on best pages of top-4 docs:
+  - `246.89`
+- mean first-gold-page selected token count:
+  - `247.03`
+
+Bucketed by the fixed-`K` qid sensitivity split:
+
+- top-1 selected count
+  - tight `246.73`
+  - loose `246.94`
+  - stable `246.81`
+- top-4-doc-best mean selected count
+  - tight `246.92`
+  - loose `246.96`
+  - stable `246.85`
+
+So the concentration rule moved the global mean, but it did not meaningfully separate easy vs hard pages at the places that matter for ranking.
+
+Current recommendation:
+
+- do not keep smooth `coarse_entropy` / `coarse_concentration` adaptive rules as the main method
+- if adaptive `K` is revisited, it should probably use sharper thresholded bins rather than a weak smooth interpolation
+
+### `maxsim_greedy`: scientifically useful, but still too heavy as a practical method
+
+The candidate-first + lazy-greedy branch remains useful as an interpretability/control line, but it is not a strong practical method.
+
+Recent timed run:
+
+- `maxsim_greedy`
+  - `K=256`
+  - candidate budget `1024`
+  - current lazy-greedy fast path
+- result:
+  - `78 / 141`
+  - `improved_doc_rank_count = 68`
+  - wall-clock `4:25:41`
+  - max RSS `7.76e6 kB` (`~7.4 GiB`)
+
+Interpretation:
+
+- the branch is still too heavy for a compelling cheap alternative
+- and it is not winning enough on quality
+- keep it as a scientific control / analysis selector, not the primary method
+
+### New branch: visual-prefiltered exact page rerank
+
+Added in:
+
+- `5122db2` Add visual-prefiltered exact page rerank mode
+
+Method:
+
+1. start from the saved top-1000 baseline page pool
+2. compute approximate base-only page scores
+3. keep the top `B` pages by base score
+4. compute visual-grounded page scores on those pages
+5. keep the top `P` pages by the visual prefilter
+6. recompute exact MaxSim only on those `P` pages
+7. final ranking remains base-only
+
+Important clarification:
+
+- visual / balance scores are used only for page selection into the exact stage
+- final fused page score in the reported runs remained:
+  - base weight `1.0`
+  - visual / non-visual / balance weights `0.0`
+- so the final page score is still just base score after the exact refresh
+
+Default scientific config used first:
+
+- base token budget:
+  - `224`
+- visual shortlist:
+  - `B=512`
+- exact page budget:
+  - `P=128`
+- balance mode:
+  - `visual_x_grounded_nonvisual_avg`
+- grounded context radius:
+  - `2`
+
+Result on the `141`:
+
+- `visual_b512_p128_top224`
+  - `79 / 141`
+  - `improved_doc_rank_count = 72`
+
+Comparison:
+
+- fixed `224`
+  - `81 / 141`
+  - `improved = 68`
+- fixed `256`
+  - `79 / 141`
+  - `improved = 67`
+- visual prefilter exact `B=512, P=128`
+  - `79 / 141`
+  - `improved = 72`
+
+Interpretation:
+
+- this branch is not dead
+- it matches fixed `256` on top-4
+- it changes more qids in a favorable direction than fixed `256`
+- but `P=128` did not recover the stronger `fixed_224 = 81 / 141` boundary performance
+
+The most reasonable next single ablation is:
+
+- keep `B=512`
+- raise exact page budget from `P=128` to `P=192`
+
+### New trace outputs for the visual-prefilter exact branch
+
+Added in:
+
+- `efce4e5` Add visual prefilter page trace outputs
+
+For `visual_prefilter_exact_page_maxsim`, the per-qid JSONL now records:
+
+- `visual_prefilter_exact_page_trace.pre_exact_selected_pages`
+  - the selected pages in visual-prefilter order before exact MaxSim
+- `visual_prefilter_exact_page_trace.post_exact_selected_pages_by_exact_score`
+  - the same selected pages ranked by exact base score
+- `visual_prefilter_exact_page_trace.post_exact_selected_pages_final_rerank`
+  - those same pages in their final overall page ranking
+
+This makes it possible to inspect exactly which pages entered the exact stage and how exact MaxSim reordered them.
+
+### New helper: visual-prefilter gold-doc coverage on the saved top-1000 baseline pool
+
+Added in:
+
+- `2db27c5` Add visual prefilter coverage helper
+- `805d07a` Fix helper import path bootstrap
+
+New script:
+
+- `scripts/check_visual_prefilter_gold_coverage.py`
+
+What it does:
+
+- reuses the ready saved `--baseline-pred` top-1000 page pool
+- computes visual-prefilter scores on that fixed pool
+- checks gold-doc coverage among the top `N` visually prefiltered pages
+- also reports the baseline top-`N` coverage for comparison
+
+It writes:
+
+- per-qid JSONL:
+  - baseline top-`N` coverage summary
+  - visual-prefilter top-`N` coverage summary
+  - top-`N` visual-prefilter page trace
+- aggregate summary JSON:
+  - mean coverage
+  - zero/full-coverage qid counts
+  - coverage-improved / worsened / unchanged qid counts
+
+This helper is the right way to test whether visual-prefiltering is actually rescuing or losing gold-doc coverage before spending more time on exact reranking budgets.
+
+### Current recommendation after these experiments
+
+The branch priorities are now:
+
+1. `plain_top224`
+   - best fixed-budget intrinsic result on the `141`
+2. visual-prefilter exact page rerank
+   - most promising new method branch
+   - next test should be `B=512, P=192`
+3. `maxsim_greedy`
+   - keep as interpretability / control, not as the main practical method
+4. smooth adaptive `K`
+   - not recommended in current form
+
+### Follow-up results: visual-prefilter exact budgets and hard top-50 coverage
+
+Additional exact-page budget sweeps were run for the visual-prefilter branch:
+
+- `visual_b512_p20_top224`
+  - `79 / 141`
+  - `improved_doc_rank_count = 67`
+- `visual_b512_p128_top224`
+  - `79 / 141`
+  - `improved_doc_rank_count = 72`
+- `visual_b512_p192_top224`
+  - `78 / 141`
+  - `improved_doc_rank_count = 70`
+
+Interpretation:
+
+- `P=20` is surprisingly strong and matches `P=128` on top-4
+- `P=128` is still the strongest variant of this branch if total favorable rank movement is the objective
+- `P=192` is worse and should not be the default continuation
+- none of these variants beat fixed `top224 = 81 / 141`
+
+Hard top-50 coverage on the saved top-1000 baseline pool was also checked:
+
+- baseline mean gold-doc coverage@50
+  - `0.696217`
+- visual-prefilter mean gold-doc coverage@50
+  - `0.380024`
+
+Interpretation:
+
+- the current visual prefilter is too recall-destructive as a hard top-50 filter
+- this explains why tiny exact budgets should be treated cautiously if the selected subset is intended to preserve gold-doc coverage directly
+- it also suggests the visual signal is better viewed as a ranking perturbation / rescue signal than as a safe hard shortlist by itself
+
+### Reliability audit of visual query tokens and visual page patches
+
+New helper added:
+
+- `743c932` Add visual prefilter qid audit helper
+
+Reliability checklist extension:
+
+- `667cb6c` Add visual prefilter reliability checklist
+
+The audit helper was used on visually explicit qids such as:
+
+- `10b619...`
+  - torch on poster
+- `39d123...`
+  - flaming torch on logo
+- `299e684...`
+  - gorilla on poster
+
+Representative findings:
+
+- `10b619...`
+  - baseline first gold rank `776`
+  - visual-prefilter gold rank `280`
+  - verdict `useful_but_not_reliable`
+- `39d123...`
+  - baseline first gold rank `44`
+  - visual-prefilter gold rank `68`
+  - verdict `borderline`
+- `299e684...`
+  - baseline first gold rank `4`
+  - visual-prefilter gold rank `74`
+  - verdict `weak`
+
+Interpretation:
+
+- visual query tokens / visual page patches are informative in a coarse rescue sense
+- but they are not reliable enough for aggressive top-50 hard prefiltering
+- generic / noisy query-side visual tokens such as `poster`, `logo`, and even `scoring` are a real problem
+- grounded support is not consistently strong enough to separate gold pages from visually similar distractors
+
+### Whole-query-to-visual-patches test: negative result
+
+New mode added:
+
+- `513b7c0` Add whole-query visual prefilter score mode
+
+This introduced:
+
+- `visual_query_only`
+  - original behavior: visual query tokens vs visual page patches
+- `all_query_to_visual_patches`
+  - all active query tokens vs visual page patches
+
+On the same 3-qid audit, the whole-query mode did not fix the problem:
+
+- `10b619...`
+  - worse: `280 -> 294`
+- `39d123...`
+  - worse: `68 -> 82`
+- `299e684...`
+  - slightly better: `74 -> 61`, but still outside top-50
+
+Interpretation:
+
+- query-side visual-label noise is not the only bottleneck
+- whole-query scoring raises many pages together but does not improve discrimination enough
+- the main failure mode still appears to be poor page-side selectivity among visual distractors
+
+### Prefilter sort-mode comparison on 3 qids: `balance_then_visual` is likely the wrong default
+
+Sort-mode comparisons were added in:
+
+- `a701348` Add visual prefilter sort-mode comparisons
+
+Running the same 3 audited qids with five sort modes gave:
+
+- `balance_then_visual`
+  - `10b619...` useful-but-not-reliable, gold rank `280`
+  - `39d123...` borderline, gold rank `68`
+  - `299e684...` weak, gold rank `74`
+- `balance_only`
+  - `10b619...` useful-but-not-reliable, gold rank `223`
+  - `39d123...` strong, gold rank `2`
+  - `299e684...` borderline, gold rank `73`
+- `visual_only`
+  - `10b619...` useful-but-not-reliable, gold rank `211`
+  - `39d123...` strong, gold rank `10`
+  - `299e684...` weak, gold rank `190`
+- `non_visual_only`
+  - `10b619...` useful-but-not-reliable, gold rank `452`
+  - `39d123...` strong, gold rank `5`
+  - `299e684...` strong, gold rank `5`
+- `grounded_non_visual_only`
+  - `10b619...` useful-but-not-reliable, gold rank `293`
+  - `39d123...` strong, gold rank `21`
+  - `299e684...` strong, gold rank `46`
+
+Interpretation:
+
+- `balance_then_visual` likely behaves too much like a visual fallback sorter
+- for at least some qids, `balance_only` is dramatically better than `balance_then_visual`
+- `visual_only` can rescue some pages but is unstable and can be catastrophic (`299e684...`)
+- non-visual / grounded non-visual context can be surprisingly strong in some cases
+
+The likely design flaw is not missing visual tokens or missing visual patches. It is the ranking rule:
+
+- if `balance_score <= 0`, `balance_then_visual` backs off to raw `visual_page_score`
+- that allows many visually similar distractors to remain competitive even when conjunction / grounding is weak
+
+### New local confirmation score and explicit page inspection helper
+
+New scorer/tooling added:
+
+- `d013f4b` Add confirmed visual prefilter scoring tools
+- `3b17975` Fix inspection helper retrieval model init
+
+Additions:
+
+- a new prefilter score:
+  - `confirmed_visual_page_score`
+- a new sort mode:
+  - `confirmed_visual_only`
+- new script:
+  - `scripts/inspect_visual_prefilter_pages.py`
+
+The confirmed-visual score uses the current visual anchors, then rescales the visual score by local context support around those anchors rather than trusting page-wide raw visual evidence alone.
+
+The explicit inspection helper allows:
+
+- one qid
+- explicit gold page uid(s)
+- explicit wrong page uid(s)
+- comparison across multiple prefilter modes
+
+and reports:
+
+- full-pool ranks of those chosen pages under each mode
+- raw scores:
+  - `visual_page_score`
+  - `confirmed_visual_page_score`
+  - `grounded_non_visual_page_score`
+  - `grounded_context_page_score`
+  - `non_visual_page_score`
+  - `balance_score`
+- whether the best gold page beats the chosen wrong page(s)
+
+This helper is the most direct way to test whether a proposed prefilter score can:
+
+- reward the intended gold page
+- penalize a visually tempting distractor
+
+before spending more time on full reranking experiments.
+
+### Updated practical recommendation
+
+Current priorities after all follow-up experiments are:
+
+1. `plain_top224`
+   - still the strongest fixed-budget base-only result on the `141`
+2. `visual_prefilter_exact_page_maxsim`
+   - still scientifically interesting
+   - but the current prefilter should not be trusted as a hard small shortlist
+3. `balance_only`, `non_visual_only`, `grounded_non_visual_only`, and especially `confirmed_visual_only`
+   - these are now the most important prefilter scoring directions to audit
+4. `maxsim_greedy`
+   - keep as interpretability / scientific control
+5. smooth adaptive `K`
+   - deprioritized
