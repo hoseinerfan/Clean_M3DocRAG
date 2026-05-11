@@ -19,6 +19,7 @@ import torch
 from m3docrag.retrieval import ColPaliRetrievalModel
 from scripts.rerank_target_docs_visual_aware import (
     VISUAL_SCORE_QUERY_MODE_CHOICES,
+    VISUAL_PREFILTER_SORT_KEY_CHOICES,
     apply_visual_rerank_to_top_pages,
     build_page_id_metadata,
     build_page_token_classes,
@@ -30,6 +31,8 @@ from scripts.rerank_target_docs_visual_aware import (
     make_base_only_page_feature,
     make_query_score_mask,
     resolve_model_path,
+    visual_prefilter_primary_score,
+    visual_prefilter_sort_key,
 )
 from scripts.run_visual_rerank_batch import (
     build_baseline_pool,
@@ -38,13 +41,7 @@ from scripts.run_visual_rerank_batch import (
     load_qids,
 )
 
-PREFILTER_SORT_KEY_CHOICES = [
-    "balance_then_visual",
-    "balance_only",
-    "visual_only",
-    "non_visual_only",
-    "grounded_non_visual_only",
-]
+PREFILTER_SORT_KEY_CHOICES = list(VISUAL_PREFILTER_SORT_KEY_CHOICES)
 
 GENERIC_VISUAL_QUERY_TOKENS = {
     "poster",
@@ -127,41 +124,15 @@ def summarize_group(features: list[dict]) -> dict[str, object]:
         "mean_prefilter_primary_score": mean_or_none([float(x["prefilter_primary_score"]) for x in features]),
         "mean_balance_score": mean_or_none([float(x["balance_score"]) for x in features]),
         "mean_visual_page_score": mean_or_none([float(x["visual_page_score"]) for x in features]),
+        "mean_confirmed_visual_page_score": mean_or_none([float(x["confirmed_visual_page_score"]) for x in features]),
         "mean_grounded_non_visual_page_score": mean_or_none([float(x["grounded_non_visual_page_score"]) for x in features]),
+        "mean_grounded_context_page_score": mean_or_none([float(x["grounded_context_page_score"]) for x in features]),
         "mean_visual_alignment_ratio": mean_or_none([float(x["visual_alignment_ratio"]) for x in features]),
         "mean_non_visual_alignment_ratio": mean_or_none([float(x["non_visual_alignment_ratio"]) for x in features]),
         "mean_visual_anchor_patch_count": mean_or_none([float(x["visual_anchor_patch_count"]) for x in features]),
         "mean_grounded_non_visual_patch_count": mean_or_none([float(x["grounded_non_visual_patch_count"]) for x in features]),
+        "mean_grounded_context_patch_count": mean_or_none([float(x["grounded_context_patch_count"]) for x in features]),
     }
-
-
-def prefilter_primary_score(feature, mode: str) -> float:
-    if mode == "balance_then_visual":
-        return (
-            float(feature.balance_score)
-            if float(feature.balance_score) > 0.0
-            else float(feature.visual_page_score)
-        )
-    if mode == "balance_only":
-        return float(feature.balance_score)
-    if mode == "visual_only":
-        return float(feature.visual_page_score)
-    if mode == "non_visual_only":
-        return float(feature.non_visual_page_score)
-    if mode == "grounded_non_visual_only":
-        return float(feature.grounded_non_visual_page_score)
-    raise ValueError(f"Unsupported prefilter sort mode: {mode!r}")
-
-
-def prefilter_sort_key(feature, mode: str) -> tuple[float, float, float, float, str]:
-    primary = prefilter_primary_score(feature, mode)
-    return (
-        primary,
-        float(feature.balance_score),
-        float(feature.visual_page_score),
-        float(feature.grounded_non_visual_page_score),
-        feature.page_uid,
-    )
 
 
 def build_reliability_checklist(
@@ -388,7 +359,9 @@ def main() -> None:
                 "prefilter_primary_score": primary,
                 "base_page_score": float(feature.base_page_score),
                 "visual_page_score": float(feature.visual_page_score),
+                "confirmed_visual_page_score": float(feature.confirmed_visual_page_score),
                 "grounded_non_visual_page_score": float(feature.grounded_non_visual_page_score),
+                "grounded_context_page_score": float(feature.grounded_context_page_score),
                 "non_visual_page_score": float(feature.non_visual_page_score),
                 "balance_score": float(feature.balance_score),
                 "visual_alignment_ratio": float(feature.visual_alignment_ratio),
@@ -397,6 +370,7 @@ def main() -> None:
                 "non_visual_query_token_count": int(feature.non_visual_query_token_count),
                 "visual_patch_count": int(feature.visual_patch_count),
                 "grounded_non_visual_patch_count": int(feature.grounded_non_visual_patch_count),
+                "grounded_context_patch_count": int(feature.grounded_context_patch_count),
                 "visual_anchor_patch_count": int(feature.visual_anchor_patch_count),
             }
             visual_trace.append(record)
@@ -442,7 +416,9 @@ def main() -> None:
                 "doc_id": best_gold_visual["doc_id"],
                 "prefilter_primary_score": float(best_gold_visual["prefilter_primary_score"]),
                 "visual_page_score": float(best_gold_visual["visual_page_score"]),
+                "confirmed_visual_page_score": float(best_gold_visual["confirmed_visual_page_score"]),
                 "grounded_non_visual_page_score": float(best_gold_visual["grounded_non_visual_page_score"]),
+                "grounded_context_page_score": float(best_gold_visual["grounded_context_page_score"]),
                 "balance_score": float(best_gold_visual["balance_score"]),
             },
             "top_visual_prefilter_pages": visual_topn[: args.report_topn],

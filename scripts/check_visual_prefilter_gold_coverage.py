@@ -20,6 +20,7 @@ import torch
 from m3docrag.retrieval import ColPaliRetrievalModel
 from scripts.rerank_target_docs_visual_aware import (
     VISUAL_SCORE_QUERY_MODE_CHOICES,
+    VISUAL_PREFILTER_SORT_KEY_CHOICES,
     apply_visual_rerank_to_top_pages,
     build_page_id_metadata,
     build_page_token_classes,
@@ -30,6 +31,8 @@ from scripts.rerank_target_docs_visual_aware import (
     make_base_only_page_feature,
     make_query_score_mask,
     resolve_model_path,
+    visual_prefilter_primary_score,
+    visual_prefilter_sort_key,
 )
 from scripts.run_visual_rerank_batch import (
     build_baseline_pool,
@@ -38,13 +41,7 @@ from scripts.run_visual_rerank_batch import (
     load_qids,
 )
 
-PREFILTER_SORT_KEY_CHOICES = [
-    "balance_then_visual",
-    "balance_only",
-    "visual_only",
-    "non_visual_only",
-    "grounded_non_visual_only",
-]
+PREFILTER_SORT_KEY_CHOICES = list(VISUAL_PREFILTER_SORT_KEY_CHOICES)
 
 
 def parse_args() -> argparse.Namespace:
@@ -121,35 +118,6 @@ def dedupe_doc_ids_from_pages(rows: list[dict]) -> list[str]:
         seen.add(doc_id)
         doc_ids.append(doc_id)
     return doc_ids
-
-
-def prefilter_primary_score(feature, mode: str) -> float:
-    if mode == "balance_then_visual":
-        return (
-            float(feature.balance_score)
-            if float(feature.balance_score) > 0.0
-            else float(feature.visual_page_score)
-        )
-    if mode == "balance_only":
-        return float(feature.balance_score)
-    if mode == "visual_only":
-        return float(feature.visual_page_score)
-    if mode == "non_visual_only":
-        return float(feature.non_visual_page_score)
-    if mode == "grounded_non_visual_only":
-        return float(feature.grounded_non_visual_page_score)
-    raise ValueError(f"Unsupported prefilter sort mode: {mode!r}")
-
-
-def prefilter_sort_key(feature, mode: str) -> tuple[float, float, float, float, str]:
-    primary = prefilter_primary_score(feature, mode)
-    return (
-        primary,
-        float(feature.balance_score),
-        float(feature.visual_page_score),
-        float(feature.grounded_non_visual_page_score),
-        feature.page_uid,
-    )
 
 
 def summarize_top_pages(
@@ -357,7 +325,9 @@ def main() -> None:
                 "prefilter_primary_score": prefilter_primary_score(feature, args.prefilter_sort_key),
                 "base_page_score": float(feature.base_page_score),
                 "visual_page_score": float(feature.visual_page_score),
+                "confirmed_visual_page_score": float(feature.confirmed_visual_page_score),
                 "grounded_non_visual_page_score": float(feature.grounded_non_visual_page_score),
+                "grounded_context_page_score": float(feature.grounded_context_page_score),
                 "non_visual_page_score": float(feature.non_visual_page_score),
                 "balance_score": float(feature.balance_score),
             }
