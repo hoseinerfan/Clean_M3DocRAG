@@ -26,6 +26,7 @@ BASE_SCORE_SOURCE_CHOICES = (
     "approx_page_maxsim_topk",
     "two_stage_page_maxsim",
     "two_stage_doc_maxsim",
+    "visual_prefilter_exact_page_maxsim",
 )
 APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES = (
     "query_mean",
@@ -2520,7 +2521,10 @@ def parse_args() -> argparse.Namespace:
             "'two_stage_page_maxsim' uses approximate top-K pruning on all pages, then "
             "recomputes exact MaxSim only on the top-N stage-1 pages. "
             "'two_stage_doc_maxsim' uses approximate top-K pruning on all pages, then "
-            "recomputes exact MaxSim on all pages inside the top-N stage-1 docs."
+            "recomputes exact MaxSim on all pages inside the top-N stage-1 docs. "
+            "'visual_prefilter_exact_page_maxsim' uses approximate base scores on all pages, "
+            "computes visual-grounded page scores on a base shortlist, then recomputes exact "
+            "MaxSim only on the top visual-prefiltered pages."
         ),
     )
     parser.add_argument(
@@ -2727,7 +2731,9 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help=(
             "For --base-score-source=two_stage_page_maxsim, recompute exact MaxSim only on the "
-            "top-N pages from the approximate stage-1 ranking."
+            "top-N pages from the approximate stage-1 ranking. For "
+            "--base-score-source=visual_prefilter_exact_page_maxsim, recompute exact MaxSim only "
+            "on the top-N pages from the visual-grounded prefilter shortlist."
         ),
     )
     parser.add_argument(
@@ -2745,7 +2751,9 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help=(
             "Experimental staged mode. First compute a base-only ranking over all candidate pages, "
-            "then recompute full visual-aware features only for the top-N stage-1 pages."
+            "then recompute full visual-aware features only for the top-N stage-1 pages. "
+            "With --base-score-source=visual_prefilter_exact_page_maxsim, this is the size of the "
+            "base shortlist that receives visual-grounded page scoring before exact MaxSim."
         ),
     )
     parser.add_argument(
@@ -3826,7 +3834,12 @@ def compute_base_only_page_feature_scores_batched(
         exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
         return exact_scores, [None for _ in exact_scores]
 
-    if base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}:
+    if base_score_source not in {
+        "approx_page_maxsim_topk",
+        "two_stage_page_maxsim",
+        "two_stage_doc_maxsim",
+        "visual_prefilter_exact_page_maxsim",
+    }:
         raise ValueError(f"Unsupported batched base score source: {base_score_source!r}")
 
     topk = min(int(approx_page_token_topk), int(batch_page_embs.shape[1]))
@@ -3925,7 +3938,13 @@ def compute_base_only_page_features(
         and approx_page_token_selector == "global_topk"
         and approx_page_token_adaptive_k_mode == "disabled"
         and not report_pruning_diagnostics
-        and base_score_source in {"exact_page_maxsim", "approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
+        and base_score_source in {
+            "exact_page_maxsim",
+            "approx_page_maxsim_topk",
+            "two_stage_page_maxsim",
+            "two_stage_doc_maxsim",
+            "visual_prefilter_exact_page_maxsim",
+        }
     )
 
     batch_meta: list[tuple[str, int, float | None]] = []
@@ -4116,6 +4135,95 @@ def apply_two_stage_exact_rerank_to_doc_features(
     updated_features: list[PageFeature] = []
     for feature in page_features:
         if feature.doc_id not in top_doc_ids:
+            updated_features.append(feature)
+            continue
+
+        page_tensor = docid2embs[feature.doc_id][feature.page_idx]
+        page_emb = page_tensor.view(-1, page_tensor.shape[-1]).to(
+            device=query_emb.device,
+            dtype=query_emb.dtype,
+        )
+        exact_base_page_score = compute_exact_base_page_score(
+            page_emb=page_emb,
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+        )
+        updated_features.append(
+            make_base_only_page_feature(
+                doc_id=feature.doc_id,
+                page_idx=feature.page_idx,
+                base_page_score=exact_base_page_score,
+            )
+        )
+
+    return updated_features
+
+
+def _visual_prefilter_sort_key(feature: PageFeature) -> tuple[float, float, float, float, str]:
+    primary_score = (
+        float(feature.balance_score)
+        if float(feature.balance_score) > 0.0
+        else float(feature.visual_page_score)
+    )
+    return (
+        primary_score,
+        float(feature.visual_page_score),
+        float(feature.grounded_non_visual_page_score),
+        float(feature.base_page_score),
+        feature.page_uid,
+    )
+
+
+def apply_visual_prefilter_exact_rerank_to_top_pages(
+    *,
+    page_features: list[PageFeature],
+    docid2embs: dict[str, object],
+    query_emb: torch.Tensor,
+    query_axis_classes: list[str],
+    query_token_labels: list[str] | None,
+    query_score_mask: torch.Tensor,
+    page_token_classes_by_uid: dict[str, list[str]],
+    page_meta_by_uid: dict[str, dict],
+    visual_top_pages: int,
+    exact_top_pages: int,
+    require_informative_visual_query: bool = False,
+    filter_to_informative_visual_query: bool = False,
+    balance_score_mode: str = "min_avg",
+    grounded_context_radius: int = 0,
+    visual_fallback_all_token_weight: float = 0.0,
+) -> list[PageFeature]:
+    if visual_top_pages <= 0 or exact_top_pages <= 0 or not page_features:
+        return page_features
+
+    visual_features = apply_visual_rerank_to_top_pages(
+        page_features=page_features,
+        docid2embs=docid2embs,
+        query_emb=query_emb,
+        query_axis_classes=query_axis_classes,
+        query_token_labels=query_token_labels,
+        query_score_mask=query_score_mask,
+        page_token_classes_by_uid=page_token_classes_by_uid,
+        page_meta_by_uid=page_meta_by_uid,
+        top_pages=visual_top_pages,
+        require_informative_visual_query=require_informative_visual_query,
+        filter_to_informative_visual_query=filter_to_informative_visual_query,
+        preserve_stage1_base_score=True,
+        balance_score_mode=balance_score_mode,
+        grounded_context_radius=grounded_context_radius,
+        visual_fallback_all_token_weight=visual_fallback_all_token_weight,
+    )
+    if visual_features is page_features:
+        return page_features
+
+    top_exact_count = min(max(int(exact_top_pages), 0), len(visual_features))
+    selected_page_uids = {
+        item.page_uid
+        for item in sorted(visual_features, key=_visual_prefilter_sort_key, reverse=True)[:top_exact_count]
+    }
+
+    updated_features: list[PageFeature] = []
+    for feature in page_features:
+        if feature.page_uid not in selected_page_uids:
             updated_features.append(feature)
             continue
 
@@ -5081,18 +5189,38 @@ def main() -> None:
             "--base-score-source=two_stage_doc_maxsim requires "
             "--approx-base-page-token-topk > 0."
         )
-    if args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"} and args.approx_base_page_token_topk > 0:
+    if (
+        args.base_score_source == "visual_prefilter_exact_page_maxsim"
+        and args.approx_base_page_token_topk <= 0
+    ):
+        raise ValueError(
+            "--base-score-source=visual_prefilter_exact_page_maxsim requires "
+            "--approx-base-page-token-topk > 0."
+        )
+    if args.base_score_source not in {
+        "approx_page_maxsim_topk",
+        "two_stage_page_maxsim",
+        "two_stage_doc_maxsim",
+        "visual_prefilter_exact_page_maxsim",
+    } and args.approx_base_page_token_topk > 0:
         raise ValueError(
             "--approx-base-page-token-topk is only valid with "
-            "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, or two_stage_doc_maxsim."
+            "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, "
+            "two_stage_doc_maxsim, or visual_prefilter_exact_page_maxsim."
         )
     if (
-        args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
+        args.base_score_source not in {
+            "approx_page_maxsim_topk",
+            "two_stage_page_maxsim",
+            "two_stage_doc_maxsim",
+            "visual_prefilter_exact_page_maxsim",
+        }
         and args.approx_base_page_token_scorer != "query_mean"
     ):
         raise ValueError(
             "--approx-base-page-token-scorer is only valid with "
-            "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, or two_stage_doc_maxsim."
+            "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, "
+            "two_stage_doc_maxsim, or visual_prefilter_exact_page_maxsim."
         )
     if args.approx_base_page_token_scorer == "query_prototype_max" and args.approx_base_page_token_query_prototypes <= 0:
         raise ValueError("--approx-base-page-token-query-prototypes must be > 0.")
@@ -5117,12 +5245,18 @@ def main() -> None:
             "--approx-base-page-token-adaptive-k-mode is enabled."
         )
     if (
-        args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
+        args.base_score_source not in {
+            "approx_page_maxsim_topk",
+            "two_stage_page_maxsim",
+            "two_stage_doc_maxsim",
+            "visual_prefilter_exact_page_maxsim",
+        }
         and args.approx_base_page_token_selector != "global_topk"
     ):
         raise ValueError(
             "--approx-base-page-token-selector is only valid with "
-            "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, or two_stage_doc_maxsim."
+            "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, "
+            "two_stage_doc_maxsim, or visual_prefilter_exact_page_maxsim."
         )
     if (
         args.approx_base_page_token_selector != "spatial_quadrant_mix"
@@ -5231,22 +5365,37 @@ def main() -> None:
     if args.base_only_page_batch_size < 0:
         raise ValueError("--base-only-page-batch-size must be >= 0.")
     if (
-        args.base_score_source not in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
+        args.base_score_source not in {
+            "approx_page_maxsim_topk",
+            "two_stage_page_maxsim",
+            "two_stage_doc_maxsim",
+            "visual_prefilter_exact_page_maxsim",
+        }
         and args.approx_base_page_token_coarse_dtype != "fp32"
     ):
         raise ValueError(
             "--approx-base-page-token-coarse-dtype is only valid with "
-            "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, or two_stage_doc_maxsim."
+            "--base-score-source=approx_page_maxsim_topk, two_stage_page_maxsim, "
+            "two_stage_doc_maxsim, or visual_prefilter_exact_page_maxsim."
         )
     if args.base_score_source == "two_stage_page_maxsim" and args.two_stage_exact_top_pages <= 0:
         raise ValueError(
             "--base-score-source=two_stage_page_maxsim requires "
             "--two-stage-exact-top-pages > 0."
         )
-    if args.base_score_source != "two_stage_page_maxsim" and args.two_stage_exact_top_pages > 0:
+    if args.base_score_source == "visual_prefilter_exact_page_maxsim" and args.two_stage_exact_top_pages <= 0:
+        raise ValueError(
+            "--base-score-source=visual_prefilter_exact_page_maxsim requires "
+            "--two-stage-exact-top-pages > 0."
+        )
+    if (
+        args.base_score_source != "two_stage_page_maxsim"
+        and args.base_score_source != "visual_prefilter_exact_page_maxsim"
+        and args.two_stage_exact_top_pages > 0
+    ):
         raise ValueError(
             "--two-stage-exact-top-pages is only valid with "
-            "--base-score-source=two_stage_page_maxsim."
+            "--base-score-source=two_stage_page_maxsim or visual_prefilter_exact_page_maxsim."
         )
     if args.base_score_source == "two_stage_doc_maxsim" and args.two_stage_exact_top_docs <= 0:
         raise ValueError(
@@ -5280,6 +5429,30 @@ def main() -> None:
             "--visual-rerank-filter-to-informative-visual-query, and "
             "--visual-rerank-preserve-stage1-base-score require "
             "--visual-rerank-top-pages > 0 or --visual-rerank-top-docs > 0."
+        )
+    if (
+        args.base_score_source == "visual_prefilter_exact_page_maxsim"
+        and args.visual_rerank_top_pages <= 0
+    ):
+        raise ValueError(
+            "--base-score-source=visual_prefilter_exact_page_maxsim requires "
+            "--visual-rerank-top-pages > 0."
+        )
+    if (
+        args.base_score_source == "visual_prefilter_exact_page_maxsim"
+        and args.visual_rerank_top_docs > 0
+    ):
+        raise ValueError(
+            "--base-score-source=visual_prefilter_exact_page_maxsim does not support "
+            "--visual-rerank-top-docs."
+        )
+    if (
+        args.base_score_source == "visual_prefilter_exact_page_maxsim"
+        and args.two_stage_exact_top_pages > args.visual_rerank_top_pages
+    ):
+        raise ValueError(
+            "--two-stage-exact-top-pages must be <= --visual-rerank-top-pages when "
+            "--base-score-source=visual_prefilter_exact_page_maxsim."
         )
     if args.gated_visual_top_docs < 0:
         raise ValueError("--gated-visual-top-docs must be >= 0.")
@@ -5325,8 +5498,10 @@ def main() -> None:
         balance=args.weight_balance,
     )
     fixed_base_only = (not args.grid_search) and is_base_only_weights(fixed_weights)
+    visual_prefilter_exact_active = args.base_score_source == "visual_prefilter_exact_page_maxsim"
     staged_visual_rerank = (
         (not args.grid_search)
+        and not visual_prefilter_exact_active
         and (args.visual_rerank_top_pages > 0 or args.visual_rerank_top_docs > 0)
     )
     if args.query_route_config_json and not staged_visual_rerank:
@@ -5335,7 +5510,12 @@ def main() -> None:
             "or --visual-rerank-top-docs > 0."
         )
     if (
-        args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
+        args.base_score_source in {
+            "approx_page_maxsim_topk",
+            "two_stage_page_maxsim",
+            "two_stage_doc_maxsim",
+            "visual_prefilter_exact_page_maxsim",
+        }
         and not (fixed_base_only or staged_visual_rerank)
     ):
         raise ValueError(
@@ -5343,7 +5523,11 @@ def main() -> None:
         )
     if args.base_only_page_batch_size > 0 and not (fixed_base_only or staged_visual_rerank):
         raise ValueError("--base-only-page-batch-size is currently only supported in base-only mode.")
-    if (args.visual_rerank_top_pages > 0 or args.visual_rerank_top_docs > 0) and fixed_base_only:
+    if (
+        (args.visual_rerank_top_pages > 0 or args.visual_rerank_top_docs > 0)
+        and fixed_base_only
+        and not visual_prefilter_exact_active
+    ):
         raise ValueError(
             "--visual-rerank-top-pages / --visual-rerank-top-docs require non-base-only fusion weights."
         )
@@ -5486,6 +5670,7 @@ def main() -> None:
     needs_patch_axis_classes = (
         not fixed_base_only
         or staged_visual_rerank
+        or visual_prefilter_exact_active
         or args.approx_base_page_token_selector in {"learned_token_topk", "soft_label_prior", "visual_patch_query_prior"}
     )
     patch_axis_classes_by_uid = (
@@ -5522,7 +5707,7 @@ def main() -> None:
     query_emb = query_meta["embeddings"].float()
     query_raw_tokens = query_meta.get("raw_tokens", [])
     query_token_labels = [clean_token_label(token) for token in query_raw_tokens]
-    if staged_visual_rerank:
+    if staged_visual_rerank or visual_prefilter_exact_active:
         query_axis_classes = load_splice_query_axis_classes(
             query_labels_path=args.splice_query_token_labels,
             qid=args.qid,
@@ -5579,7 +5764,12 @@ def main() -> None:
                 baseline_page_score_map=baseline_page_score_map,
                 approx_page_token_topk=(
                     args.approx_base_page_token_topk
-                    if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
+                    if args.base_score_source in {
+                        "approx_page_maxsim_topk",
+                        "two_stage_page_maxsim",
+                        "two_stage_doc_maxsim",
+                        "visual_prefilter_exact_page_maxsim",
+                    }
                     else 0
                 ),
                 approx_page_token_scorer=args.approx_base_page_token_scorer,
@@ -5616,7 +5806,12 @@ def main() -> None:
                 baseline_page_score_map=baseline_page_score_map,
                 approx_page_token_topk=(
                     args.approx_base_page_token_topk
-                    if args.base_score_source in {"approx_page_maxsim_topk", "two_stage_page_maxsim", "two_stage_doc_maxsim"}
+                    if args.base_score_source in {
+                        "approx_page_maxsim_topk",
+                        "two_stage_page_maxsim",
+                        "two_stage_doc_maxsim",
+                        "visual_prefilter_exact_page_maxsim",
+                    }
                     else 0
                 ),
                 approx_page_token_scorer=args.approx_base_page_token_scorer,
@@ -5691,6 +5886,25 @@ def main() -> None:
             query_emb=query_emb,
             query_score_mask=query_score_mask,
             top_docs=args.two_stage_exact_top_docs,
+        )
+    if args.base_score_source == "visual_prefilter_exact_page_maxsim":
+        assert page_token_classes_by_uid is not None
+        page_features = apply_visual_prefilter_exact_rerank_to_top_pages(
+            page_features=page_features,
+            docid2embs=docid2embs,
+            query_emb=query_emb,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+            query_score_mask=query_score_mask,
+            page_token_classes_by_uid=page_token_classes_by_uid,
+            page_meta_by_uid=page_meta,
+            visual_top_pages=args.visual_rerank_top_pages,
+            exact_top_pages=args.two_stage_exact_top_pages,
+            require_informative_visual_query=args.visual_rerank_require_informative_visual_query,
+            filter_to_informative_visual_query=args.visual_rerank_filter_to_informative_visual_query,
+            balance_score_mode=args.balance_score_mode,
+            grounded_context_radius=args.grounded_context_radius,
+            visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
         )
 
     stage1_base_doc_rank_map: dict[str, int] | None = None
