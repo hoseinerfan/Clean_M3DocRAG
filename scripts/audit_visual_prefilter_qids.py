@@ -38,6 +38,26 @@ from scripts.run_visual_rerank_batch import (
     load_qids,
 )
 
+GENERIC_VISUAL_QUERY_TOKENS = {
+    "poster",
+    "logo",
+    "title",
+    "team",
+    "album",
+    "movie",
+    "film",
+    "club",
+    "player",
+    "scoring",
+    "list",
+    "member",
+    "members",
+    "season",
+    "results",
+    "filmography",
+    "discography",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -93,6 +113,97 @@ def summarize_group(features: list[dict]) -> dict[str, object]:
         "mean_non_visual_alignment_ratio": mean_or_none([float(x["non_visual_alignment_ratio"]) for x in features]),
         "mean_visual_anchor_patch_count": mean_or_none([float(x["visual_anchor_patch_count"]) for x in features]),
         "mean_grounded_non_visual_patch_count": mean_or_none([float(x["grounded_non_visual_patch_count"]) for x in features]),
+    }
+
+
+def build_reliability_checklist(
+    *,
+    route_features: dict,
+    best_gold_visual: dict | None,
+    baseline_first_gold_rank: int | None,
+    visual_prefilter_top_pages: int,
+    visual_topn_gold: list[dict],
+    visual_topn_non_gold: list[dict],
+) -> dict[str, object]:
+    informative_visual_tokens = list(route_features.get("informative_visual_query_tokens", []))
+    generic_tokens = [
+        token for token in informative_visual_tokens
+        if str(token).strip().lower() in GENERIC_VISUAL_QUERY_TOKENS
+    ]
+    specific_tokens = [
+        token for token in informative_visual_tokens
+        if str(token).strip().lower() not in GENERIC_VISUAL_QUERY_TOKENS
+    ]
+
+    gold_visual_rank = None if best_gold_visual is None else int(best_gold_visual["visual_rank"])
+    gold_rank_gain = (
+        None
+        if best_gold_visual is None or baseline_first_gold_rank is None
+        else int(baseline_first_gold_rank) - int(best_gold_visual["visual_rank"])
+    )
+    gold_reaches_topn = bool(best_gold_visual is not None and int(best_gold_visual["visual_rank"]) <= visual_prefilter_top_pages)
+    gold_reaches_top2n = bool(best_gold_visual is not None and int(best_gold_visual["visual_rank"]) <= 2 * visual_prefilter_top_pages)
+    grounded_support_active_for_gold = bool(
+        best_gold_visual is not None
+        and float(best_gold_visual["grounded_non_visual_page_score"]) > 0.0
+        and float(best_gold_visual["balance_score"]) > 0.0
+    )
+
+    topn_non_gold_mean_primary = mean_or_none([float(row["prefilter_primary_score"]) for row in visual_topn_non_gold])
+    topn_non_gold_max_primary = (
+        None
+        if not visual_topn_non_gold
+        else float(max(float(row["prefilter_primary_score"]) for row in visual_topn_non_gold))
+    )
+    topn_cutoff_primary = (
+        None
+        if not visual_topn_non_gold and not visual_topn_gold
+        else float(
+            min(
+                float(row["prefilter_primary_score"])
+                for row in (visual_topn_gold + visual_topn_non_gold)
+            )
+        )
+    )
+    gold_primary_score = None if best_gold_visual is None else float(best_gold_visual["prefilter_primary_score"])
+    gold_beats_topn_cutoff = bool(
+        gold_primary_score is not None
+        and topn_cutoff_primary is not None
+        and gold_primary_score >= topn_cutoff_primary
+    )
+
+    if gold_reaches_topn:
+        verdict = "strong"
+    elif gold_reaches_top2n and grounded_support_active_for_gold:
+        verdict = "borderline"
+    elif gold_rank_gain is not None and gold_rank_gain >= 100:
+        verdict = "useful_but_not_reliable"
+    else:
+        verdict = "weak"
+
+    return {
+        "informative_visual_token_count": len(informative_visual_tokens),
+        "informative_visual_tokens": informative_visual_tokens,
+        "generic_informative_visual_tokens": generic_tokens,
+        "specific_informative_visual_tokens": specific_tokens,
+        "generic_token_fraction": (
+            float(len(generic_tokens) / len(informative_visual_tokens))
+            if informative_visual_tokens
+            else None
+        ),
+        "baseline_first_gold_rank": baseline_first_gold_rank,
+        "gold_visual_rank": gold_visual_rank,
+        "gold_rank_gain": gold_rank_gain,
+        "gold_reaches_topn": gold_reaches_topn,
+        "gold_reaches_top2n": gold_reaches_top2n,
+        "topn_gold_page_count": len(visual_topn_gold),
+        "grounded_support_active_for_gold": grounded_support_active_for_gold,
+        "gold_primary_score": gold_primary_score,
+        "topn_non_gold_mean_primary_score": topn_non_gold_mean_primary,
+        "topn_non_gold_max_primary_score": topn_non_gold_max_primary,
+        "topn_cutoff_primary_score": topn_cutoff_primary,
+        "gold_beats_topn_cutoff": gold_beats_topn_cutoff,
+        "verdict": verdict,
     }
 
 
@@ -243,17 +354,33 @@ def main() -> None:
 
         visual_topn = visual_trace[: args.visual_prefilter_top_pages]
         visual_topn_gold = [row for row in visual_topn if row["is_gold_doc"]]
+        visual_topn_non_gold = [row for row in visual_topn if not row["is_gold_doc"]]
 
         best_gold_visual = next((row for row in visual_trace if row["is_gold_doc"]), None)
         best_gold_baseline = next((page_uid for page_uid in baseline_page_uids if page_uid.rsplit("_page", 1)[0] in gold_doc_id_set), None)
+        baseline_first_gold_rank = (
+            None if best_gold_baseline is None else int(baseline_rank_map[best_gold_baseline])
+        )
+        reliability_checklist = build_reliability_checklist(
+            route_features=route_features,
+            best_gold_visual=best_gold_visual,
+            baseline_first_gold_rank=baseline_first_gold_rank,
+            visual_prefilter_top_pages=args.visual_prefilter_top_pages,
+            visual_topn_gold=visual_topn_gold,
+            visual_topn_non_gold=visual_topn_non_gold,
+        )
 
         audit = {
             "qid": qid,
             "question": gold_row["question"],
             "gold_doc_ids": gold_doc_ids,
             "route_features": route_features,
+            "reliability_checklist": reliability_checklist,
             "visual_prefilter_top_pages": args.visual_prefilter_top_pages,
-            "baseline_first_gold_page_uid": best_gold_baseline,
+            "baseline_first_gold_page": None if best_gold_baseline is None else {
+                "page_uid": best_gold_baseline,
+                "baseline_rank": baseline_first_gold_rank,
+            },
             "visual_first_gold_page": None if best_gold_visual is None else {
                 "visual_rank": int(best_gold_visual["visual_rank"]),
                 "baseline_rank": int(best_gold_visual["baseline_rank"]),
@@ -266,20 +393,19 @@ def main() -> None:
             },
             "top_visual_prefilter_pages": visual_topn[: args.report_topn],
             "top_visual_prefilter_gold_pages": visual_topn_gold[: args.report_topn],
-            "top_visual_prefilter_non_gold_pages": [row for row in visual_topn if not row["is_gold_doc"]][: args.report_topn],
+            "top_visual_prefilter_non_gold_pages": visual_topn_non_gold[: args.report_topn],
             "all_gold_pages_summary": summarize_group(gold_pages_all),
             "all_non_gold_pages_summary": summarize_group(non_gold_pages_all),
             "top_visual_prefilter_gold_pages_summary": summarize_group(visual_topn_gold),
-            "top_visual_prefilter_non_gold_pages_summary": summarize_group(
-                [row for row in visual_topn if not row["is_gold_doc"]]
-            ),
+            "top_visual_prefilter_non_gold_pages_summary": summarize_group(visual_topn_non_gold),
         }
         audits.append(audit)
 
         print(
             f"[{idx}/{len(qids)}] {qid} "
             f"informative_visual={route_features['informative_visual_query_tokens']} "
-            f"best_gold_visual_rank={None if best_gold_visual is None else best_gold_visual['visual_rank']}"
+            f"best_gold_visual_rank={None if best_gold_visual is None else best_gold_visual['visual_rank']} "
+            f"verdict={reliability_checklist['verdict']}"
         )
 
     output_path = Path(args.output_json)
