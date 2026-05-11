@@ -775,6 +775,98 @@ def aggregate_token_pruning_diagnostic_summaries(qid_summaries: list[dict]) -> d
     }
 
 
+def summarize_ranking_focus_token_pruning(
+    *,
+    reranked_pages: list[dict],
+    gold_doc_id_set: set[str],
+) -> dict:
+    selected_pages = [
+        page for page in reranked_pages
+        if page.get("selector_selected_token_count") is not None
+    ]
+    if not selected_pages:
+        return {"enabled": False}
+
+    def mean_selected(pages: list[dict]) -> float | None:
+        values = [
+            float(page["selector_selected_token_count"])
+            for page in pages
+            if page.get("selector_selected_token_count") is not None
+        ]
+        if not values:
+            return None
+        return float(statistics.fmean(values))
+
+    top10_pages = selected_pages[:10]
+    top25_pages = selected_pages[:25]
+    first_gold_page = next(
+        (page for page in selected_pages if page.get("doc_id") in gold_doc_id_set),
+        None,
+    )
+
+    top_doc_best_pages: list[dict] = []
+    seen_docs: set[str] = set()
+    for page in selected_pages:
+        doc_id = str(page.get("doc_id"))
+        if doc_id in seen_docs:
+            continue
+        seen_docs.add(doc_id)
+        top_doc_best_pages.append(page)
+        if len(top_doc_best_pages) >= 4:
+            break
+
+    return {
+        "enabled": True,
+        "top1_selected_token_count": float(selected_pages[0]["selector_selected_token_count"]),
+        "mean_selected_token_count_top10_pages": mean_selected(top10_pages),
+        "mean_selected_token_count_top25_pages": mean_selected(top25_pages),
+        "mean_selected_token_count_top4_doc_best_pages": mean_selected(top_doc_best_pages),
+        "first_gold_page_selected_token_count_any_gold_doc_page": None
+        if first_gold_page is None
+        else float(first_gold_page["selector_selected_token_count"]),
+    }
+
+
+def aggregate_ranking_focus_token_pruning_summaries(qid_summaries: list[dict]) -> dict:
+    enabled_summaries = [
+        item for item in qid_summaries
+        if isinstance(item, dict) and item.get("enabled")
+    ]
+    if not enabled_summaries:
+        return {"enabled": False, "qid_count": 0}
+
+    def mean_metric(key: str) -> float | None:
+        values = [float(item[key]) for item in enabled_summaries if item.get(key) is not None]
+        if not values:
+            return None
+        return float(statistics.fmean(values))
+
+    def median_metric(key: str) -> float | None:
+        values = [float(item[key]) for item in enabled_summaries if item.get(key) is not None]
+        if not values:
+            return None
+        return float(statistics.median(values))
+
+    return {
+        "enabled": True,
+        "qid_count": len(enabled_summaries),
+        "mean_top1_selected_token_count": mean_metric("top1_selected_token_count"),
+        "median_top1_selected_token_count": median_metric("top1_selected_token_count"),
+        "mean_selected_token_count_top10_pages": mean_metric("mean_selected_token_count_top10_pages"),
+        "median_selected_token_count_top10_pages": median_metric("mean_selected_token_count_top10_pages"),
+        "mean_selected_token_count_top25_pages": mean_metric("mean_selected_token_count_top25_pages"),
+        "median_selected_token_count_top25_pages": median_metric("mean_selected_token_count_top25_pages"),
+        "mean_selected_token_count_top4_doc_best_pages": mean_metric("mean_selected_token_count_top4_doc_best_pages"),
+        "median_selected_token_count_top4_doc_best_pages": median_metric("mean_selected_token_count_top4_doc_best_pages"),
+        "mean_first_gold_page_selected_token_count_any_gold_doc_page": mean_metric(
+            "first_gold_page_selected_token_count_any_gold_doc_page"
+        ),
+        "median_first_gold_page_selected_token_count_any_gold_doc_page": median_metric(
+            "first_gold_page_selected_token_count_any_gold_doc_page"
+        ),
+    }
+
+
 def infer_vqa_model_type(model_name_or_path: str) -> str:
     lowered = model_name_or_path.lower()
     if "florence" in lowered:
@@ -1817,6 +1909,10 @@ def main() -> None:
             else []
         )
         token_pruning_diagnostic_summary = summarize_token_pruning_diagnostics(page_features)
+        ranking_focus_token_pruning_summary = summarize_ranking_focus_token_pruning(
+            reranked_pages=reranked_pages,
+            gold_doc_id_set=gold_doc_id_set,
+        )
         coarse_pre_exact_first_gold_page_rank = (
             coarse_pre_exact_page_hits[0]["rank"] if coarse_pre_exact_page_hits else None
         )
@@ -1923,6 +2019,7 @@ def main() -> None:
             "vlm_record_count": len(vlm_records),
             "vlm_records": vlm_records,
             "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
+            "ranking_focus_token_pruning_summary": ranking_focus_token_pruning_summary,
             "baseline_first_gold_doc_rank": baseline_first_gold_doc_rank,
             "baseline_first_gold_page_rank": baseline_first_gold_page_rank,
             "baseline_gold_page_hits_top10": baseline_page_hits[:10],
@@ -1972,6 +2069,9 @@ def main() -> None:
     ]
     token_pruning_diagnostic_summary = aggregate_token_pruning_diagnostic_summaries(
         [row["token_pruning_diagnostic_summary"] for row in all_rows]
+    )
+    ranking_focus_token_pruning_summary = aggregate_ranking_focus_token_pruning_summaries(
+        [row.get("ranking_focus_token_pruning_summary", {}) for row in all_rows]
     )
 
     summary = {
@@ -2043,6 +2143,7 @@ def main() -> None:
         "grid_non_visual_values": grid_non_visual_values,
         "grid_balance_values": grid_balance_values,
         "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
+        "ranking_focus_token_pruning_summary": ranking_focus_token_pruning_summary,
         "num_qids": len(all_rows),
         "baseline_top4_doc_count": baseline_top4_doc,
         "coarse_pre_exact_top4_doc_count": (
