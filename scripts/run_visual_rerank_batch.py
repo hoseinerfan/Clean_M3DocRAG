@@ -26,6 +26,7 @@ from scripts.rerank_target_docs_visual_aware import (
     COARSE_SCORE_DTYPE_CHOICES,
     DOC_AGGREGATION_MODE_CHOICES,
     QUERY_TOKEN_FILTER_CHOICES,
+    VISUAL_SCORE_QUERY_MODE_CHOICES,
     WeightConfig,
     apply_two_stage_exact_rerank_to_doc_features,
     apply_visual_rerank_to_top_pages,
@@ -538,6 +539,16 @@ def parse_args() -> argparse.Namespace:
             "Optional fallback for the visual channel. When > 0, also score visual query tokens "
             "against all page tokens and use max(visual_labeled_score, weight * visual_all_token_score) "
             "as the effective visual page score."
+        ),
+    )
+    parser.add_argument(
+        "--visual-score-query-mode",
+        default="visual_query_only",
+        choices=VISUAL_SCORE_QUERY_MODE_CHOICES,
+        help=(
+            "Which query tokens contribute to the visual channel score. "
+            "'visual_query_only' uses only query tokens labeled visual. "
+            "'all_query_to_visual_patches' scores all active query tokens against visual page patches."
         ),
     )
     parser.add_argument(
@@ -1823,6 +1834,7 @@ def main() -> None:
                                 balance_score_mode=args.balance_score_mode,
                                 grounded_context_radius=args.grounded_context_radius,
                                 visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
+                                visual_score_query_mode=args.visual_score_query_mode,
                                 base_score_override=(
                                     baseline_page_score_map.get(page_uid)
                                     if args.base_score_source == "baseline_pred"
@@ -1866,6 +1878,7 @@ def main() -> None:
                     balance_score_mode=args.balance_score_mode,
                     grounded_context_radius=args.grounded_context_radius,
                     visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
+                    visual_score_query_mode=args.visual_score_query_mode,
                 )
             if learned_doc_reranker_active or args.output_doc_feature_jsonl:
                 assert page_token_classes_by_uid is not None
@@ -1880,6 +1893,7 @@ def main() -> None:
                     balance_score_mode=args.balance_score_mode,
                     grounded_context_radius=args.grounded_context_radius,
                     visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
+                    visual_score_query_mode=args.visual_score_query_mode,
                 )
             apply_staged_visual_rerank = staged_visual_rerank and route_info["route_decision"] == "visual"
             if route_config is not None:
@@ -1909,6 +1923,7 @@ def main() -> None:
                         balance_score_mode=args.balance_score_mode,
                         grounded_context_radius=args.grounded_context_radius,
                         visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
+                        visual_score_query_mode=args.visual_score_query_mode,
                     )
                 else:
                     page_features = apply_visual_rerank_to_top_docs(
@@ -1927,6 +1942,7 @@ def main() -> None:
                         balance_score_mode=args.balance_score_mode,
                         grounded_context_radius=args.grounded_context_radius,
                         visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
+                        visual_score_query_mode=args.visual_score_query_mode,
                     )
             if args.gated_visual_top_docs > 0 and apply_staged_visual_rerank and stage1_base_doc_rank_map is None:
                 stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
@@ -2134,6 +2150,7 @@ def main() -> None:
             "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
             "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
             "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
+            "visual_score_query_mode": args.visual_score_query_mode,
             "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
             "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
             "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,
@@ -2259,6 +2276,7 @@ def main() -> None:
         "visual_patch_dilation_radius": args.visual_patch_dilation_radius,
         "visual_patch_dilation_include_non_visual": args.visual_patch_dilation_include_non_visual,
         "visual_fallback_all_token_weight": args.visual_fallback_all_token_weight,
+        "visual_score_query_mode": args.visual_score_query_mode,
         "visual_rerank_require_informative_visual_query": args.visual_rerank_require_informative_visual_query,
         "visual_rerank_filter_to_informative_visual_query": args.visual_rerank_filter_to_informative_visual_query,
         "visual_rerank_preserve_stage1_base_score": args.visual_rerank_preserve_stage1_base_score,

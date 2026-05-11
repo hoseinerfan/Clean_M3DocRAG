@@ -19,6 +19,7 @@ import torch
 
 from m3docrag.retrieval import ColPaliRetrievalModel
 from scripts.rerank_target_docs_visual_aware import (
+    VISUAL_SCORE_QUERY_MODE_CHOICES,
     apply_visual_rerank_to_top_pages,
     build_page_id_metadata,
     build_page_token_classes,
@@ -97,6 +98,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--grounded-context-radius", type=int, default=2)
     parser.add_argument("--visual-fallback-all-token-weight", type=float, default=0.0)
+    parser.add_argument(
+        "--visual-score-query-mode",
+        default="visual_query_only",
+        choices=VISUAL_SCORE_QUERY_MODE_CHOICES,
+    )
     parser.add_argument("--nonspatial-token-position", default="suffix", choices=["prefix", "suffix"])
     parser.add_argument("--ignore-pad-scores-in-final-ranking", action="store_true")
     parser.add_argument("--max-qids", type=int, default=0)
@@ -324,6 +330,7 @@ def main() -> None:
                 balance_score_mode=args.balance_score_mode,
                 grounded_context_radius=args.grounded_context_radius,
                 visual_fallback_all_token_weight=args.visual_fallback_all_token_weight,
+                visual_score_query_mode=args.visual_score_query_mode,
             )
 
         baseline_top_pages = [
