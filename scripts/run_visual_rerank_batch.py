@@ -1831,6 +1831,7 @@ def main() -> None:
                             )
                         )
 
+            visual_prefilter_exact_trace: dict[str, object] | None = None
             if args.base_score_source == "two_stage_page_maxsim":
                 page_features = apply_two_stage_exact_rerank_to_page_features(
                     page_features=page_features,
@@ -1849,7 +1850,7 @@ def main() -> None:
                 )
             if args.base_score_source == "visual_prefilter_exact_page_maxsim":
                 assert page_token_classes_by_uid is not None
-                page_features = apply_visual_prefilter_exact_rerank_to_top_pages(
+                page_features, visual_prefilter_exact_trace = apply_visual_prefilter_exact_rerank_to_top_pages(
                     page_features=page_features,
                     docid2embs=docid2embs,
                     query_emb=query_emb,
@@ -1997,6 +1998,23 @@ def main() -> None:
                 doc_aggregation_mode=args.doc_aggregation_mode,
                 doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
             )
+        if visual_prefilter_exact_trace is not None:
+            selected_page_uid_set = {
+                str(item["page_uid"])
+                for item in visual_prefilter_exact_trace["pre_exact_selected_pages"]
+            }
+            visual_prefilter_exact_trace["post_exact_selected_pages_final_rerank"] = [
+                {
+                    "rank": int(item["rank"]),
+                    "page_uid": item["page_uid"],
+                    "doc_id": item["doc_id"],
+                    "page_idx": int(item["page_idx"]),
+                    "fused_page_score": float(item["fused_page_score"]),
+                    "base_page_score": float(item["base_page_score"]),
+                }
+                for item in reranked_pages
+                if item["page_uid"] in selected_page_uid_set
+            ]
         if args.diagnose_coarse_pre_exact:
             coarse_pre_exact_docs, coarse_pre_exact_pages = build_scalar_page_score_rankings(
                 page_features=page_features,
@@ -2135,6 +2153,7 @@ def main() -> None:
             "vlm_records": vlm_records,
             "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
             "ranking_focus_token_pruning_summary": ranking_focus_token_pruning_summary,
+            "visual_prefilter_exact_page_trace": visual_prefilter_exact_trace,
             "baseline_first_gold_doc_rank": baseline_first_gold_doc_rank,
             "baseline_first_gold_page_rank": baseline_first_gold_page_rank,
             "baseline_gold_page_hits_top10": baseline_page_hits[:10],

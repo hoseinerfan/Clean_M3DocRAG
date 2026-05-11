@@ -4174,6 +4174,25 @@ def _visual_prefilter_sort_key(feature: PageFeature) -> tuple[float, float, floa
     )
 
 
+def _visual_prefilter_trace_payload(
+    feature: PageFeature,
+    *,
+    rank: int,
+    primary_score: float,
+) -> dict[str, object]:
+    return {
+        "rank": int(rank),
+        "page_uid": feature.page_uid,
+        "doc_id": feature.doc_id,
+        "page_idx": int(feature.page_idx),
+        "prefilter_primary_score": float(primary_score),
+        "base_page_score": float(feature.base_page_score),
+        "visual_page_score": float(feature.visual_page_score),
+        "grounded_non_visual_page_score": float(feature.grounded_non_visual_page_score),
+        "balance_score": float(feature.balance_score),
+    }
+
+
 def apply_visual_prefilter_exact_rerank_to_top_pages(
     *,
     page_features: list[PageFeature],
@@ -4191,9 +4210,9 @@ def apply_visual_prefilter_exact_rerank_to_top_pages(
     balance_score_mode: str = "min_avg",
     grounded_context_radius: int = 0,
     visual_fallback_all_token_weight: float = 0.0,
-) -> list[PageFeature]:
+) -> tuple[list[PageFeature], dict[str, object] | None]:
     if visual_top_pages <= 0 or exact_top_pages <= 0 or not page_features:
-        return page_features
+        return page_features, None
 
     visual_features = apply_visual_rerank_to_top_pages(
         page_features=page_features,
@@ -4213,15 +4232,30 @@ def apply_visual_prefilter_exact_rerank_to_top_pages(
         visual_fallback_all_token_weight=visual_fallback_all_token_weight,
     )
     if visual_features is page_features:
-        return page_features
+        return page_features, None
 
     top_exact_count = min(max(int(exact_top_pages), 0), len(visual_features))
-    selected_page_uids = {
-        item.page_uid
-        for item in sorted(visual_features, key=_visual_prefilter_sort_key, reverse=True)[:top_exact_count]
-    }
+    selected_visual_features = sorted(
+        visual_features,
+        key=_visual_prefilter_sort_key,
+        reverse=True,
+    )[:top_exact_count]
+    selected_page_uids = {item.page_uid for item in selected_visual_features}
+    pre_exact_selected_pages = [
+        _visual_prefilter_trace_payload(
+            feature,
+            rank=rank,
+            primary_score=(
+                float(feature.balance_score)
+                if float(feature.balance_score) > 0.0
+                else float(feature.visual_page_score)
+            ),
+        )
+        for rank, feature in enumerate(selected_visual_features, start=1)
+    ]
 
     updated_features: list[PageFeature] = []
+    exact_selected_features: list[PageFeature] = []
     for feature in page_features:
         if feature.page_uid not in selected_page_uids:
             updated_features.append(feature)
@@ -4237,15 +4271,38 @@ def apply_visual_prefilter_exact_rerank_to_top_pages(
             query_emb=query_emb,
             query_score_mask=query_score_mask,
         )
-        updated_features.append(
-            make_base_only_page_feature(
-                doc_id=feature.doc_id,
-                page_idx=feature.page_idx,
-                base_page_score=exact_base_page_score,
-            )
+        updated_feature = make_base_only_page_feature(
+            doc_id=feature.doc_id,
+            page_idx=feature.page_idx,
+            base_page_score=exact_base_page_score,
         )
+        updated_features.append(updated_feature)
+        exact_selected_features.append(updated_feature)
 
-    return updated_features
+    post_exact_selected_pages = [
+        {
+            "rank": int(rank),
+            "page_uid": feature.page_uid,
+            "doc_id": feature.doc_id,
+            "page_idx": int(feature.page_idx),
+            "exact_base_page_score": float(feature.base_page_score),
+        }
+        for rank, feature in enumerate(
+            sorted(
+                exact_selected_features,
+                key=lambda item: (item.base_page_score, item.page_uid),
+                reverse=True,
+            ),
+            start=1,
+        )
+    ]
+
+    return updated_features, {
+        "visual_top_pages": int(visual_top_pages),
+        "exact_top_pages": int(top_exact_count),
+        "pre_exact_selected_pages": pre_exact_selected_pages,
+        "post_exact_selected_pages_by_exact_score": post_exact_selected_pages,
+    }
 
 
 def apply_visual_rerank_to_top_pages(
@@ -5887,9 +5944,10 @@ def main() -> None:
             query_score_mask=query_score_mask,
             top_docs=args.two_stage_exact_top_docs,
         )
+    visual_prefilter_exact_trace: dict[str, object] | None = None
     if args.base_score_source == "visual_prefilter_exact_page_maxsim":
         assert page_token_classes_by_uid is not None
-        page_features = apply_visual_prefilter_exact_rerank_to_top_pages(
+        page_features, visual_prefilter_exact_trace = apply_visual_prefilter_exact_rerank_to_top_pages(
             page_features=page_features,
             docid2embs=docid2embs,
             query_emb=query_emb,
@@ -5986,6 +6044,23 @@ def main() -> None:
         doc_aggregation_mode=args.doc_aggregation_mode,
         doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
     )
+    if visual_prefilter_exact_trace is not None:
+        selected_page_uid_set = {
+            str(item["page_uid"])
+            for item in visual_prefilter_exact_trace["pre_exact_selected_pages"]
+        }
+        visual_prefilter_exact_trace["post_exact_selected_pages_final_rerank"] = [
+            {
+                "rank": int(item["rank"]),
+                "page_uid": item["page_uid"],
+                "doc_id": item["doc_id"],
+                "page_idx": int(item["page_idx"]),
+                "fused_page_score": float(item["fused_page_score"]),
+                "base_page_score": float(item["base_page_score"]),
+            }
+            for item in reranked_pages
+            if item["page_uid"] in selected_page_uid_set
+        ]
     gold_summary = summarize_gold_doc_ranks(reranked_docs, gold_doc_ids)
     gold_page_summary = summarize_gold_page_ranks(reranked_pages, gold_page_uids)
     token_pruning_diagnostic_summary = summarize_token_pruning_diagnostics(page_features)
@@ -6051,6 +6126,7 @@ def main() -> None:
         "route_matched_rule_index": route_info["matched_rule_index"],
         "route_matched_rule": route_info["matched_rule"],
         "staged_visual_rerank_applied": apply_staged_visual_rerank,
+        "visual_prefilter_exact_page_trace": visual_prefilter_exact_trace,
         "grid_search": {
             "enabled": args.grid_search,
             "best": best_grid_record,
