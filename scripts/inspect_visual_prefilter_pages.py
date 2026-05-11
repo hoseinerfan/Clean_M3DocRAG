@@ -136,7 +136,7 @@ def main() -> None:
             candidate_doc_ids.append(doc_id)
 
     retrieval_model = ColPaliRetrievalModel(
-        model_name_or_path=resolve_model_path(args.retrieval_model_name_or_path),
+        backbone_name_or_path=resolve_model_path(args.retrieval_model_name_or_path),
         adapter_name_or_path=resolve_model_path(args.retrieval_adapter_model_name_or_path),
     )
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
