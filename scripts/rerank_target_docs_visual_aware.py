@@ -51,6 +51,11 @@ APPROX_BASE_PAGE_TOKEN_SELECTOR_ALIASES = {
     "query_coverage_topk": "query_coverage_mix",
     "learned_exact_winner_topk": "learned_token_topk",
 }
+APPROX_BASE_PAGE_TOKEN_NONSPATIAL_POLICY_CHOICES = (
+    "keep",
+    "drop_all",
+    "force_include_all",
+)
 COARSE_SCORE_DTYPE_CHOICES = ("fp32", "bf16", "fp16")
 APPROX_BASE_PAGE_TOKEN_ADAPTIVE_K_MODE_CHOICES = (
     "disabled",
@@ -792,6 +797,7 @@ def compute_approx_base_page_score(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_nonspatial_policy: str,
     approx_page_token_maxsim_greedy_candidate_budget: int,
     approx_page_token_maxsim_preservation_target: float,
     report_pruning_diagnostics: bool,
@@ -823,6 +829,7 @@ def compute_approx_base_page_score(
         approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
         approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
         approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
         report_pruning_diagnostics=report_pruning_diagnostics,
@@ -862,6 +869,7 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_nonspatial_policy: str,
     approx_page_token_maxsim_greedy_candidate_budget: int,
     approx_page_token_maxsim_preservation_target: float,
     report_pruning_diagnostics: bool,
@@ -909,6 +917,7 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
         approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
         approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
         approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
         report_pruning_diagnostics=report_pruning_diagnostics,
@@ -1435,6 +1444,7 @@ def select_page_token_indices_for_base_only(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_nonspatial_policy: str,
     approx_page_token_maxsim_greedy_candidate_budget: int,
     approx_page_token_maxsim_preservation_target: float,
     report_pruning_diagnostics: bool,
@@ -1446,6 +1456,14 @@ def select_page_token_indices_for_base_only(
     approx_page_token_selector = canonicalize_approx_page_token_selector(
         approx_page_token_selector
     )
+    if (
+        approx_page_token_nonspatial_policy != "keep"
+        and approx_page_token_selector != "global_topk"
+    ):
+        raise ValueError(
+            "approx_page_token_nonspatial_policy is currently only supported with "
+            "approx_page_token_selector='global_topk'."
+        )
 
     coarse_scores = compute_coarse_page_token_scores(
         page_emb=page_emb,
@@ -1522,7 +1540,10 @@ def select_page_token_indices_for_base_only(
         adaptive_k_min=approx_page_token_adaptive_k_min,
         adaptive_k_max=approx_page_token_adaptive_k_max,
     )
-    if topk >= int(page_emb.shape[0]):
+    if (
+        topk >= int(page_emb.shape[0])
+        and approx_page_token_nonspatial_policy == "keep"
+    ):
         selected_indices = list(range(int(page_emb.shape[0])))
         if report_pruning_diagnostics:
             query_emb_active, _query_mask_device = _select_active_query_embeddings(
@@ -1538,7 +1559,53 @@ def select_page_token_indices_for_base_only(
         return selected_indices, diagnostics
 
     if approx_page_token_selector == "global_topk":
-        selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
+        nonspatial_indices, spatial_indices = _partition_page_token_indices_by_spatiality(
+            page_token_count=int(page_emb.shape[0]),
+            page_meta=page_meta,
+        )
+        if approx_page_token_nonspatial_policy == "drop_all":
+            selector_candidate_indices = (
+                spatial_indices if spatial_indices else selector_candidate_indices
+            )
+            candidate_index_tensor = torch.tensor(
+                selector_candidate_indices,
+                device=coarse_scores.device,
+                dtype=torch.long,
+            )
+            candidate_scores = coarse_scores.index_select(0, candidate_index_tensor)
+            local_indices = _topk_indices_from_scores(
+                scores=candidate_scores,
+                k=min(topk, len(selector_candidate_indices)),
+            )
+            selected_indices = [selector_candidate_indices[idx] for idx in local_indices]
+        elif approx_page_token_nonspatial_policy == "force_include_all":
+            forced_indices = sorted(
+                nonspatial_indices,
+                key=lambda idx: float(coarse_scores[idx].item()),
+                reverse=True,
+            )
+            if len(forced_indices) >= topk:
+                selected_indices = forced_indices[:topk]
+            else:
+                selector_candidate_indices = (
+                    spatial_indices if spatial_indices else selector_candidate_indices
+                )
+                remaining_budget = topk - len(forced_indices)
+                candidate_index_tensor = torch.tensor(
+                    selector_candidate_indices,
+                    device=coarse_scores.device,
+                    dtype=torch.long,
+                )
+                candidate_scores = coarse_scores.index_select(0, candidate_index_tensor)
+                local_indices = _topk_indices_from_scores(
+                    scores=candidate_scores,
+                    k=min(remaining_budget, len(selector_candidate_indices)),
+                )
+                selected_indices = forced_indices + [
+                    selector_candidate_indices[idx] for idx in local_indices
+                ]
+        else:
+            selected_indices = _topk_indices_from_scores(scores=coarse_scores, k=topk)
         if report_pruning_diagnostics:
             query_emb_active, _query_mask_device = _select_active_query_embeddings(
                 query_emb=query_emb,
@@ -1994,6 +2061,7 @@ def maybe_prune_page_tokens_for_base_only(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_nonspatial_policy: str,
     approx_page_token_maxsim_greedy_candidate_budget: int,
     approx_page_token_maxsim_preservation_target: float,
     report_pruning_diagnostics: bool,
@@ -2005,7 +2073,10 @@ def maybe_prune_page_tokens_for_base_only(
     if approx_page_token_topk <= 0:
         return page_emb, None
     topk = min(int(approx_page_token_topk), int(page_emb.shape[0]))
-    if topk >= int(page_emb.shape[0]):
+    if (
+        topk >= int(page_emb.shape[0])
+        and approx_page_token_nonspatial_policy == "keep"
+    ):
         return page_emb, None
     top_indices, diagnostics = select_page_token_indices_for_base_only(
         page_emb=page_emb,
@@ -2032,6 +2103,7 @@ def maybe_prune_page_tokens_for_base_only(
         approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+        approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
         approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
         approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
         report_pruning_diagnostics=report_pruning_diagnostics,
@@ -2847,6 +2919,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-nonspatial-policy",
+        default="keep",
+        choices=APPROX_BASE_PAGE_TOKEN_NONSPATIAL_POLICY_CHOICES,
+        help=(
+            "How plain top-K pruning should treat nonspatial page tokens such as prefix/suffix "
+            "tokens. 'keep' is the current behavior, 'drop_all' excludes them from selection, "
+            "and 'force_include_all' always keeps them before filling the remaining budget. "
+            "Currently only supported with --approx-base-page-token-selector=global_topk."
+        ),
+    )
+    parser.add_argument(
         "--report-pruning-diagnostics",
         action="store_true",
         help=(
@@ -3574,6 +3657,26 @@ def _token_index_to_patch_index(
     return None
 
 
+def _partition_page_token_indices_by_spatiality(
+    *,
+    page_token_count: int,
+    page_meta: dict | None,
+) -> tuple[list[int], list[int]]:
+    all_indices = list(range(int(page_token_count)))
+    if page_meta is None:
+        return [], all_indices
+
+    nonspatial_indices: list[int] = []
+    spatial_indices: list[int] = []
+    for token_idx in all_indices:
+        patch_idx = _token_index_to_patch_index(token_idx=token_idx, page_meta=page_meta)
+        if patch_idx is None:
+            nonspatial_indices.append(token_idx)
+        else:
+            spatial_indices.append(token_idx)
+    return nonspatial_indices, spatial_indices
+
+
 def compute_exact_token_winner_counts(
     *,
     page_emb: torch.Tensor,
@@ -4048,6 +4151,7 @@ def compute_base_only_page_feature(
     approx_page_token_informative_visual_weight: float = 1.0,
     approx_page_token_soft_visual_query_weight: float = 0.5,
     approx_page_token_soft_patch_visual_bonus: float = 0.2,
+    approx_page_token_nonspatial_policy: str = "keep",
     approx_page_token_maxsim_greedy_candidate_budget: int = 0,
     approx_page_token_maxsim_preservation_target: float = 0.95,
     report_pruning_diagnostics: bool = False,
@@ -4093,6 +4197,7 @@ def compute_base_only_page_feature(
             approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
             approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
             approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+            approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
             approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
             approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
             report_pruning_diagnostics=report_pruning_diagnostics,
@@ -4125,6 +4230,7 @@ def compute_base_only_page_feature(
             approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
             approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
             approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+            approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
             approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
             approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
             report_pruning_diagnostics=report_pruning_diagnostics,
@@ -4263,6 +4369,7 @@ def compute_base_only_page_features(
     approx_page_token_informative_visual_weight: float,
     approx_page_token_soft_visual_query_weight: float,
     approx_page_token_soft_patch_visual_bonus: float,
+    approx_page_token_nonspatial_policy: str,
     approx_page_token_maxsim_greedy_candidate_budget: int,
     approx_page_token_maxsim_preservation_target: float,
     report_pruning_diagnostics: bool,
@@ -4277,6 +4384,7 @@ def compute_base_only_page_features(
         page_batch_size > 1
         and approx_page_token_selector == "global_topk"
         and approx_page_token_adaptive_k_mode == "disabled"
+        and approx_page_token_nonspatial_policy == "keep"
         and not report_pruning_diagnostics
         and base_score_source in {
             "exact_page_maxsim",
@@ -4335,6 +4443,7 @@ def compute_base_only_page_features(
                         approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+                        approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
                         approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
                         approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
                         report_pruning_diagnostics=report_pruning_diagnostics,
@@ -5890,6 +5999,14 @@ def main() -> None:
             "--approx-base-page-token-soft-patch-visual-bonus is only valid with "
             "--approx-base-page-token-selector=soft_label_prior or visual_patch_query_prior."
         )
+    if (
+        args.approx_base_page_token_nonspatial_policy != "keep"
+        and args.approx_base_page_token_selector != "global_topk"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-nonspatial-policy is currently only valid with "
+            "--approx-base-page-token-selector=global_topk."
+        )
     if args.base_only_page_batch_size < 0:
         raise ValueError("--base-only-page-batch-size must be >= 0.")
     if (
@@ -6335,6 +6452,7 @@ def main() -> None:
                 approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                approx_page_token_nonspatial_policy=args.approx_base_page_token_nonspatial_policy,
                 approx_page_token_maxsim_greedy_candidate_budget=args.approx_base_page_token_maxsim_greedy_candidate_budget,
                 approx_page_token_maxsim_preservation_target=args.approx_base_page_token_maxsim_preservation_target,
                 report_pruning_diagnostics=args.report_pruning_diagnostics,
@@ -6380,6 +6498,7 @@ def main() -> None:
                 approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                 approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                 approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                approx_page_token_nonspatial_policy=args.approx_base_page_token_nonspatial_policy,
                 approx_page_token_maxsim_greedy_candidate_budget=args.approx_base_page_token_maxsim_greedy_candidate_budget,
                 approx_page_token_maxsim_preservation_target=args.approx_base_page_token_maxsim_preservation_target,
                 report_pruning_diagnostics=args.report_pruning_diagnostics,

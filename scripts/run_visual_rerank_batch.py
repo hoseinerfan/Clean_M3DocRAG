@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(1, str(REPO_ROOT))
 
 from scripts.rerank_target_docs_visual_aware import (
+    APPROX_BASE_PAGE_TOKEN_NONSPATIAL_POLICY_CHOICES,
     APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
     APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES,
     APPROX_BASE_PAGE_TOKEN_ADAPTIVE_K_MODE_CHOICES,
@@ -314,6 +315,17 @@ def parse_args() -> argparse.Namespace:
             "When --approx-base-page-token-selector=soft_label_prior or "
             "visual_patch_query_prior, add this bonus to page tokens whose patch "
             "label is visual before top-K selection."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-nonspatial-policy",
+        default="keep",
+        choices=APPROX_BASE_PAGE_TOKEN_NONSPATIAL_POLICY_CHOICES,
+        help=(
+            "How plain top-K pruning should treat nonspatial page tokens such as prefix/suffix "
+            "tokens. 'keep' is the current behavior, 'drop_all' excludes them from selection, "
+            "and 'force_include_all' always keeps them before filling the remaining budget. "
+            "Currently only supported with --approx-base-page-token-selector=global_topk."
         ),
     )
     parser.add_argument(
@@ -1390,6 +1402,14 @@ def main() -> None:
             "--approx-base-page-token-soft-patch-visual-bonus is only valid with "
             "--approx-base-page-token-selector=soft_label_prior or visual_patch_query_prior."
         )
+    if (
+        args.approx_base_page_token_nonspatial_policy != "keep"
+        and args.approx_base_page_token_selector != "global_topk"
+    ):
+        raise ValueError(
+            "--approx-base-page-token-nonspatial-policy is currently only valid with "
+            "--approx-base-page-token-selector=global_topk."
+        )
     if args.base_only_page_batch_size < 0:
         raise ValueError("--base-only-page-batch-size must be >= 0.")
     if (
@@ -1867,6 +1887,7 @@ def main() -> None:
                         approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                        approx_page_token_nonspatial_policy=args.approx_base_page_token_nonspatial_policy,
                         approx_page_token_maxsim_greedy_candidate_budget=args.approx_base_page_token_maxsim_greedy_candidate_budget,
                         approx_page_token_maxsim_preservation_target=args.approx_base_page_token_maxsim_preservation_target,
                         report_pruning_diagnostics=args.report_pruning_diagnostics,
@@ -1912,6 +1933,7 @@ def main() -> None:
                         approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
+                        approx_page_token_nonspatial_policy=args.approx_base_page_token_nonspatial_policy,
                         approx_page_token_maxsim_greedy_candidate_budget=args.approx_base_page_token_maxsim_greedy_candidate_budget,
                         approx_page_token_maxsim_preservation_target=args.approx_base_page_token_maxsim_preservation_target,
                         report_pruning_diagnostics=args.report_pruning_diagnostics,
