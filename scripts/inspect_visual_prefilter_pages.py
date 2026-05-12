@@ -75,8 +75,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,
         help=(
-            "Threshold used by mode=non_visual_with_confirmed_visual_gate. "
-            "Pages below this confirmed_visual score are demoted behind all gated-in pages."
+            "Threshold used by the confirmed-visual-gated prefilter modes. "
+            "Pages below the relevant confirmation score are demoted behind all gated-in pages."
         ),
     )
     parser.add_argument("--require-informative-visual-query", action="store_true")
@@ -277,6 +277,9 @@ def main() -> None:
                 "base_page_score": float(feature.base_page_score),
                 "visual_page_score": float(feature.visual_page_score),
                 "confirmed_visual_page_score": float(feature.confirmed_visual_page_score),
+                "multi_anchor_confirmed_visual_page_score": float(
+                    feature.multi_anchor_confirmed_visual_page_score
+                ),
                 "grounded_non_visual_page_score": float(feature.grounded_non_visual_page_score),
                 "grounded_context_page_score": float(feature.grounded_context_page_score),
                 "non_visual_page_score": float(feature.non_visual_page_score),
@@ -284,6 +287,11 @@ def main() -> None:
                 "visual_alignment_ratio": float(feature.visual_alignment_ratio),
                 "non_visual_alignment_ratio": float(feature.non_visual_alignment_ratio),
                 "visual_anchor_patch_count": int(feature.visual_anchor_patch_count),
+                "visual_anchor_query_coverage_ratio": float(feature.visual_anchor_query_coverage_ratio),
+                "top_visual_anchor_query_score": float(feature.top_visual_anchor_query_score),
+                "second_visual_anchor_query_score": float(feature.second_visual_anchor_query_score),
+                "visual_anchor_query_score_gap": float(feature.visual_anchor_query_score_gap),
+                "visual_anchor_bbox_area_ratio": float(feature.visual_anchor_bbox_area_ratio),
                 "grounded_non_visual_patch_count": int(feature.grounded_non_visual_patch_count),
                 "grounded_context_patch_count": int(feature.grounded_context_patch_count),
                 "mode_primary_scores": {

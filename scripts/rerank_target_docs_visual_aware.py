@@ -72,6 +72,8 @@ VISUAL_PREFILTER_SORT_KEY_CHOICES = (
     "grounded_non_visual_only",
     "confirmed_visual_only",
     "non_visual_with_confirmed_visual_gate",
+    "multi_anchor_confirmed_visual_only",
+    "non_visual_with_multi_anchor_confirmed_visual_gate",
 )
 DOC_AGGREGATION_MODE_CHOICES = (
     "best_page",
@@ -201,6 +203,7 @@ class PageFeature:
     grounded_context_avg_score: float
     balance_score: float
     confirmed_visual_page_score: float
+    multi_anchor_confirmed_visual_page_score: float
     visual_alignment_count: int
     visual_alignment_ratio: float
     non_visual_alignment_count: int
@@ -212,6 +215,11 @@ class PageFeature:
     grounded_non_visual_patch_count: int
     grounded_context_patch_count: int
     visual_anchor_patch_count: int
+    visual_anchor_query_coverage_ratio: float
+    top_visual_anchor_query_score: float
+    second_visual_anchor_query_score: float
+    visual_anchor_query_score_gap: float
+    visual_anchor_bbox_area_ratio: float
     selector_selected_token_count: int | None = None
     selector_candidate_token_count: int | None = None
     selector_full_token_count: int | None = None
@@ -281,6 +289,7 @@ def make_base_only_page_feature(
         grounded_context_avg_score=0.0,
         balance_score=0.0,
         confirmed_visual_page_score=0.0,
+        multi_anchor_confirmed_visual_page_score=0.0,
         visual_alignment_count=0,
         visual_alignment_ratio=0.0,
         non_visual_alignment_count=0,
@@ -292,6 +301,11 @@ def make_base_only_page_feature(
         grounded_non_visual_patch_count=0,
         grounded_context_patch_count=0,
         visual_anchor_patch_count=0,
+        visual_anchor_query_coverage_ratio=0.0,
+        top_visual_anchor_query_score=0.0,
+        second_visual_anchor_query_score=0.0,
+        visual_anchor_query_score_gap=0.0,
+        visual_anchor_bbox_area_ratio=0.0,
         selector_selected_token_count=(
             None if token_pruning_diagnostics is None else int(token_pruning_diagnostics.selected_token_count)
         ),
@@ -2949,8 +2963,8 @@ def parse_args() -> argparse.Namespace:
         choices=VISUAL_PREFILTER_SORT_KEY_CHOICES,
         help=(
             "How to rank pages during visual-prefilter selection. "
-            "'non_visual_with_confirmed_visual_gate' requires confirmed_visual >= "
-            "--confirmed-visual-gate-threshold, then ranks survivors by non_visual score."
+            "The confirmed-visual-gated modes require their confirmation score >= "
+            "--confirmed-visual-gate-threshold, then rank survivors by non_visual score."
         ),
     )
     parser.add_argument(
@@ -2958,8 +2972,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,
         help=(
-            "Threshold used by --visual-prefilter-sort-key=non_visual_with_confirmed_visual_gate. "
-            "Pages below this confirmed_visual score are demoted behind all gated-in pages."
+            "Threshold used by the confirmed-visual-gated prefilter modes. "
+            "Pages below the relevant confirmation score are demoted behind all gated-in pages."
         ),
     )
     parser.add_argument(
@@ -3552,25 +3566,17 @@ def compute_token_selector_feature_matrix(
     )
 
 
-def select_grounded_page_indices(
+def select_grounded_page_indices_from_patch_indices(
     *,
     page_meta: dict,
-    visual_anchor_token_indices: list[int],
+    anchor_patch_indices: set[int],
     candidate_page_indices: list[int],
     grounded_context_radius: int,
 ) -> list[int]:
-    if grounded_context_radius <= 0 or not visual_anchor_token_indices or not candidate_page_indices:
+    if grounded_context_radius <= 0 or not anchor_patch_indices or not candidate_page_indices:
         return []
 
     grid_side = int(page_meta["grid_side"])
-    anchor_patch_indices = {
-        patch_idx
-        for token_idx in visual_anchor_token_indices
-        if (patch_idx := _token_index_to_patch_index(token_idx=token_idx, page_meta=page_meta)) is not None
-    }
-    if not anchor_patch_indices:
-        return []
-
     anchor_coords = {(patch_idx // grid_side, patch_idx % grid_side) for patch_idx in anchor_patch_indices}
     grounded_indices: list[int] = []
     for token_idx in candidate_page_indices:
@@ -3586,6 +3592,26 @@ def select_grounded_page_indices(
         ):
             grounded_indices.append(token_idx)
     return grounded_indices
+
+
+def select_grounded_page_indices(
+    *,
+    page_meta: dict,
+    visual_anchor_token_indices: list[int],
+    candidate_page_indices: list[int],
+    grounded_context_radius: int,
+) -> list[int]:
+    anchor_patch_indices = {
+        patch_idx
+        for token_idx in visual_anchor_token_indices
+        if (patch_idx := _token_index_to_patch_index(token_idx=token_idx, page_meta=page_meta)) is not None
+    }
+    return select_grounded_page_indices_from_patch_indices(
+        page_meta=page_meta,
+        anchor_patch_indices=anchor_patch_indices,
+        candidate_page_indices=candidate_page_indices,
+        grounded_context_radius=grounded_context_radius,
+    )
 
 
 def select_grounded_non_visual_page_indices(
@@ -3693,6 +3719,7 @@ def compute_page_feature(
     )
     non_visual_page_score = masked_channel_score(non_visual_page_indices, non_visual_query_indices)
     visual_anchor_token_indices: list[int] = []
+    visual_anchor_query_scores_by_patch: dict[int, float] = {}
     if visual_page_indices and visual_query_indices:
         visual_page_index_tensor = torch.tensor(
             visual_page_indices,
@@ -3704,16 +3731,23 @@ def compute_page_feature(
             device=score_matrix.device,
             dtype=torch.long,
         )
-        visual_anchor_rows = (
+        visual_score_submatrix = (
             score_matrix.index_select(0, visual_page_index_tensor)
             .index_select(1, visual_query_index_tensor)
-            .argmax(dim=0)
-            .tolist()
         )
+        visual_anchor_rows = visual_score_submatrix.argmax(dim=0).tolist()
+        visual_anchor_scores = visual_score_submatrix.max(dim=0).values.tolist()
         visual_anchor_token_indices = [
             visual_page_indices[int(anchor_row)]
             for anchor_row in visual_anchor_rows
         ]
+        for anchor_token_idx, anchor_score in zip(visual_anchor_token_indices, visual_anchor_scores, strict=False):
+            patch_idx = _token_index_to_patch_index(token_idx=anchor_token_idx, page_meta=page_meta)
+            if patch_idx is None:
+                continue
+            visual_anchor_query_scores_by_patch[patch_idx] = (
+                float(visual_anchor_query_scores_by_patch.get(patch_idx, 0.0)) + float(anchor_score)
+            )
 
     grounded_non_visual_page_indices = select_grounded_non_visual_page_indices(
         page_meta=page_meta,
@@ -3768,6 +3802,52 @@ def compute_page_feature(
         if visual_page_score > 0.0 and grounded_context_avg_score > 0.0
         else 0.0
     )
+    multi_anchor_confirmed_visual_page_score = 0.0
+    visual_anchor_patch_count = len(visual_anchor_query_scores_by_patch)
+    visual_anchor_query_coverage_ratio = (
+        float(visual_anchor_patch_count) / float(len(visual_query_indices))
+        if visual_query_indices
+        else 0.0
+    )
+    sorted_anchor_query_scores = sorted(
+        (float(score) for score in visual_anchor_query_scores_by_patch.values()),
+        reverse=True,
+    )
+    top_visual_anchor_query_score = float(sorted_anchor_query_scores[0]) if sorted_anchor_query_scores else 0.0
+    second_visual_anchor_query_score = (
+        float(sorted_anchor_query_scores[1]) if len(sorted_anchor_query_scores) > 1 else 0.0
+    )
+    visual_anchor_query_score_gap = top_visual_anchor_query_score - second_visual_anchor_query_score
+    visual_anchor_bbox_area_ratio = 0.0
+    if visual_anchor_query_scores_by_patch:
+        grid_side = int(page_meta["grid_side"])
+        anchor_rows = [patch_idx // grid_side for patch_idx in visual_anchor_query_scores_by_patch]
+        anchor_cols = [patch_idx % grid_side for patch_idx in visual_anchor_query_scores_by_patch]
+        bbox_height = max(anchor_rows) - min(anchor_rows) + 1
+        bbox_width = max(anchor_cols) - min(anchor_cols) + 1
+        visual_anchor_bbox_area_ratio = float(bbox_height * bbox_width) / float(
+            max(1, int(page_meta["n_spatial_patches"]))
+        )
+        for anchor_patch_idx, anchor_visual_score in visual_anchor_query_scores_by_patch.items():
+            grounded_context_page_indices_local = select_grounded_page_indices_from_patch_indices(
+                page_meta=page_meta,
+                anchor_patch_indices={int(anchor_patch_idx)},
+                candidate_page_indices=list(range(len(page_token_classes))),
+                grounded_context_radius=grounded_context_radius,
+            )
+            grounded_context_page_score_local = masked_channel_score(
+                grounded_context_page_indices_local,
+                active_query_indices,
+            )
+            grounded_context_avg_score_local = (
+                grounded_context_page_score_local / len(active_query_indices)
+                if active_query_indices
+                else 0.0
+            )
+            if anchor_visual_score > 0.0 and grounded_context_avg_score_local > 0.0:
+                multi_anchor_confirmed_visual_page_score += (
+                    float(anchor_visual_score) * float(grounded_context_avg_score_local)
+                )
 
     visual_alignment_count = 0
     for query_idx in visual_query_indices:
@@ -3806,6 +3886,7 @@ def compute_page_feature(
         grounded_context_avg_score=grounded_context_avg_score,
         balance_score=balance_score,
         confirmed_visual_page_score=confirmed_visual_page_score,
+        multi_anchor_confirmed_visual_page_score=multi_anchor_confirmed_visual_page_score,
         visual_alignment_count=visual_alignment_count,
         visual_alignment_ratio=visual_alignment_ratio,
         non_visual_alignment_count=non_visual_alignment_count,
@@ -3816,13 +3897,12 @@ def compute_page_feature(
         non_visual_patch_count=len(non_visual_page_indices),
         grounded_non_visual_patch_count=len(grounded_non_visual_page_indices),
         grounded_context_patch_count=len(grounded_context_page_indices),
-        visual_anchor_patch_count=len(
-            {
-                patch_idx
-                for token_idx in visual_anchor_token_indices
-                if (patch_idx := _token_index_to_patch_index(token_idx=token_idx, page_meta=page_meta)) is not None
-            }
-        ),
+        visual_anchor_patch_count=visual_anchor_patch_count,
+        visual_anchor_query_coverage_ratio=visual_anchor_query_coverage_ratio,
+        top_visual_anchor_query_score=top_visual_anchor_query_score,
+        second_visual_anchor_query_score=second_visual_anchor_query_score,
+        visual_anchor_query_score_gap=visual_anchor_query_score_gap,
+        visual_anchor_bbox_area_ratio=visual_anchor_bbox_area_ratio,
     )
 
 
@@ -4306,10 +4386,18 @@ def visual_prefilter_primary_score(
         return float(feature.grounded_non_visual_page_score)
     if mode == "confirmed_visual_only":
         return float(feature.confirmed_visual_page_score)
+    if mode == "multi_anchor_confirmed_visual_only":
+        return float(feature.multi_anchor_confirmed_visual_page_score)
     if mode == "non_visual_with_confirmed_visual_gate":
         return (
             float(feature.non_visual_page_score)
             if float(feature.confirmed_visual_page_score) >= float(confirmed_visual_gate_threshold)
+            else 0.0
+        )
+    if mode == "non_visual_with_multi_anchor_confirmed_visual_gate":
+        return (
+            float(feature.non_visual_page_score)
+            if float(feature.multi_anchor_confirmed_visual_page_score) >= float(confirmed_visual_gate_threshold)
             else 0.0
         )
     raise ValueError(f"Unsupported visual prefilter sort mode: {mode!r}")
@@ -4318,7 +4406,7 @@ def visual_prefilter_primary_score(
 def visual_prefilter_sort_key(
     feature: PageFeature,
     mode: str = "balance_then_visual",
-) -> tuple[float, float, float, float, float, float, str]:
+) -> tuple[float, float, float, float, float, float, float, str]:
     return visual_prefilter_sort_key_with_threshold(feature, mode=mode, confirmed_visual_gate_threshold=0.1)
 
 
@@ -4327,22 +4415,30 @@ def visual_prefilter_sort_key_with_threshold(
     mode: str = "balance_then_visual",
     *,
     confirmed_visual_gate_threshold: float = 0.1,
-) -> tuple[float, float, float, float, float, float, str]:
+) -> tuple[float, float, float, float, float, float, float, str]:
     primary_score = visual_prefilter_primary_score(
         feature,
         mode,
         confirmed_visual_gate_threshold=confirmed_visual_gate_threshold,
     )
     gate_pass = 1.0
-    if mode == "non_visual_with_confirmed_visual_gate":
+    if mode in {
+        "non_visual_with_confirmed_visual_gate",
+        "non_visual_with_multi_anchor_confirmed_visual_gate",
+    }:
         gate_pass = (
             1.0
-            if float(feature.confirmed_visual_page_score) >= float(confirmed_visual_gate_threshold)
+            if (
+                float(feature.multi_anchor_confirmed_visual_page_score)
+                if mode == "non_visual_with_multi_anchor_confirmed_visual_gate"
+                else float(feature.confirmed_visual_page_score)
+            ) >= float(confirmed_visual_gate_threshold)
             else 0.0
         )
     return (
         gate_pass,
         primary_score,
+        float(feature.multi_anchor_confirmed_visual_page_score),
         float(feature.confirmed_visual_page_score),
         float(feature.visual_page_score),
         float(feature.grounded_non_visual_page_score),
@@ -4351,7 +4447,7 @@ def visual_prefilter_sort_key_with_threshold(
     )
 
 
-def _visual_prefilter_sort_key(feature: PageFeature) -> tuple[float, float, float, float, float, float, str]:
+def _visual_prefilter_sort_key(feature: PageFeature) -> tuple[float, float, float, float, float, float, float, str]:
     return visual_prefilter_sort_key_with_threshold(feature, mode="balance_then_visual")
 
 
@@ -4370,9 +4466,15 @@ def _visual_prefilter_trace_payload(
         "base_page_score": float(feature.base_page_score),
         "visual_page_score": float(feature.visual_page_score),
         "confirmed_visual_page_score": float(feature.confirmed_visual_page_score),
+        "multi_anchor_confirmed_visual_page_score": float(feature.multi_anchor_confirmed_visual_page_score),
         "non_visual_page_score": float(feature.non_visual_page_score),
         "grounded_non_visual_page_score": float(feature.grounded_non_visual_page_score),
         "balance_score": float(feature.balance_score),
+        "visual_anchor_query_coverage_ratio": float(feature.visual_anchor_query_coverage_ratio),
+        "top_visual_anchor_query_score": float(feature.top_visual_anchor_query_score),
+        "second_visual_anchor_query_score": float(feature.second_visual_anchor_query_score),
+        "visual_anchor_query_score_gap": float(feature.visual_anchor_query_score_gap),
+        "visual_anchor_bbox_area_ratio": float(feature.visual_anchor_bbox_area_ratio),
     }
 
 

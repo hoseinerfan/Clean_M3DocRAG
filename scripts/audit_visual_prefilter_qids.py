@@ -104,8 +104,8 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.1,
         help=(
-            "Threshold used by prefilter_sort_key=non_visual_with_confirmed_visual_gate. "
-            "Pages below this confirmed_visual score are demoted behind all gated-in pages."
+            "Threshold used by the confirmed-visual-gated prefilter modes. "
+            "Pages below the relevant confirmation score are demoted behind all gated-in pages."
         ),
     )
     parser.add_argument("--grounded-context-radius", type=int, default=2)
@@ -140,11 +140,20 @@ def summarize_group(features: list[dict]) -> dict[str, object]:
         "mean_balance_score": mean_or_none([float(x["balance_score"]) for x in features]),
         "mean_visual_page_score": mean_or_none([float(x["visual_page_score"]) for x in features]),
         "mean_confirmed_visual_page_score": mean_or_none([float(x["confirmed_visual_page_score"]) for x in features]),
+        "mean_multi_anchor_confirmed_visual_page_score": mean_or_none(
+            [float(x["multi_anchor_confirmed_visual_page_score"]) for x in features]
+        ),
         "mean_grounded_non_visual_page_score": mean_or_none([float(x["grounded_non_visual_page_score"]) for x in features]),
         "mean_grounded_context_page_score": mean_or_none([float(x["grounded_context_page_score"]) for x in features]),
         "mean_visual_alignment_ratio": mean_or_none([float(x["visual_alignment_ratio"]) for x in features]),
         "mean_non_visual_alignment_ratio": mean_or_none([float(x["non_visual_alignment_ratio"]) for x in features]),
         "mean_visual_anchor_patch_count": mean_or_none([float(x["visual_anchor_patch_count"]) for x in features]),
+        "mean_visual_anchor_query_coverage_ratio": mean_or_none(
+            [float(x["visual_anchor_query_coverage_ratio"]) for x in features]
+        ),
+        "mean_visual_anchor_bbox_area_ratio": mean_or_none(
+            [float(x["visual_anchor_bbox_area_ratio"]) for x in features]
+        ),
         "mean_grounded_non_visual_patch_count": mean_or_none([float(x["grounded_non_visual_patch_count"]) for x in features]),
         "mean_grounded_context_patch_count": mean_or_none([float(x["grounded_context_patch_count"]) for x in features]),
     }
@@ -384,6 +393,9 @@ def main() -> None:
                 "base_page_score": float(feature.base_page_score),
                 "visual_page_score": float(feature.visual_page_score),
                 "confirmed_visual_page_score": float(feature.confirmed_visual_page_score),
+                "multi_anchor_confirmed_visual_page_score": float(
+                    feature.multi_anchor_confirmed_visual_page_score
+                ),
                 "grounded_non_visual_page_score": float(feature.grounded_non_visual_page_score),
                 "grounded_context_page_score": float(feature.grounded_context_page_score),
                 "non_visual_page_score": float(feature.non_visual_page_score),
@@ -396,6 +408,11 @@ def main() -> None:
                 "grounded_non_visual_patch_count": int(feature.grounded_non_visual_patch_count),
                 "grounded_context_patch_count": int(feature.grounded_context_patch_count),
                 "visual_anchor_patch_count": int(feature.visual_anchor_patch_count),
+                "visual_anchor_query_coverage_ratio": float(feature.visual_anchor_query_coverage_ratio),
+                "top_visual_anchor_query_score": float(feature.top_visual_anchor_query_score),
+                "second_visual_anchor_query_score": float(feature.second_visual_anchor_query_score),
+                "visual_anchor_query_score_gap": float(feature.visual_anchor_query_score_gap),
+                "visual_anchor_bbox_area_ratio": float(feature.visual_anchor_bbox_area_ratio),
             }
             visual_trace.append(record)
             if record["is_gold_doc"]:
@@ -444,9 +461,15 @@ def main() -> None:
                 "prefilter_primary_score": float(best_gold_visual["prefilter_primary_score"]),
                 "visual_page_score": float(best_gold_visual["visual_page_score"]),
                 "confirmed_visual_page_score": float(best_gold_visual["confirmed_visual_page_score"]),
+                "multi_anchor_confirmed_visual_page_score": float(
+                    best_gold_visual["multi_anchor_confirmed_visual_page_score"]
+                ),
                 "grounded_non_visual_page_score": float(best_gold_visual["grounded_non_visual_page_score"]),
                 "grounded_context_page_score": float(best_gold_visual["grounded_context_page_score"]),
                 "balance_score": float(best_gold_visual["balance_score"]),
+                "visual_anchor_query_coverage_ratio": float(best_gold_visual["visual_anchor_query_coverage_ratio"]),
+                "visual_anchor_query_score_gap": float(best_gold_visual["visual_anchor_query_score_gap"]),
+                "visual_anchor_bbox_area_ratio": float(best_gold_visual["visual_anchor_bbox_area_ratio"]),
             },
             "top_visual_prefilter_pages": visual_topn[: args.report_topn],
             "top_visual_prefilter_gold_pages": visual_topn_gold[: args.report_topn],
