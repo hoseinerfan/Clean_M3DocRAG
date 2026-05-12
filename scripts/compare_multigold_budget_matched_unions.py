@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
         "--budget",
         type=int,
         action="append",
-        default=[8, 12],
+        default=None,
         help="Total shortlist budgets to compare. Default: 8 and 12.",
     )
     parser.add_argument(
@@ -231,7 +231,8 @@ def main() -> None:
         restrict_to_reference_partial_at=args.restrict_to_reference_partial_at,
     )
 
-    budgets = sorted({int(value) for value in args.budget if int(value) > 0})
+    raw_budgets = args.budget if args.budget is not None else [8, 12]
+    budgets = sorted({int(value) for value in raw_budgets if int(value) > 0})
     comparisons: list[dict] = []
     for budget in budgets:
         if budget % int(args.base_topk) != 0:
