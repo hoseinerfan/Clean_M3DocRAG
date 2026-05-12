@@ -260,13 +260,40 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--approx-base-page-token-visual-query-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "When --approx-base-page-token-scorer=query_mean, multiply query tokens labeled "
+            "'visual' by this weight before building the coarse mean query vector."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-non-visual-query-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "When --approx-base-page-token-scorer=query_mean, multiply query tokens labeled "
+            "'non_visual' by this weight before building the coarse mean query vector."
+        ),
+    )
+    parser.add_argument(
+        "--approx-base-page-token-unknown-query-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "When --approx-base-page-token-scorer=query_mean, multiply query tokens labeled "
+            "'unknown' by this weight before building the coarse mean query vector."
+        ),
+    )
+    parser.add_argument(
         "--approx-base-page-token-informative-visual-weight",
         type=float,
         default=1.0,
         help=(
-            "When --approx-base-page-token-scorer=query_mean, multiply informative visual query "
-            "tokens from --splice-query-token-labels by this weight when building the coarse mean "
-            "query vector for page-token pruning."
+            "When --approx-base-page-token-scorer=query_mean, apply this extra multiplicative "
+            "boost to informative visual query tokens from --splice-query-token-labels after "
+            "their visual/non-visual/unknown class weight is applied."
         ),
     )
     parser.add_argument(
@@ -1303,14 +1330,32 @@ def main() -> None:
             "--approx-base-page-token-maxsim-preservation-target is only valid when "
             "--approx-base-page-token-adaptive-k-mode=maxsim_mass."
         )
+    if (
+        args.approx_base_page_token_visual_query_weight <= 0.0
+        or args.approx_base_page_token_non_visual_query_weight <= 0.0
+        or args.approx_base_page_token_unknown_query_weight <= 0.0
+    ):
+        raise ValueError(
+            "--approx-base-page-token-visual-query-weight, "
+            "--approx-base-page-token-non-visual-query-weight, and "
+            "--approx-base-page-token-unknown-query-weight must be > 0."
+        )
     if args.approx_base_page_token_informative_visual_weight <= 0.0:
         raise ValueError("--approx-base-page-token-informative-visual-weight must be > 0.")
     if (
         args.approx_base_page_token_scorer != "query_mean"
-        and args.approx_base_page_token_informative_visual_weight != 1.0
+        and (
+            args.approx_base_page_token_visual_query_weight != 1.0
+            or args.approx_base_page_token_non_visual_query_weight != 1.0
+            or args.approx_base_page_token_unknown_query_weight != 1.0
+            or args.approx_base_page_token_informative_visual_weight != 1.0
+        )
     ):
         raise ValueError(
-            "--approx-base-page-token-informative-visual-weight is only valid with "
+            "--approx-base-page-token-visual-query-weight, "
+            "--approx-base-page-token-non-visual-query-weight, "
+            "--approx-base-page-token-unknown-query-weight, and "
+            "--approx-base-page-token-informative-visual-weight are only valid with "
             "--approx-base-page-token-scorer=query_mean."
         )
     if (
@@ -1816,6 +1861,9 @@ def main() -> None:
                         approx_page_token_adaptive_k_mode=args.approx_base_page_token_adaptive_k_mode,
                         approx_page_token_adaptive_k_min=args.approx_base_page_token_adaptive_k_min,
                         approx_page_token_adaptive_k_max=args.approx_base_page_token_adaptive_k_max,
+                        approx_page_token_visual_query_weight=args.approx_base_page_token_visual_query_weight,
+                        approx_page_token_non_visual_query_weight=args.approx_base_page_token_non_visual_query_weight,
+                        approx_page_token_unknown_query_weight=args.approx_base_page_token_unknown_query_weight,
                         approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
@@ -1858,6 +1906,9 @@ def main() -> None:
                         approx_page_token_adaptive_k_mode=args.approx_base_page_token_adaptive_k_mode,
                         approx_page_token_adaptive_k_min=args.approx_base_page_token_adaptive_k_min,
                         approx_page_token_adaptive_k_max=args.approx_base_page_token_adaptive_k_max,
+                        approx_page_token_visual_query_weight=args.approx_base_page_token_visual_query_weight,
+                        approx_page_token_non_visual_query_weight=args.approx_base_page_token_non_visual_query_weight,
+                        approx_page_token_unknown_query_weight=args.approx_base_page_token_unknown_query_weight,
                         approx_page_token_informative_visual_weight=args.approx_base_page_token_informative_visual_weight,
                         approx_page_token_soft_visual_query_weight=args.approx_base_page_token_soft_visual_query_weight,
                         approx_page_token_soft_patch_visual_bonus=args.approx_base_page_token_soft_patch_visual_bonus,
@@ -2184,6 +2235,9 @@ def main() -> None:
             "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
             "approx_base_page_token_maxsim_greedy_candidate_budget": args.approx_base_page_token_maxsim_greedy_candidate_budget,
             "approx_base_page_token_maxsim_preservation_target": args.approx_base_page_token_maxsim_preservation_target,
+            "approx_base_page_token_visual_query_weight": args.approx_base_page_token_visual_query_weight,
+            "approx_base_page_token_non_visual_query_weight": args.approx_base_page_token_non_visual_query_weight,
+            "approx_base_page_token_unknown_query_weight": args.approx_base_page_token_unknown_query_weight,
             "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
             "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
             "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
@@ -2319,6 +2373,9 @@ def main() -> None:
         "approx_base_page_token_redundancy_lambda": args.approx_base_page_token_redundancy_lambda,
         "approx_base_page_token_maxsim_greedy_candidate_budget": args.approx_base_page_token_maxsim_greedy_candidate_budget,
         "approx_base_page_token_maxsim_preservation_target": args.approx_base_page_token_maxsim_preservation_target,
+        "approx_base_page_token_visual_query_weight": args.approx_base_page_token_visual_query_weight,
+        "approx_base_page_token_non_visual_query_weight": args.approx_base_page_token_non_visual_query_weight,
+        "approx_base_page_token_unknown_query_weight": args.approx_base_page_token_unknown_query_weight,
         "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
