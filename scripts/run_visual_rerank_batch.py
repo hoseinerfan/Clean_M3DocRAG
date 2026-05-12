@@ -692,6 +692,15 @@ def parse_args() -> argparse.Namespace:
         help="Per-qid JSONL summary output.",
     )
     parser.add_argument(
+        "--resume-output-jsonl",
+        action="store_true",
+        help=(
+            "If the output JSONL already exists, load completed qids from it, skip them, "
+            "and append newly finished qids as they complete. Useful for long HPC jobs "
+            "that may time out."
+        ),
+    )
+    parser.add_argument(
         "--output-summary-json",
         required=True,
         help="Aggregate summary JSON output.",
@@ -805,6 +814,79 @@ def median_or_none(values: list[int]) -> float | None:
     if not values:
         return None
     return float(statistics.median(values))
+
+
+def load_existing_output_rows(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+
+def initialize_running_counts(
+    *,
+    rows: list[dict],
+    diagnose_coarse_pre_exact: bool,
+) -> dict[str, object]:
+    state: dict[str, object] = {
+        "improved_doc": 0,
+        "worsened_doc": 0,
+        "unchanged_doc": 0,
+        "reranked_top4_doc": 0,
+        "baseline_top4_doc": 0,
+        "routed_to_visual_qids": 0,
+        "routed_to_base_qids": 0,
+        "coarse_pre_exact_top4_doc": 0,
+        "coarse_pre_exact_doc_ranks": [],
+        "coarse_pre_exact_page_ranks": [],
+        "exact_vs_coarse_improved_doc": 0,
+        "exact_vs_coarse_worsened_doc": 0,
+        "exact_vs_coarse_unchanged_doc": 0,
+        "coarse_pre_exact_top4_qids": [],
+    }
+    for row in rows:
+        baseline_first_gold_doc_rank = row.get("baseline_first_gold_doc_rank")
+        reranked_first_gold_doc_rank = row.get("reranked_first_gold_doc_rank")
+        if baseline_first_gold_doc_rank is not None and reranked_first_gold_doc_rank is not None:
+            if int(reranked_first_gold_doc_rank) < int(baseline_first_gold_doc_rank):
+                state["improved_doc"] += 1
+            elif int(reranked_first_gold_doc_rank) > int(baseline_first_gold_doc_rank):
+                state["worsened_doc"] += 1
+            else:
+                state["unchanged_doc"] += 1
+        if baseline_first_gold_doc_rank is not None and int(baseline_first_gold_doc_rank) <= 4:
+            state["baseline_top4_doc"] += 1
+        if reranked_first_gold_doc_rank is not None and int(reranked_first_gold_doc_rank) <= 4:
+            state["reranked_top4_doc"] += 1
+
+        route_decision = row.get("route_decision")
+        if route_decision == "visual":
+            state["routed_to_visual_qids"] += 1
+        elif route_decision == "base":
+            state["routed_to_base_qids"] += 1
+
+        if diagnose_coarse_pre_exact:
+            coarse_doc_rank = row.get("coarse_pre_exact_first_gold_doc_rank")
+            coarse_page_rank = row.get("coarse_pre_exact_first_gold_page_rank_any_gold_doc_page")
+            if coarse_doc_rank is not None:
+                state["coarse_pre_exact_doc_ranks"].append(int(coarse_doc_rank))
+                if int(coarse_doc_rank) <= 4:
+                    state["coarse_pre_exact_top4_doc"] += 1
+                    state["coarse_pre_exact_top4_qids"].append(str(row.get("qid", "")))
+            if coarse_page_rank is not None:
+                state["coarse_pre_exact_page_ranks"].append(int(coarse_page_rank))
+            if coarse_doc_rank is not None and reranked_first_gold_doc_rank is not None:
+                if int(reranked_first_gold_doc_rank) < int(coarse_doc_rank):
+                    state["exact_vs_coarse_improved_doc"] += 1
+                elif int(reranked_first_gold_doc_rank) > int(coarse_doc_rank):
+                    state["exact_vs_coarse_worsened_doc"] += 1
+                else:
+                    state["exact_vs_coarse_unchanged_doc"] += 1
+    return state
 
 
 def aggregate_token_pruning_diagnostic_summaries(qid_summaries: list[dict]) -> dict:
@@ -1672,24 +1754,50 @@ def main() -> None:
     grid_non_visual_values = parse_float_list(args.grid_non_visual_values)
     grid_balance_values = parse_float_list(args.grid_balance_values)
 
+    output_jsonl = Path(args.output_jsonl)
+    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    output_summary_json = Path(args.output_summary_json)
+    output_summary_json.parent.mkdir(parents=True, exist_ok=True)
+
     all_rows: list[dict] = []
     all_doc_feature_rows: list[dict] = []
-    improved_doc = 0
-    worsened_doc = 0
-    unchanged_doc = 0
-    reranked_top4_doc = 0
-    baseline_top4_doc = 0
-    routed_to_visual_qids = 0
-    routed_to_base_qids = 0
-    coarse_pre_exact_top4_doc = 0
-    coarse_pre_exact_doc_ranks: list[int] = []
-    coarse_pre_exact_page_ranks: list[int] = []
-    exact_vs_coarse_improved_doc = 0
-    exact_vs_coarse_worsened_doc = 0
-    exact_vs_coarse_unchanged_doc = 0
-    coarse_pre_exact_top4_qids: list[str] = []
+    completed_qids: set[str] = set()
+    append_output_handle = None
+    if args.resume_output_jsonl:
+        if output_jsonl.exists():
+            all_rows = load_existing_output_rows(output_jsonl)
+            completed_qids = {
+                str(row.get("qid", "")).strip()
+                for row in all_rows
+                if str(row.get("qid", "")).strip()
+            }
+            print(f"resuming_from_existing_output_jsonl: {output_jsonl}")
+            print(f"completed_qids_loaded: {len(completed_qids)}")
+        append_output_handle = output_jsonl.open("a", encoding="utf-8")
+
+    running_counts = initialize_running_counts(
+        rows=all_rows,
+        diagnose_coarse_pre_exact=args.diagnose_coarse_pre_exact,
+    )
+    improved_doc = int(running_counts["improved_doc"])
+    worsened_doc = int(running_counts["worsened_doc"])
+    unchanged_doc = int(running_counts["unchanged_doc"])
+    reranked_top4_doc = int(running_counts["reranked_top4_doc"])
+    baseline_top4_doc = int(running_counts["baseline_top4_doc"])
+    routed_to_visual_qids = int(running_counts["routed_to_visual_qids"])
+    routed_to_base_qids = int(running_counts["routed_to_base_qids"])
+    coarse_pre_exact_top4_doc = int(running_counts["coarse_pre_exact_top4_doc"])
+    coarse_pre_exact_doc_ranks: list[int] = list(running_counts["coarse_pre_exact_doc_ranks"])
+    coarse_pre_exact_page_ranks: list[int] = list(running_counts["coarse_pre_exact_page_ranks"])
+    exact_vs_coarse_improved_doc = int(running_counts["exact_vs_coarse_improved_doc"])
+    exact_vs_coarse_worsened_doc = int(running_counts["exact_vs_coarse_worsened_doc"])
+    exact_vs_coarse_unchanged_doc = int(running_counts["exact_vs_coarse_unchanged_doc"])
+    coarse_pre_exact_top4_qids: list[str] = list(running_counts["coarse_pre_exact_top4_qids"])
 
     for idx, qid in enumerate(qids, start=1):
+        if qid in completed_qids:
+            print(f"[{idx}/{len(qids)}] {qid} already_completed, skipping")
+            continue
         gold_row = gold_rows[qid]
         gold_doc_ids = sorted({str(item["doc_id"]).strip() for item in gold_row.get("supporting_context", [])})
         gold_doc_id_set = set(gold_doc_ids)
@@ -2263,6 +2371,7 @@ def main() -> None:
             "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
             "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
             "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
+            "approx_base_page_token_nonspatial_policy": args.approx_base_page_token_nonspatial_policy,
             "report_pruning_diagnostics": args.report_pruning_diagnostics,
             "base_only_page_batch_size": args.base_only_page_batch_size,
             "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
@@ -2339,6 +2448,9 @@ def main() -> None:
             "reranked_gold_doc_ranks": gold_doc_summary["gold_doc_ranks"],
         }
         all_rows.append(row)
+        if append_output_handle is not None:
+            append_output_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            append_output_handle.flush()
         print(
             f"[{idx}/{len(qids)}] {qid} "
             f"baseline_doc={baseline_first_gold_doc_rank} "
@@ -2347,11 +2459,12 @@ def main() -> None:
             f"reranked_page={reranked_first_gold_page_rank}"
         )
 
-    output_jsonl = Path(args.output_jsonl)
-    output_jsonl.parent.mkdir(parents=True, exist_ok=True)
-    with output_jsonl.open("w", encoding="utf-8") as handle:
-        for row in all_rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    if append_output_handle is not None:
+        append_output_handle.close()
+    else:
+        with output_jsonl.open("w", encoding="utf-8") as handle:
+            for row in all_rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
     if args.output_doc_feature_jsonl:
         output_doc_feature_jsonl = Path(args.output_doc_feature_jsonl)
         output_doc_feature_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -2401,6 +2514,8 @@ def main() -> None:
         "approx_base_page_token_informative_visual_weight": args.approx_base_page_token_informative_visual_weight,
         "approx_base_page_token_soft_visual_query_weight": args.approx_base_page_token_soft_visual_query_weight,
         "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
+        "approx_base_page_token_nonspatial_policy": args.approx_base_page_token_nonspatial_policy,
+        "resume_output_jsonl": args.resume_output_jsonl,
         "report_pruning_diagnostics": args.report_pruning_diagnostics,
         "base_only_page_batch_size": args.base_only_page_batch_size,
         "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
@@ -2485,8 +2600,6 @@ def main() -> None:
         "top4_doc_qids": [row["qid"] for row in all_rows if row["reranked_first_gold_doc_rank"] is not None and row["reranked_first_gold_doc_rank"] <= 4],
     }
 
-    output_summary_json = Path(args.output_summary_json)
-    output_summary_json.parent.mkdir(parents=True, exist_ok=True)
     output_summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
     print(f"saved_jsonl: {output_jsonl}")
