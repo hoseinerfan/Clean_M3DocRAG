@@ -40,11 +40,17 @@ APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES = (
     "redundancy_aware_topk",
     "spatial_quadrant_mix",
     "query_coverage_mix",
+    "query_coverage_topk",
     "query_label_mix",
     "learned_token_topk",
+    "learned_exact_winner_topk",
     "soft_label_prior",
     "visual_patch_query_prior",
 )
+APPROX_BASE_PAGE_TOKEN_SELECTOR_ALIASES = {
+    "query_coverage_topk": "query_coverage_mix",
+    "learned_exact_winner_topk": "learned_token_topk",
+}
 COARSE_SCORE_DTYPE_CHOICES = ("fp32", "bf16", "fp16")
 APPROX_BASE_PAGE_TOKEN_ADAPTIVE_K_MODE_CHOICES = (
     "disabled",
@@ -110,6 +116,10 @@ SOFT_VISUAL_QUERY_STOPWORDS = {
     "who",
     "with",
 }
+
+
+def canonicalize_approx_page_token_selector(name: str) -> str:
+    return APPROX_BASE_PAGE_TOKEN_SELECTOR_ALIASES.get(name, name)
 INFORMATIVE_QUERY_STOPWORDS = SOFT_VISUAL_QUERY_STOPWORDS | {
     "be",
     "been",
@@ -1378,6 +1388,10 @@ def select_page_token_indices_for_base_only(
 ) -> tuple[list[int], TokenPruningDiagnostics | None]:
     import torch
 
+    approx_page_token_selector = canonicalize_approx_page_token_selector(
+        approx_page_token_selector
+    )
+
     coarse_scores = compute_coarse_page_token_scores(
         page_emb=page_emb,
         query_emb=query_emb,
@@ -2640,11 +2654,13 @@ def parse_args() -> argparse.Namespace:
             "already selected tokens, so the top-K budget covers more diverse evidence. "
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
             "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
-            "distinct informative query tokens before filling the rest globally. "
+            "distinct informative query tokens before filling the rest globally; "
+            "'query_coverage_topk' is a clearer alias for the same method. "
             "'maxsim_greedy' greedily selects tokens that maximize retained page-query MaxSim "
             "mass, providing a more principled approximation to the exact objective. "
             "'learned_token_topk' scores each page token with a small learned linear selector "
-            "trained from exact MaxSim token winners. "
+            "trained from exact MaxSim token winners; 'learned_exact_winner_topk' is a clearer "
+            "alias for the same method. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
             "informative visual query tokens and visual-labeled page patches. "
             "'visual_patch_query_prior' only boosts visual-labeled page patches using "
@@ -5549,6 +5565,9 @@ def build_prediction_payload(
 
 def main() -> None:
     args = parse_args()
+    args.approx_base_page_token_selector = canonicalize_approx_page_token_selector(
+        args.approx_base_page_token_selector
+    )
 
     if args.base_score_source == "approx_page_maxsim_topk" and args.approx_base_page_token_topk <= 0:
         raise ValueError(

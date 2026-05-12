@@ -40,6 +40,7 @@ from scripts.rerank_target_docs_visual_aware import (
     build_page_token_classes,
     build_rankings,
     build_stage1_base_doc_rank_map,
+    canonicalize_approx_page_token_selector,
     clean_token_label,
     compute_base_only_page_features,
     compute_base_only_page_feature,
@@ -187,11 +188,13 @@ def parse_args() -> argparse.Namespace:
             "already selected tokens, so the top-K budget covers more diverse evidence. "
             "'spatial_quadrant_mix' reserves part of the token budget across page quadrants. "
             "'query_coverage_mix' reserves part of the token budget for tokens that cover more "
-            "distinct informative query tokens before filling the rest globally. "
+            "distinct informative query tokens before filling the rest globally; "
+            "'query_coverage_topk' is a clearer alias for the same method. "
             "'maxsim_greedy' greedily selects tokens that maximize retained page-query MaxSim "
             "mass, providing a more principled approximation to the exact objective. "
             "'learned_token_topk' scores each page token with a small learned linear selector "
-            "trained from exact MaxSim token winners. "
+            "trained from exact MaxSim token winners; 'learned_exact_winner_topk' is a clearer "
+            "alias for the same method. "
             "'soft_label_prior' keeps global top-K selection but adds soft bonuses from "
             "informative visual query tokens and visual-labeled page patches. "
             "'visual_patch_query_prior' only boosts visual-labeled page patches using "
@@ -1150,6 +1153,9 @@ def build_vlm_late_reranked_results(
 
 def main() -> None:
     args = parse_args()
+    args.approx_base_page_token_selector = canonicalize_approx_page_token_selector(
+        args.approx_base_page_token_selector
+    )
 
     if args.base_score_source == "approx_page_maxsim_topk" and args.approx_base_page_token_topk <= 0:
         raise ValueError(
