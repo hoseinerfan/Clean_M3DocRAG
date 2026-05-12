@@ -103,6 +103,8 @@ def parse_args() -> argparse.Namespace:
             "Source used for the base term in the fusion. "
             "'exact_page_maxsim' recomputes page-local MaxSim on the fixed pool; "
             "'baseline_pred' reuses the page score stored in --baseline-pred. "
+            "'baseline_pred_two_stage_page_maxsim' reuses the page score stored in "
+            "--baseline-pred, then recomputes exact MaxSim only on the top-N baseline-ranked pages. "
             "'approx_page_maxsim_topk' uses query-guided top-K page-token pruning before "
             "MaxSim in base-only mode. "
             "'two_stage_page_maxsim' uses approximate top-K pruning on all pages, then "
@@ -319,6 +321,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "For --base-score-source=two_stage_page_maxsim, recompute exact MaxSim only on the "
             "top-N pages from the approximate stage-1 ranking. For "
+            "--base-score-source=baseline_pred_two_stage_page_maxsim, recompute exact MaxSim only "
+            "on the top-N pages from the saved baseline page ranking. For "
             "--base-score-source=visual_prefilter_exact_page_maxsim, recompute exact MaxSim only "
             "on the top-N pages from the visual-grounded prefilter shortlist."
         ),
@@ -1362,13 +1366,23 @@ def main() -> None:
             "--two-stage-exact-top-pages > 0."
         )
     if (
+        args.base_score_source == "baseline_pred_two_stage_page_maxsim"
+        and args.two_stage_exact_top_pages <= 0
+    ):
+        raise ValueError(
+            "--base-score-source=baseline_pred_two_stage_page_maxsim requires "
+            "--two-stage-exact-top-pages > 0."
+        )
+    if (
         args.base_score_source != "two_stage_page_maxsim"
+        and args.base_score_source != "baseline_pred_two_stage_page_maxsim"
         and args.base_score_source != "visual_prefilter_exact_page_maxsim"
         and args.two_stage_exact_top_pages > 0
     ):
         raise ValueError(
             "--two-stage-exact-top-pages is only valid with "
-            "--base-score-source=two_stage_page_maxsim or visual_prefilter_exact_page_maxsim."
+            "--base-score-source=two_stage_page_maxsim, "
+            "baseline_pred_two_stage_page_maxsim, or visual_prefilter_exact_page_maxsim."
         )
     if args.base_score_source == "two_stage_doc_maxsim" and args.two_stage_exact_top_docs <= 0:
         raise ValueError(
@@ -1484,8 +1498,10 @@ def main() -> None:
         raise ValueError("--vlm-rerank-top-docs cannot be combined with staged visual reranking.")
     if vlm_rerank_active and learned_doc_reranker_active:
         raise ValueError("--vlm-rerank-top-docs cannot be combined with --learned-doc-reranker-model.")
-    if vlm_rerank_active and args.base_score_source == "baseline_pred":
-        raise ValueError("--vlm-rerank-top-docs is not supported with --base-score-source=baseline_pred.")
+    if vlm_rerank_active and args.base_score_source in {"baseline_pred", "baseline_pred_two_stage_page_maxsim"}:
+        raise ValueError(
+            "--vlm-rerank-top-docs is not supported with baseline_pred-based base-score sources."
+        )
     if args.diagnose_coarse_pre_exact and not fixed_base_only:
         raise ValueError("--diagnose-coarse-pre-exact currently requires base-only weights without grid search.")
     if args.diagnose_coarse_pre_exact and args.base_score_source != "approx_page_maxsim_topk":
@@ -1498,6 +1514,7 @@ def main() -> None:
         raise ValueError("--diagnose-coarse-pre-exact cannot be combined with --vlm-rerank-top-docs.")
     if (
         args.base_score_source in {
+            "baseline_pred_two_stage_page_maxsim",
             "approx_page_maxsim_topk",
             "two_stage_page_maxsim",
             "two_stage_doc_maxsim",
@@ -1871,14 +1888,14 @@ def main() -> None:
                                 non_visual_page_mode=args.non_visual_page_mode,
                                 base_score_override=(
                                     baseline_page_score_map.get(page_uid)
-                                    if args.base_score_source == "baseline_pred"
+                                    if args.base_score_source in {"baseline_pred", "baseline_pred_two_stage_page_maxsim"}
                                     else None
                                 ),
                             )
                         )
 
             visual_prefilter_exact_trace: dict[str, object] | None = None
-            if args.base_score_source == "two_stage_page_maxsim":
+            if args.base_score_source in {"two_stage_page_maxsim", "baseline_pred_two_stage_page_maxsim"}:
                 page_features = apply_two_stage_exact_rerank_to_page_features(
                     page_features=page_features,
                     docid2embs=docid2embs,
@@ -2204,7 +2221,14 @@ def main() -> None:
             "learned_doc_reranker_applied": learned_doc_reranker_active,
             "learned_token_selector_applied": args.approx_base_page_token_selector == "learned_token_topk",
             "vlm_reranker_applied": vlm_rerank_active,
-            "staged_visual_rerank_applied": apply_staged_visual_rerank if not (fixed_base_only and args.base_score_source == "baseline_pred") else False,
+            "staged_visual_rerank_applied": (
+                apply_staged_visual_rerank
+                if not (
+                    fixed_base_only
+                    and args.base_score_source in {"baseline_pred", "baseline_pred_two_stage_page_maxsim"}
+                )
+                else False
+            ),
             "weights": asdict(weights),
             "grid_search_enabled": args.grid_search,
             "grid_search_best": best_grid_record,

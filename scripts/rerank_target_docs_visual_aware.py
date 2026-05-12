@@ -23,6 +23,7 @@ QUERY_TOKEN_FILTER_CHOICES = ("full", "drop_pad_like", "semantic_only")
 BASE_SCORE_SOURCE_CHOICES = (
     "exact_page_maxsim",
     "baseline_pred",
+    "baseline_pred_two_stage_page_maxsim",
     "approx_page_maxsim_topk",
     "two_stage_page_maxsim",
     "two_stage_doc_maxsim",
@@ -2555,6 +2556,8 @@ def parse_args() -> argparse.Namespace:
             "Source used for the base term in the fusion. "
             "'exact_page_maxsim' recomputes page-local MaxSim on the fixed candidate pool. "
             "'baseline_pred' reuses the page score already stored in --baseline-pred. "
+            "'baseline_pred_two_stage_page_maxsim' reuses the page score already stored in "
+            "--baseline-pred, then recomputes exact MaxSim only on the top-N baseline-ranked pages. "
             "'approx_page_maxsim_topk' uses query-guided top-K page-token pruning before MaxSim "
             "in base-only mode. "
             "'two_stage_page_maxsim' uses approximate top-K pruning on all pages, then "
@@ -2771,6 +2774,8 @@ def parse_args() -> argparse.Namespace:
         help=(
             "For --base-score-source=two_stage_page_maxsim, recompute exact MaxSim only on the "
             "top-N pages from the approximate stage-1 ranking. For "
+            "--base-score-source=baseline_pred_two_stage_page_maxsim, recompute exact MaxSim only "
+            "on the top-N pages from the saved baseline page ranking. For "
             "--base-score-source=visual_prefilter_exact_page_maxsim, recompute exact MaxSim only "
             "on the top-N pages from the visual-grounded prefilter shortlist."
         ),
@@ -3942,7 +3947,11 @@ def compute_base_only_page_feature(
     exact_base_page_score: float
     coarse_page_score: float | None = None
     token_pruning_diagnostics: TokenPruningDiagnostics | None = None
-    if base_score_source == "exact_page_maxsim":
+    if base_score_source in {"baseline_pred", "baseline_pred_two_stage_page_maxsim"}:
+        if base_score_override is None:
+            raise ValueError(f"{base_score_source} requires a baseline page-score override.")
+        exact_base_page_score = float(base_score_override)
+    elif base_score_source == "exact_page_maxsim":
         exact_base_page_score = compute_exact_base_page_score(
             page_emb=page_emb,
             query_emb=query_emb,
@@ -4041,6 +4050,7 @@ def compute_base_only_page_feature_scores_batched(
 
     if base_score_source not in {
         "approx_page_maxsim_topk",
+        "baseline_pred_two_stage_page_maxsim",
         "two_stage_page_maxsim",
         "two_stage_doc_maxsim",
         "visual_prefilter_exact_page_maxsim",
@@ -4246,7 +4256,7 @@ def compute_base_only_page_features(
         )
         base_score_override = (
             baseline_page_score_map.get(page_uid)
-            if base_score_source == "baseline_pred"
+            if base_score_source in {"baseline_pred", "baseline_pred_two_stage_page_maxsim"}
             else None
         )
 
@@ -5749,6 +5759,14 @@ def main() -> None:
             "--base-score-source=two_stage_page_maxsim requires "
             "--two-stage-exact-top-pages > 0."
         )
+    if (
+        args.base_score_source == "baseline_pred_two_stage_page_maxsim"
+        and args.two_stage_exact_top_pages <= 0
+    ):
+        raise ValueError(
+            "--base-score-source=baseline_pred_two_stage_page_maxsim requires "
+            "--two-stage-exact-top-pages > 0."
+        )
     if args.base_score_source == "visual_prefilter_exact_page_maxsim" and args.two_stage_exact_top_pages <= 0:
         raise ValueError(
             "--base-score-source=visual_prefilter_exact_page_maxsim requires "
@@ -5756,12 +5774,14 @@ def main() -> None:
         )
     if (
         args.base_score_source != "two_stage_page_maxsim"
+        and args.base_score_source != "baseline_pred_two_stage_page_maxsim"
         and args.base_score_source != "visual_prefilter_exact_page_maxsim"
         and args.two_stage_exact_top_pages > 0
     ):
         raise ValueError(
             "--two-stage-exact-top-pages is only valid with "
-            "--base-score-source=two_stage_page_maxsim or visual_prefilter_exact_page_maxsim."
+            "--base-score-source=two_stage_page_maxsim, "
+            "baseline_pred_two_stage_page_maxsim, or visual_prefilter_exact_page_maxsim."
         )
     if args.base_score_source == "two_stage_doc_maxsim" and args.two_stage_exact_top_docs <= 0:
         raise ValueError(
@@ -5879,6 +5899,7 @@ def main() -> None:
         )
     if (
         args.base_score_source in {
+            "baseline_pred_two_stage_page_maxsim",
             "approx_page_maxsim_topk",
             "two_stage_page_maxsim",
             "two_stage_doc_maxsim",
@@ -5924,7 +5945,7 @@ def main() -> None:
                 )
             )
         if not page_features:
-            raise ValueError("No candidate pages were available for baseline_pred base-only reranking.")
+            raise ValueError("No candidate pages were available for baseline_pred-based base-only reranking.")
         query_axis_classes = []
         query_token_labels = []
         query_raw_tokens = []
@@ -6234,7 +6255,7 @@ def main() -> None:
                         non_visual_page_mode=args.non_visual_page_mode,
                         base_score_override=(
                             baseline_page_score_map.get(page_uid)
-                            if args.base_score_source == "baseline_pred"
+                            if args.base_score_source in {"baseline_pred", "baseline_pred_two_stage_page_maxsim"}
                             else None
                         ),
                     )
@@ -6243,7 +6264,7 @@ def main() -> None:
     if not page_features:
         raise ValueError("No candidate pages were scored.")
 
-    if args.base_score_source == "two_stage_page_maxsim":
+    if args.base_score_source in {"two_stage_page_maxsim", "baseline_pred_two_stage_page_maxsim"}:
         page_features = apply_two_stage_exact_rerank_to_page_features(
             page_features=page_features,
             docid2embs=docid2embs,
