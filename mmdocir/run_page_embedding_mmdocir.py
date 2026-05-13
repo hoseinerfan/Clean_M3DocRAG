@@ -78,6 +78,13 @@ def load_image(path: Path) -> Image.Image:
     return image.convert("RGB")
 
 
+def resolve_image_path(data_root: Path, image_path: str) -> Path:
+    path = Path(image_path)
+    if path.is_absolute():
+        return path
+    return data_root / path
+
+
 def main() -> None:
     args = parse_args()
     data_root = Path(args.data_root)
@@ -118,7 +125,7 @@ def main() -> None:
         if args.resume and output_path.exists():
             continue
         pages = doc_pages[doc_id]
-        images = [load_image(data_root / row["image_path"]) for row in pages]
+        images = [load_image(resolve_image_path(data_root, row["image_path"])) for row in pages]
         with torch.no_grad():
             doc_embs = retrieval_model.encode_images(
                 images=images,
