@@ -33,8 +33,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def normalize_doc_name(doc_name: str) -> str:
+    text = str(doc_name).strip()
+    if text.lower().endswith(".pdf"):
+        text = text[:-4]
+    return text
+
+
 def safe_doc_id(doc_name: str) -> str:
-    return quote(str(doc_name), safe="._-")
+    return quote(normalize_doc_name(doc_name), safe="._-")
 
 
 def read_jsonl(path: Path) -> list[dict]:
@@ -142,7 +149,8 @@ def convert_annotations(
     ) as qids_out, gold_pages_path.open("w", encoding="utf-8") as gold_out:
         for doc_row in rows:
             original_doc_name = str(doc_row["doc_name"]).strip()
-            doc_id = safe_doc_id(original_doc_name)
+            normalized_doc_name = normalize_doc_name(original_doc_name)
+            doc_id = safe_doc_id(normalized_doc_name)
             if doc_id not in doc_id_map:
                 doc_ids.append(doc_id)
                 doc_id_map[doc_id] = original_doc_name
@@ -184,6 +192,7 @@ def convert_annotations(
                         "domain": domain,
                         "source": "MMDocIR",
                         "doc_name": original_doc_name,
+                        "normalized_doc_name": normalized_doc_name,
                         "doc_id": doc_id,
                         "gold_page_ids": page_ids,
                         "gold_page_uids": gold_page_uids,
@@ -262,7 +271,10 @@ def export_page_images(
 ) -> None:
     pages_dir = output_root / f"pages_{split}"
     manifest_path = output_root / f"doc_pages_{split}.jsonl"
-    original_to_doc_id = {original: doc_id for doc_id, original in doc_id_map.items()}
+    original_to_doc_id = {}
+    for doc_id, original in doc_id_map.items():
+        original_to_doc_id[original] = doc_id
+        original_to_doc_id[normalize_doc_name(original)] = doc_id
     fallback_page_counters: dict[str, int] = defaultdict(int)
     manifest_rows: list[dict] = []
 
@@ -271,7 +283,11 @@ def export_page_images(
             original_doc_name = str(row.get("doc_name", "")).strip()
             if not original_doc_name:
                 continue
-            doc_id = original_to_doc_id.get(original_doc_name, safe_doc_id(original_doc_name))
+            normalized_doc_name = normalize_doc_name(original_doc_name)
+            doc_id = original_to_doc_id.get(
+                original_doc_name,
+                original_to_doc_id.get(normalized_doc_name, safe_doc_id(normalized_doc_name)),
+            )
             page_idx = row.get("page_id")
             if page_idx is None:
                 page_idx = extract_trailing_int(row.get("passage_id"))
@@ -342,4 +358,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
