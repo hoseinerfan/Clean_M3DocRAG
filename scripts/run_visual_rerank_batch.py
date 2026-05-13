@@ -705,6 +705,14 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Aggregate summary JSON output.",
     )
+    parser.add_argument(
+        "--output-prediction-json",
+        default="",
+        help=(
+            "Optional run_rag-style prediction JSON path. Writes each qid's reranked "
+            "page_retrieval_results so downstream evaluators can consume the batch output."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -781,20 +789,44 @@ def build_baseline_pool(
     )
 
 
+def extract_gold_page_uids(gold_row: dict) -> list[str]:
+    metadata = gold_row.get("metadata", {})
+    page_uids = {
+        str(value).strip()
+        for value in metadata.get("gold_page_uids", [])
+        if str(value).strip()
+    }
+    for item in gold_row.get("supporting_context", []):
+        doc_id = str(item.get("doc_id", "")).strip()
+        if not doc_id:
+            continue
+        page_idx = item.get("page_idx", item.get("page_id"))
+        if page_idx is None:
+            continue
+        page_uids.add(f"{doc_id}_page{int(page_idx)}")
+    return sorted(page_uids)
+
+
 def baseline_gold_page_hits(
     rows: list[list[object]],
     gold_doc_ids: set[str],
+    gold_page_uids: set[str] | None = None,
 ) -> list[dict]:
+    gold_page_uids = gold_page_uids or set()
     hits = []
     for row_rank, row in enumerate(rows, start=1):
         doc_id = str(row[0]).strip()
-        if doc_id not in gold_doc_ids:
-            continue
         page_idx = int(row[1])
+        page_uid = f"{doc_id}_page{page_idx}"
+        if gold_page_uids:
+            if page_uid not in gold_page_uids:
+                continue
+        elif doc_id not in gold_doc_ids:
+            continue
         hits.append(
             {
                 "rank": row_rank,
-                "page_uid": f"{doc_id}_page{page_idx}",
+                "page_uid": page_uid,
                 "doc_id": doc_id,
                 "page_idx": page_idx,
                 "score": float(row[2]),
@@ -806,7 +838,11 @@ def baseline_gold_page_hits(
 def reranked_gold_page_hits(
     reranked_pages: list[dict],
     gold_doc_ids: set[str],
+    gold_page_uids: set[str] | None = None,
 ) -> list[dict]:
+    gold_page_uids = gold_page_uids or set()
+    if gold_page_uids:
+        return [row for row in reranked_pages if row["page_uid"] in gold_page_uids]
     return [row for row in reranked_pages if row["doc_id"] in gold_doc_ids]
 
 
@@ -1758,9 +1794,13 @@ def main() -> None:
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
     output_summary_json = Path(args.output_summary_json)
     output_summary_json.parent.mkdir(parents=True, exist_ok=True)
+    output_prediction_json = Path(args.output_prediction_json) if args.output_prediction_json else None
+    if output_prediction_json is not None:
+        output_prediction_json.parent.mkdir(parents=True, exist_ok=True)
 
     all_rows: list[dict] = []
     all_doc_feature_rows: list[dict] = []
+    prediction_payload: dict[str, dict] = {}
     completed_qids: set[str] = set()
     append_output_handle = None
     if args.resume_output_jsonl:
@@ -1773,6 +1813,8 @@ def main() -> None:
             }
             print(f"resuming_from_existing_output_jsonl: {output_jsonl}")
             print(f"completed_qids_loaded: {len(completed_qids)}")
+        if output_prediction_json is not None and output_prediction_json.exists():
+            prediction_payload = json.loads(output_prediction_json.read_text(encoding="utf-8"))
         append_output_handle = output_jsonl.open("a", encoding="utf-8")
 
     running_counts = initialize_running_counts(
@@ -1801,6 +1843,8 @@ def main() -> None:
         gold_row = gold_rows[qid]
         gold_doc_ids = sorted({str(item["doc_id"]).strip() for item in gold_row.get("supporting_context", [])})
         gold_doc_id_set = set(gold_doc_ids)
+        gold_page_uids = extract_gold_page_uids(gold_row)
+        gold_page_uid_set = set(gold_page_uids)
         question_type = str(gold_row.get("metadata", {}).get("type", "UNKNOWN")).strip() or "UNKNOWN"
 
         baseline_rows = baseline_payload[qid].get("page_retrieval_results", [])
@@ -2198,7 +2242,7 @@ def main() -> None:
                 gated_visual_top_docs=args.gated_visual_top_docs,
                 scale_auxiliary_by_base_score=args.scale_auxiliary_by_base_score,
                 gold_doc_ids=gold_doc_ids,
-                gold_page_uids=[],
+                gold_page_uids=gold_page_uids,
                 base_values=grid_base_values,
                 visual_values=grid_visual_values,
                 non_visual_values=grid_non_visual_values,
@@ -2290,14 +2334,22 @@ def main() -> None:
             else None
         )
 
-        baseline_page_hits = baseline_gold_page_hits(baseline_rows, gold_doc_id_set)
+        baseline_page_hits = baseline_gold_page_hits(
+            baseline_rows,
+            gold_doc_id_set,
+            gold_page_uid_set,
+        )
         baseline_first_gold_doc_rank = min((baseline_doc_rank_map.get(doc_id) for doc_id in gold_doc_ids if doc_id in baseline_doc_rank_map), default=None)
         baseline_first_gold_page_rank = baseline_page_hits[0]["rank"] if baseline_page_hits else None
 
-        reranked_page_hits = reranked_gold_page_hits(reranked_pages, gold_doc_id_set)
+        reranked_page_hits = reranked_gold_page_hits(
+            reranked_pages,
+            gold_doc_id_set,
+            gold_page_uid_set,
+        )
         reranked_first_gold_page_rank = reranked_page_hits[0]["rank"] if reranked_page_hits else None
         coarse_pre_exact_page_hits = (
-            reranked_gold_page_hits(coarse_pre_exact_pages, gold_doc_id_set)
+            reranked_gold_page_hits(coarse_pre_exact_pages, gold_doc_id_set, gold_page_uid_set)
             if args.diagnose_coarse_pre_exact
             else []
         )
@@ -2348,6 +2400,8 @@ def main() -> None:
             "question_type": question_type,
             "answers": [str(item["answer"]) for item in gold_row.get("answers", [])],
             "gold_doc_ids": gold_doc_ids,
+            "gold_page_uids": gold_page_uids,
+            "gold_page_match_mode": "exact_page" if gold_page_uids else "any_gold_doc_page",
             "candidate_doc_count": len(candidate_doc_ids),
             "candidate_page_count": len(page_features),
             "query_axis_class_counts": axis_class_counts(query_axis_classes),
@@ -2447,6 +2501,25 @@ def main() -> None:
             "reranked_gold_page_hits_top10_any_gold_doc_page": reranked_page_hits[:10],
             "reranked_gold_doc_ranks": gold_doc_summary["gold_doc_ranks"],
         }
+        if output_prediction_json is not None:
+            prediction_payload[qid] = {
+                "pred_answer": "",
+                "page_retrieval_results": [
+                    [item["doc_id"], int(item["page_idx"]), float(item["fused_page_score"])]
+                    for item in reranked_pages
+                ],
+                "qid": qid,
+                "question": query_text,
+                "top_retrieved_docs": [item["doc_id"] for item in reranked_docs[:10]],
+                "reranker_metadata": {
+                    "base_score_source": args.base_score_source,
+                    "approx_base_page_token_topk": args.approx_base_page_token_topk,
+                    "approx_base_page_token_scorer": args.approx_base_page_token_scorer,
+                    "approx_base_page_token_selector": args.approx_base_page_token_selector,
+                    "gold_page_uids": gold_page_uids,
+                    "gold_page_match_mode": "exact_page" if gold_page_uids else "any_gold_doc_page",
+                },
+            }
         all_rows.append(row)
         if append_output_handle is not None:
             append_output_handle.write(json.dumps(row, ensure_ascii=False) + "\n")
@@ -2528,6 +2601,7 @@ def main() -> None:
         "learned_token_selector_model": args.learned_token_selector_model,
         "learned_doc_reranker_top_docs": args.learned_doc_reranker_top_docs,
         "output_doc_feature_jsonl": args.output_doc_feature_jsonl,
+        "output_prediction_json": args.output_prediction_json,
         "vlm_rerank_top_docs": args.vlm_rerank_top_docs,
         "vlm_rerank_bonus": args.vlm_rerank_bonus,
         "vlm_rerank_pages_per_doc": args.vlm_rerank_pages_per_doc,
@@ -2568,10 +2642,22 @@ def main() -> None:
         "ranking_focus_token_pruning_summary": ranking_focus_token_pruning_summary,
         "num_qids": len(all_rows),
         "baseline_top4_doc_count": baseline_top4_doc,
+        "baseline_top4_page_count": sum(
+            1
+            for row in all_rows
+            if row["baseline_first_gold_page_rank"] is not None
+            and row["baseline_first_gold_page_rank"] <= 4
+        ),
         "coarse_pre_exact_top4_doc_count": (
             coarse_pre_exact_top4_doc if args.diagnose_coarse_pre_exact else None
         ),
         "reranked_top4_doc_count": reranked_top4_doc,
+        "reranked_top4_page_count": sum(
+            1
+            for row in all_rows
+            if row["reranked_first_gold_page_rank_any_gold_doc_page"] is not None
+            and row["reranked_first_gold_page_rank_any_gold_doc_page"] <= 4
+        ),
         "improved_doc_rank_count": improved_doc,
         "worsened_doc_rank_count": worsened_doc,
         "unchanged_doc_rank_count": unchanged_doc,
@@ -2601,9 +2687,13 @@ def main() -> None:
     }
 
     output_summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    if output_prediction_json is not None:
+        output_prediction_json.write_text(json.dumps(prediction_payload, indent=2) + "\n", encoding="utf-8")
 
     print(f"saved_jsonl: {output_jsonl}")
     print(f"saved_summary: {output_summary_json}")
+    if output_prediction_json is not None:
+        print(f"saved_prediction: {output_prediction_json}")
     print(f"num_qids: {len(all_rows)}")
     print(f"improved_doc_rank_count: {improved_doc}")
     if args.diagnose_coarse_pre_exact:
