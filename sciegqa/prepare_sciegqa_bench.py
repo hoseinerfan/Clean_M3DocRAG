@@ -30,6 +30,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-questions", type=int, default=0)
     parser.add_argument("--skip-images", action="store_true")
     parser.add_argument("--overwrite-extract", action="store_true")
+    parser.add_argument(
+        "--overwrite-rendered-pages",
+        action="store_true",
+        help="Re-render page images from extracted PDFs even if pages_dev already exists.",
+    )
+    parser.add_argument("--pdf-dpi", type=int, default=144)
     return parser.parse_args()
 
 
@@ -133,6 +139,67 @@ def find_doc_dir(image_root: Path, category: str, doc_name: str) -> Path | None:
     return None
 
 
+def find_pdf_path(image_root: Path, category: str, doc_name: str) -> Path | None:
+    candidates = [
+        image_root / "PDF" / category / f"{doc_name}.pdf",
+        image_root / category / f"{doc_name}.pdf",
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    matches = sorted((image_root / "PDF" / category).glob(f"{doc_name}*.pdf")) if (image_root / "PDF" / category).exists() else []
+    if not matches:
+        matches = sorted(image_root.rglob(f"{doc_name}*.pdf"))
+    return matches[0] if matches else None
+
+
+def existing_rendered_pages(page_dir: Path) -> list[tuple[int, Path]]:
+    records = []
+    if not page_dir.exists():
+        return records
+    for image_path in sorted(page_dir.glob("*.jpg")):
+        try:
+            page_idx = int(image_path.stem)
+        except ValueError:
+            continue
+        records.append((page_idx + 1, image_path))
+    return records
+
+
+def render_pdf_pages(
+    *,
+    pdf_path: Path,
+    page_dir: Path,
+    overwrite: bool,
+    dpi: int,
+) -> list[tuple[int, Path]]:
+    existing = existing_rendered_pages(page_dir)
+    if existing and not overwrite:
+        return existing
+
+    from pdf2image import convert_from_path, pdfinfo_from_path
+
+    page_dir.mkdir(parents=True, exist_ok=True)
+    page_count = int(pdfinfo_from_path(pdf_path).get("Pages", 0))
+    rendered = []
+    for page_number in range(1, page_count + 1):
+        out_path = page_dir / f"{page_number - 1}.jpg"
+        if out_path.exists() and not overwrite:
+            rendered.append((page_number, out_path))
+            continue
+        images = convert_from_path(
+            pdf_path,
+            dpi=dpi,
+            first_page=page_number,
+            last_page=page_number,
+        )
+        if not images:
+            continue
+        images[0].convert("RGB").save(out_path, quality=95)
+        rendered.append((page_number, out_path))
+    return rendered
+
+
 def parse_page_number(path: Path, doc_name: str) -> int | None:
     match = re.search(rf"{re.escape(doc_name)}_(\d+)\.png$", path.name)
     if match:
@@ -156,6 +223,8 @@ def build_doc_page_manifest(
     output_root: Path,
     image_root: Path | None,
     split: str,
+    overwrite_rendered_pages: bool,
+    pdf_dpi: int,
 ) -> dict[str, int]:
     docs: dict[str, tuple[str, str]] = {}
     for row in rows:
@@ -175,6 +244,16 @@ def build_doc_page_manifest(
                     if page_number is None:
                         continue
                     page_records.append((page_number, image_path))
+            if not page_records and image_root is not None:
+                rendered_dir = output_root / f"pages_{split}" / doc_id
+                pdf_path = find_pdf_path(image_root, category, doc_name)
+                if pdf_path is not None:
+                    page_records = render_pdf_pages(
+                        pdf_path=pdf_path,
+                        page_dir=rendered_dir,
+                        overwrite=overwrite_rendered_pages,
+                        dpi=pdf_dpi,
+                    )
             page_records.sort(key=lambda item: item[0])
             page_counts[doc_id] = len(page_records)
             for page_number, image_path in page_records:
@@ -338,6 +417,8 @@ def main() -> None:
         output_root=output_root,
         image_root=image_root,
         split=args.split,
+        overwrite_rendered_pages=args.overwrite_rendered_pages,
+        pdf_dpi=args.pdf_dpi,
     )
 
     print(f"prepared_output_root={output_root}")
@@ -349,4 +430,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
