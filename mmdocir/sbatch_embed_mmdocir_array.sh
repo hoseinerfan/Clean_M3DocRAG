@@ -17,15 +17,17 @@ cd "$REPO_ROOT"
 source mmdocir/env_hpc.sh
 mkdir -p "$MMDocIR_WORK_ROOT/logs"
 
-if command -v conda >/dev/null 2>&1; then
-  conda activate "$REPO_ROOT/env"
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/env/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  echo "Python executable not found or not executable: $PYTHON_BIN" >&2
+  exit 1
 fi
 
 NUM_SHARDS="${NUM_SHARDS:-${SLURM_ARRAY_TASK_COUNT:-16}}"
 SHARD_INDEX="${SLURM_ARRAY_TASK_ID:-0}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
 
-python mmdocir/run_page_embedding_mmdocir.py \
+"$PYTHON_BIN" mmdocir/run_page_embedding_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/mm-docir" \
   --output-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_mm-docir_dev" \
   --retrieval-model-name-or-path colpaligemma-3b-pt-448-base \
@@ -34,4 +36,3 @@ python mmdocir/run_page_embedding_mmdocir.py \
   --num-shards "$NUM_SHARDS" \
   --shard-index "$SHARD_INDEX" \
   --resume
-
