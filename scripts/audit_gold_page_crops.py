@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -51,6 +52,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--retrieval-model-name-or-path", default="colpaligemma-3b-pt-448-base")
     parser.add_argument("--retrieval-adapter-model-name-or-path", default="colpali-v1.2")
     parser.add_argument(
+        "--splice-patch-labels-jsonl",
+        help=(
+            "Optional page-patch label JSONL. Required when "
+            "--crop-region-source=visual_patch_centers."
+        ),
+    )
+    parser.add_argument(
         "--query-token-filter",
         default="full",
         choices=QUERY_TOKEN_FILTER_CHOICES,
@@ -71,6 +79,25 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.5,
         help="Stride as a fraction of crop width/height. Default: 0.5",
+    )
+    parser.add_argument(
+        "--crop-region-source",
+        default="full_page",
+        choices=["full_page", "visual_patch_centers"],
+        help=(
+            "How to choose crop search locations. 'full_page' scans the whole page, while "
+            "'visual_patch_centers' keeps only crops whose window contains the center of at "
+            "least one visual-labeled patch component from --splice-patch-labels-jsonl."
+        ),
+    )
+    parser.add_argument(
+        "--visual-region-fallback",
+        default="full_page",
+        choices=["full_page", "error"],
+        help=(
+            "What to do if --crop-region-source=visual_patch_centers finds no visual patch "
+            "components on the page."
+        ),
     )
     parser.add_argument(
         "--top-crop-count",
@@ -181,6 +208,146 @@ def unique_positions(length: int, window: int, stride: int) -> list[int]:
     return sorted(set(positions))
 
 
+def infer_patch_grid(page_token_count: int) -> tuple[int, int]:
+    for side in range(int(page_token_count**0.5), 0, -1):
+        patch_count = side * side
+        if patch_count <= page_token_count:
+            prefix_tokens = page_token_count - patch_count
+            if prefix_tokens >= 0:
+                return prefix_tokens, side
+    raise ValueError(f"Unable to infer patch grid from page_token_count={page_token_count}")
+
+
+def classify_patch_from_splice_row(row: dict) -> str:
+    patch_class = str(row.get("patch_class", "")).strip().lower()
+    if patch_class in {"visual", "non_visual", "unknown"}:
+        return patch_class
+    if patch_class == "neutral":
+        return "unknown"
+    concepts = row.get("top_concepts", []) or []
+    concept_names = {str(item.get("concept", "")).strip() for item in concepts}
+    if "visual_region" in concept_names:
+        return "visual"
+    if {"ocr_text", "table_text", "table_structure"} & concept_names:
+        return "non_visual"
+    return "unknown"
+
+
+def load_patch_axis_classes_for_single_page(
+    *,
+    labels_jsonl: str,
+    page_id: str,
+    n_spatial_patches: int,
+) -> list[str]:
+    path = Path(labels_jsonl)
+    if not path.exists():
+        raise FileNotFoundError(path)
+
+    patch_axis_classes = ["unknown"] * int(n_spatial_patches)
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if str(row.get("page_id", "")).strip() != page_id:
+                continue
+            patch_index = int(row.get("patch_index", -1))
+            if 0 <= patch_index < len(patch_axis_classes):
+                patch_axis_classes[patch_index] = classify_patch_from_splice_row(row)
+    return patch_axis_classes
+
+
+def build_visual_patch_components(
+    *,
+    patch_axis_classes: list[str],
+    grid_side: int,
+) -> list[dict]:
+    visual_patch_indices = {
+        idx for idx, patch_class in enumerate(patch_axis_classes) if patch_class == "visual"
+    }
+    visited: set[int] = set()
+    components: list[dict] = []
+    neighbor_offsets = (
+        (-1, -1), (-1, 0), (-1, 1),
+        (0, -1),           (0, 1),
+        (1, -1),  (1, 0),  (1, 1),
+    )
+
+    for start_idx in sorted(visual_patch_indices):
+        if start_idx in visited:
+            continue
+        queue: deque[int] = deque([start_idx])
+        visited.add(start_idx)
+        component_indices: list[int] = []
+        while queue:
+            patch_idx = queue.popleft()
+            component_indices.append(patch_idx)
+            row = patch_idx // grid_side
+            col = patch_idx % grid_side
+            for row_offset, col_offset in neighbor_offsets:
+                next_row = row + row_offset
+                next_col = col + col_offset
+                if not (0 <= next_row < grid_side and 0 <= next_col < grid_side):
+                    continue
+                next_idx = next_row * grid_side + next_col
+                if next_idx in visited or next_idx not in visual_patch_indices:
+                    continue
+                visited.add(next_idx)
+                queue.append(next_idx)
+
+        rows = [patch_idx // grid_side for patch_idx in component_indices]
+        cols = [patch_idx % grid_side for patch_idx in component_indices]
+        row0 = min(rows)
+        row1 = max(rows)
+        col0 = min(cols)
+        col1 = max(cols)
+        components.append(
+            {
+                "component_id": len(components),
+                "patch_indices": sorted(component_indices),
+                "patch_bbox_rc": [row0, col0, row1, col1],
+                "patch_center_rc": [
+                    (row0 + row1 + 1) / 2.0,
+                    (col0 + col1 + 1) / 2.0,
+                ],
+            }
+        )
+    return components
+
+
+def patch_bbox_to_pixel_bbox(
+    *,
+    patch_bbox_rc: list[int],
+    image_width: int,
+    image_height: int,
+    grid_side: int,
+) -> list[int]:
+    row0, col0, row1, col1 = patch_bbox_rc
+    patch_w = float(image_width) / float(grid_side)
+    patch_h = float(image_height) / float(grid_side)
+    x0 = max(0, min(image_width, int(math.floor(col0 * patch_w))))
+    y0 = max(0, min(image_height, int(math.floor(row0 * patch_h))))
+    x1 = max(0, min(image_width, int(math.ceil((col1 + 1) * patch_w))))
+    y1 = max(0, min(image_height, int(math.ceil((row1 + 1) * patch_h))))
+    return [x0, y0, x1, y1]
+
+
+def patch_center_to_pixel_xy(
+    *,
+    patch_center_rc: list[float],
+    image_width: int,
+    image_height: int,
+    grid_side: int,
+) -> list[float]:
+    row_center, col_center = patch_center_rc
+    patch_w = float(image_width) / float(grid_side)
+    patch_h = float(image_height) / float(grid_side)
+    center_x = float(col_center) * patch_w
+    center_y = float(row_center) * patch_h
+    return [center_x, center_y]
+
+
 def build_crops(page_image: Image.Image, window_fracs: list[float], stride_frac: float) -> list[dict]:
     width, height = page_image.size
     records: list[dict] = []
@@ -211,6 +378,29 @@ def build_crops(page_image: Image.Image, window_fracs: list[float], stride_frac:
     return records
 
 
+def filter_crops_to_region_centers(
+    *,
+    crop_records: list[dict],
+    region_records: list[dict],
+) -> list[dict]:
+    filtered: list[dict] = []
+    for record in crop_records:
+        x0, y0, x1, y1 = record["bbox_xyxy"]
+        matched_component_ids: list[int] = []
+        for region in region_records:
+            center_x, center_y = region["pixel_center_xy"]
+            if x0 <= center_x <= x1 and y0 <= center_y <= y1:
+                matched_component_ids.append(int(region["component_id"]))
+        if matched_component_ids:
+            filtered.append(
+                {
+                    **record,
+                    "matched_component_ids": matched_component_ids,
+                }
+            )
+    return filtered
+
+
 def score_single_embedding(
     query_emb: torch.Tensor,
     page_emb: torch.Tensor,
@@ -237,9 +427,25 @@ def score_single_embedding(
     }
 
 
-def annotate_page(page_image: Image.Image, top_crops: list[dict]) -> Image.Image:
+def annotate_page(
+    page_image: Image.Image,
+    top_crops: list[dict],
+    *,
+    region_records: list[dict] | None = None,
+) -> Image.Image:
     canvas = page_image.convert("RGB").copy()
     draw = ImageDraw.Draw(canvas)
+    if region_records:
+        for region in region_records:
+            x0, y0, x1, y1 = region["pixel_bbox_xyxy"]
+            draw.rectangle([x0, y0, x1, y1], outline=(0, 200, 0), width=3)
+            label = f"V{region['component_id']}"
+            text_y = min(canvas.size[1] - 16, max(0, y0))
+            draw.rectangle(
+                [x0, text_y, min(canvas.size[0], x0 + 46), min(canvas.size[1], text_y + 16)],
+                fill=(255, 255, 255),
+            )
+            draw.text((x0 + 2, text_y), label, fill=(0, 140, 0))
     colors = [
         (255, 0, 0),
         (0, 128, 255),
@@ -293,29 +499,109 @@ def main() -> None:
     query_emb = query_meta["embeddings"]
     query_tokens = query_meta["raw_tokens"]
 
+    full_page_emb = retrieval_model.encode_images(
+        images=[page_image],
+        batch_size=1,
+        to_cpu=True,
+        use_tqdm=False,
+    )[0]
+
+    patch_region_records: list[dict] = []
+    patch_region_source_applied = "full_page"
+    patch_region_fallback_reason: str | None = None
+    if args.crop_region_source == "visual_patch_centers":
+        if not args.splice_patch_labels_jsonl:
+            raise ValueError(
+                "--crop-region-source=visual_patch_centers requires "
+                "--splice-patch-labels-jsonl."
+            )
+        page_token_count = int(full_page_emb.view(-1, full_page_emb.shape[-1]).shape[0])
+        extra_tokens, grid_side = infer_patch_grid(page_token_count)
+        page_meta = {
+            "page_uid": page_uid,
+            "page_id": f"{doc_id}:{page_idx}",
+            "page_token_count": page_token_count,
+            "extra_tokens": extra_tokens,
+            "grid_side": grid_side,
+            "n_spatial_patches": grid_side * grid_side,
+            "nonspatial_token_position": "suffix",
+        }
+        patch_axis_classes = load_patch_axis_classes_for_single_page(
+            labels_jsonl=args.splice_patch_labels_jsonl,
+            page_id=page_meta["page_id"],
+            n_spatial_patches=page_meta["n_spatial_patches"],
+        )
+        patch_components = build_visual_patch_components(
+            patch_axis_classes=patch_axis_classes,
+            grid_side=grid_side,
+        )
+        for component in patch_components:
+            patch_region_records.append(
+                {
+                    **component,
+                    "pixel_bbox_xyxy": patch_bbox_to_pixel_bbox(
+                        patch_bbox_rc=component["patch_bbox_rc"],
+                        image_width=page_image.size[0],
+                        image_height=page_image.size[1],
+                        grid_side=grid_side,
+                    ),
+                    "pixel_center_xy": patch_center_to_pixel_xy(
+                        patch_center_rc=component["patch_center_rc"],
+                        image_width=page_image.size[0],
+                        image_height=page_image.size[1],
+                        grid_side=grid_side,
+                    ),
+                }
+            )
+        if patch_region_records:
+            patch_region_source_applied = "visual_patch_centers"
+        elif args.visual_region_fallback == "error":
+            raise ValueError(
+                f"No visual patch components found for page {page_uid} in "
+                f"{args.splice_patch_labels_jsonl}."
+            )
+        else:
+            patch_region_fallback_reason = "no_visual_patch_components"
+
     window_fracs = args.window_frac if args.window_frac else [0.50, 0.33, 0.25]
-    crop_records = build_crops(
+    crop_records_full = build_crops(
         page_image=page_image,
         window_fracs=window_fracs,
         stride_frac=float(args.stride_frac),
     )
+    if patch_region_source_applied == "visual_patch_centers":
+        crop_records = filter_crops_to_region_centers(
+            crop_records=crop_records_full,
+            region_records=patch_region_records,
+        )
+        if not crop_records:
+            if args.visual_region_fallback == "error":
+                raise ValueError(
+                    f"No crops matched visual patch centers for page {page_uid}. "
+                    "Try a larger --window-frac or use --visual-region-fallback=full_page."
+                )
+            patch_region_fallback_reason = "no_crops_matched_visual_patch_centers"
+            patch_region_source_applied = "full_page"
+            crop_records = crop_records_full
+    else:
+        crop_records = crop_records_full
 
-    all_images = [page_image] + [record["image"] for record in crop_records]
-    image_embs = retrieval_model.encode_images(
-        images=all_images,
+    crop_images = [record["image"] for record in crop_records]
+    crop_embs = retrieval_model.encode_images(
+        images=crop_images,
         batch_size=int(args.batch_size),
         to_cpu=True,
         use_tqdm=True,
-    )
+    ) if crop_images else []
 
     full_page_result = score_single_embedding(
         query_emb=query_emb,
-        page_emb=image_embs[0],
+        page_emb=full_page_emb,
         query_tokens=query_tokens,
     )
 
     scored_crops: list[dict] = []
-    for record, crop_emb in zip(crop_records, image_embs[1:]):
+    for record, crop_emb in zip(crop_records, crop_embs):
         score_info = score_single_embedding(
             query_emb=query_emb,
             page_emb=crop_emb,
@@ -326,6 +612,7 @@ def main() -> None:
                 "crop_id": record["crop_id"],
                 "scale_frac": record["scale_frac"],
                 "bbox_xyxy": record["bbox_xyxy"],
+                "matched_component_ids": record.get("matched_component_ids", []),
                 "score": score_info["score"],
                 "top_query_tokens": score_info["top_query_tokens"],
             }
@@ -339,7 +626,7 @@ def main() -> None:
     page_image.save(page_path)
 
     annotated_path = output_dir / f"{args.qid}_{page_uid}_topcrops_overlay.png"
-    annotate_page(page_image, top_crops).save(annotated_path)
+    annotate_page(page_image, top_crops, region_records=patch_region_records).save(annotated_path)
 
     crop_dir = output_dir / f"{args.qid}_{page_uid}_top_crops"
     crop_dir.mkdir(parents=True, exist_ok=True)
@@ -367,8 +654,16 @@ def main() -> None:
         "query_tokens": query_tokens,
         "window_fracs": window_fracs,
         "stride_frac": float(args.stride_frac),
+        "crop_region_source_requested": args.crop_region_source,
+        "crop_region_source_applied": patch_region_source_applied,
+        "visual_region_fallback": args.visual_region_fallback,
+        "visual_region_fallback_reason": patch_region_fallback_reason,
+        "splice_patch_labels_jsonl": args.splice_patch_labels_jsonl,
+        "visual_patch_region_count": len(patch_region_records),
+        "visual_patch_regions": patch_region_records,
         "full_page_score": full_page_result["score"],
         "full_page_top_query_tokens": full_page_result["top_query_tokens"],
+        "crop_count_before_region_filter": len(crop_records_full),
         "crop_count": len(scored_crops),
         "top_crops": top_crops,
     }
@@ -389,6 +684,8 @@ def main() -> None:
             f"best_crop_score: {best_crop['score']:.6f} "
             f"bbox={best_crop['bbox_xyxy']} scale={best_crop['scale_frac']:.2f}"
         )
+    print(f"crop_region_source_applied: {patch_region_source_applied}")
+    print(f"visual_patch_region_count: {len(patch_region_records)}")
     print(f"crop_count: {len(scored_crops)}")
 
 
