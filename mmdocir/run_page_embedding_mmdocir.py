@@ -32,6 +32,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--per-device-eval-batch-size", type=int, default=4)
     parser.add_argument("--doc-id", action="append", default=[], help="Optional doc_id filter.")
     parser.add_argument("--max-docs", type=int, default=0)
+    parser.add_argument(
+        "--num-shards",
+        type=int,
+        default=1,
+        help="Split docs across this many array tasks. Use with --shard-index.",
+    )
+    parser.add_argument(
+        "--shard-index",
+        type=int,
+        default=0,
+        help="0-based shard index to process when --num-shards > 1.",
+    )
     parser.add_argument("--resume", action="store_true")
     return parser.parse_args()
 
@@ -79,6 +91,20 @@ def main() -> None:
         doc_ids = [doc_id for doc_id in doc_ids if doc_id in keep]
     if args.max_docs > 0:
         doc_ids = doc_ids[: args.max_docs]
+    if args.num_shards <= 0:
+        raise ValueError("--num-shards must be positive.")
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        raise ValueError("--shard-index must be in [0, --num-shards).")
+    if args.num_shards > 1:
+        doc_ids = [
+            doc_id
+            for idx, doc_id in enumerate(doc_ids)
+            if idx % args.num_shards == args.shard_index
+        ]
+    print(
+        "embedding_shard "
+        f"index={args.shard_index} num_shards={args.num_shards} docs={len(doc_ids)}"
+    )
 
     retrieval_model = ColPaliRetrievalModel(
         backbone_name_or_path=resolve_model_path(args.retrieval_model_name_or_path),
@@ -108,4 +134,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
