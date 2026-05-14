@@ -456,7 +456,7 @@ Smoke prep:
 ```bash
 python opendocvqa/prepare_opendocvqa.py \
   --cache-dir "$OPENDOCVQA_WORK_ROOT/hf_cache" \
-  --output-root "$LOCAL_DATA_DIR/opendocvqa_smoke_infovqa" \
+  --output-root "$LOCAL_DATA_DIR/opendocvqa_smoke_infovqa_v6" \
   --qa-config infovqa \
   --corpus-config infovqa \
   --qa-split test \
@@ -465,6 +465,15 @@ python opendocvqa/prepare_opendocvqa.py \
   --corpus-scope relevant_only \
   --max-queries 50 \
   --streaming-corpus
+```
+
+Observed smoke sanity:
+
+```text
+docs 1
+pages 15
+qas 50
+missing_gold_pages 0
 ```
 
 Full prep:
@@ -481,6 +490,14 @@ Embedding:
 
 ```bash
 sbatch --time=24:00:00 --array=0-15 --export=ALL,NUM_SHARDS=16,BATCH_SIZE=2 \
+  opendocvqa/sbatch_embed_opendocvqa_array.sh
+```
+
+Smoke embedding batch:
+
+```bash
+sbatch --time=01:00:00 --array=0-0 \
+  --export=ALL,NUM_SHARDS=1,BATCH_SIZE=2,DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa_smoke_infovqa_v6",EMBEDDING_NAME=colpali-v1.2_opendocvqa_smoke_infovqa_v6_dev \
   opendocvqa/sbatch_embed_opendocvqa_array.sh
 ```
 

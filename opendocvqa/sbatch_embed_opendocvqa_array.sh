@@ -25,10 +25,15 @@ fi
 NUM_SHARDS="${NUM_SHARDS:-${SLURM_ARRAY_TASK_COUNT:-16}}"
 SHARD_INDEX="${SLURM_ARRAY_TASK_ID:-0}"
 BATCH_SIZE="${BATCH_SIZE:-2}"
+DATA_ROOT="${DATA_ROOT:-$LOCAL_DATA_DIR/opendocvqa}"
+EMBEDDING_NAME="${EMBEDDING_NAME:-colpali-v1.2_opendocvqa_dev}"
+OUTPUT_DIR="${OUTPUT_DIR:-$LOCAL_EMBEDDINGS_DIR/$EMBEDDING_NAME}"
+
+echo "embedding_shard index=$SHARD_INDEX num_shards=$NUM_SHARDS data_root=$DATA_ROOT output_dir=$OUTPUT_DIR"
 
 "$PYTHON_BIN" mmdocir/run_page_embedding_mmdocir.py \
-  --data-root "$LOCAL_DATA_DIR/opendocvqa" \
-  --output-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev" \
+  --data-root "$DATA_ROOT" \
+  --output-dir "$OUTPUT_DIR" \
   --retrieval-model-name-or-path colpaligemma-3b-pt-448-base \
   --retrieval-adapter-model-name-or-path colpali-v1.2 \
   --per-device-eval-batch-size "$BATCH_SIZE" \
