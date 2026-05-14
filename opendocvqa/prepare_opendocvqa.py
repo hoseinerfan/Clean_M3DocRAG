@@ -35,8 +35,16 @@ def parse_args() -> argparse.Namespace:
             "Defaults to 'all'. For InfoVQA smoke tests use --corpus-config infovqa."
         ),
     )
-    parser.add_argument("--qa-split", default="test")
-    parser.add_argument("--corpus-split", default="train")
+    parser.add_argument(
+        "--qa-split",
+        default="",
+        help="QA split. Defaults to train for default config and test for task-specific configs.",
+    )
+    parser.add_argument(
+        "--corpus-split",
+        default="",
+        help="Corpus split. Defaults to train for all/default config and test for task-specific configs.",
+    )
     parser.add_argument("--cache-dir", default="")
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--split", default="dev")
@@ -67,6 +75,20 @@ def parse_args() -> argparse.Namespace:
         help="Optional Hugging Face token. The gated corpus also works with an existing HF login.",
     )
     return parser.parse_args()
+
+
+def default_split_for_config(config: str) -> str:
+    normalized = str(config or "").strip().lower()
+    if normalized in {"", "all", "default"}:
+        return "train"
+    return "test"
+
+
+def resolve_split(explicit_split: str, config: str) -> str:
+    explicit_split = str(explicit_split or "").strip()
+    if explicit_split:
+        return explicit_split
+    return default_split_for_config(config)
 
 
 def configure_hf_cache(cache_dir: Path | None) -> None:
@@ -383,10 +405,11 @@ def main() -> None:
     configure_hf_cache(cache_dir)
 
     dataset_filters = {name.strip().lower() for name in args.dataset_name if name.strip()}
+    qa_split = resolve_split(args.qa_split, args.qa_config)
     query_rows, relevant_doc_ids = read_queries(
         qa_repo=args.qa_repo,
         qa_config=args.qa_config,
-        qa_split=args.qa_split,
+        qa_split=qa_split,
         cache_dir=cache_dir,
         token=args.hf_token,
         dataset_filters=dataset_filters,
@@ -401,14 +424,17 @@ def main() -> None:
     source_to_page: dict[str, dict] = {}
     page_count = 0
     corpus_count = 0
+    corpus_splits: dict[str, str] = {}
     manifest_path = output_root / f"doc_pages_{args.split}.jsonl"
     with manifest_path.open("w", encoding="utf-8") as manifest:
         stop_corpus = False
         for corpus_config in corpus_configs:
+            corpus_split = resolve_split(args.corpus_split, corpus_config)
+            corpus_splits[corpus_config] = corpus_split
             corpus = load_hf_dataset(
                 repo_id=args.corpus_repo,
                 config=corpus_config,
-                split=args.corpus_split,
+                split=corpus_split,
                 cache_dir=cache_dir,
                 token=args.hf_token,
                 streaming=args.streaming_corpus,
@@ -480,8 +506,8 @@ def main() -> None:
     print(f"corpus_repo={args.corpus_repo}")
     print(f"qa_config={args.qa_config}")
     print(f"corpus_configs={corpus_configs}")
-    print(f"qa_split={args.qa_split}")
-    print(f"corpus_split={args.corpus_split}")
+    print(f"qa_split={qa_split}")
+    print(f"corpus_splits={corpus_splits}")
     print(f"dataset_filters={sorted(dataset_filters) if dataset_filters else 'ALL'}")
     print(f"corpus_scope={args.corpus_scope}")
     print(f"group_size={args.group_size}")

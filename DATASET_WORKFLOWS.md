@@ -460,6 +460,7 @@ python opendocvqa/prepare_opendocvqa.py \
   --qa-config infovqa \
   --corpus-config infovqa \
   --qa-split test \
+  --corpus-split test \
   --dataset-name infovqa \
   --corpus-scope relevant_only \
   --max-queries 50 \
