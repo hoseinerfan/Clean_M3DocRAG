@@ -166,10 +166,8 @@ def keep_query(row: dict, dataset_filters: set[str]) -> bool:
 
 def keep_corpus_row(row: dict, dataset_filters: set[str], wanted_doc_ids: set[str] | None) -> bool:
     doc_id = normalize_doc_id(row.get("doc_id"))
-    if wanted_doc_ids is not None and doc_id not in wanted_doc_ids:
-        return False
     if wanted_doc_ids is not None:
-        return True
+        return bool(doc_id_variants(doc_id) & wanted_doc_ids)
     if not dataset_filters:
         return True
     return corpus_dataset_name(row).lower() in dataset_filters
