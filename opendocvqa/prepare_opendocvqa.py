@@ -26,6 +26,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qa-repo", default="NTT-hil-insight/OpenDocVQA")
     parser.add_argument("--corpus-repo", default="NTT-hil-insight/OpenDocVQA-Corpus")
     parser.add_argument("--qa-config", default="default")
+    parser.add_argument(
+        "--corpus-config",
+        action="append",
+        default=[],
+        help=(
+            "OpenDocVQA-Corpus config to load. Repeat for multiple configs. "
+            "Defaults to 'all'. For InfoVQA smoke tests use --corpus-config infovqa."
+        ),
+    )
     parser.add_argument("--qa-split", default="test")
     parser.add_argument("--corpus-split", default="train")
     parser.add_argument("--cache-dir", default="")
@@ -385,14 +394,7 @@ def main() -> None:
     )
     wanted_doc_ids = relevant_doc_ids if args.corpus_scope == "relevant_only" else None
 
-    corpus = load_hf_dataset(
-        repo_id=args.corpus_repo,
-        config=None,
-        split=args.corpus_split,
-        cache_dir=cache_dir,
-        token=args.hf_token,
-        streaming=args.streaming_corpus,
-    )
+    corpus_configs = args.corpus_config or ["all"]
 
     doc_ids: list[str] = []
     doc_id_map: dict[str, dict] = {}
@@ -401,47 +403,62 @@ def main() -> None:
     corpus_count = 0
     manifest_path = output_root / f"doc_pages_{args.split}.jsonl"
     with manifest_path.open("w", encoding="utf-8") as manifest:
-        for row in tqdm(corpus, desc="OpenDocVQA corpus"):
-            row = dict(row)
-            source_doc_id = normalize_doc_id(row.get("doc_id"))
-            if not source_doc_id:
-                continue
-            if not keep_corpus_row(row, dataset_filters, wanted_doc_ids):
-                continue
-            pack_idx = corpus_count // args.group_size
-            page_idx = corpus_count % args.group_size
-            doc_id = pack_doc_id(pack_idx)
-            if page_idx == 0:
-                doc_ids.append(doc_id)
-                doc_id_map[doc_id] = {
-                    "source": "OpenDocVQA-Corpus",
-                    "pack_index": pack_idx,
-                    "group_size": args.group_size,
-                }
+        stop_corpus = False
+        for corpus_config in corpus_configs:
+            corpus = load_hf_dataset(
+                repo_id=args.corpus_repo,
+                config=corpus_config,
+                split=args.corpus_split,
+                cache_dir=cache_dir,
+                token=args.hf_token,
+                streaming=args.streaming_corpus,
+            )
+            for row in tqdm(corpus, desc=f"OpenDocVQA corpus {corpus_config}"):
+                row = dict(row)
+                source_doc_id = normalize_doc_id(row.get("doc_id"))
+                if not source_doc_id:
+                    continue
+                if not keep_corpus_row(row, dataset_filters, wanted_doc_ids):
+                    continue
+                pack_idx = corpus_count // args.group_size
+                page_idx = corpus_count % args.group_size
+                doc_id = pack_doc_id(pack_idx)
+                if page_idx == 0:
+                    doc_ids.append(doc_id)
+                    doc_id_map[doc_id] = {
+                        "source": "OpenDocVQA-Corpus",
+                        "pack_index": pack_idx,
+                        "group_size": args.group_size,
+                    }
 
-            dataset_name = corpus_dataset_name(row)
-            image_rel = f"pages_{args.split}/{doc_id}/{page_idx}.jpg"
-            if not args.skip_images:
-                save_image(row["image"], output_root / image_rel, args.overwrite_images)
-            page_uid = f"{doc_id}_page{page_idx}"
-            page_row = {
-                "doc_id": doc_id,
-                "doc_name": doc_id,
-                "page_idx": page_idx,
-                "page_number": page_idx + 1,
-                "page_uid": page_uid,
-                "image_path": image_rel,
-                "source_doc_id": source_doc_id,
-                "dataset_name": dataset_name,
-            }
-            manifest.write(json.dumps(page_row, ensure_ascii=False) + "\n")
-            for variant in doc_id_variants(source_doc_id):
-                source_to_page.setdefault(variant, page_row)
-            corpus_count += 1
-            page_count += 1
-            if args.max_corpus_docs > 0 and corpus_count >= args.max_corpus_docs:
-                break
-            if wanted_doc_ids is not None and all(doc_id in source_to_page for doc_id in wanted_doc_ids):
+                dataset_name = corpus_dataset_name(row)
+                image_rel = f"pages_{args.split}/{doc_id}/{page_idx}.jpg"
+                if not args.skip_images:
+                    save_image(row["image"], output_root / image_rel, args.overwrite_images)
+                page_uid = f"{doc_id}_page{page_idx}"
+                page_row = {
+                    "doc_id": doc_id,
+                    "doc_name": doc_id,
+                    "page_idx": page_idx,
+                    "page_number": page_idx + 1,
+                    "page_uid": page_uid,
+                    "image_path": image_rel,
+                    "source_doc_id": source_doc_id,
+                    "dataset_name": dataset_name,
+                    "corpus_config": corpus_config,
+                }
+                manifest.write(json.dumps(page_row, ensure_ascii=False) + "\n")
+                for variant in doc_id_variants(source_doc_id):
+                    source_to_page.setdefault(variant, page_row)
+                corpus_count += 1
+                page_count += 1
+                if args.max_corpus_docs > 0 and corpus_count >= args.max_corpus_docs:
+                    stop_corpus = True
+                    break
+                if wanted_doc_ids is not None and all(doc_id in source_to_page for doc_id in wanted_doc_ids):
+                    stop_corpus = True
+                    break
+            if stop_corpus:
                 break
 
     qid_count, missing_gold = write_outputs(
@@ -462,6 +479,7 @@ def main() -> None:
     print(f"qa_repo={args.qa_repo}")
     print(f"corpus_repo={args.corpus_repo}")
     print(f"qa_config={args.qa_config}")
+    print(f"corpus_configs={corpus_configs}")
     print(f"qa_split={args.qa_split}")
     print(f"corpus_split={args.corpus_split}")
     print(f"dataset_filters={sorted(dataset_filters) if dataset_filters else 'ALL'}")
