@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
@@ -433,6 +434,13 @@ def main() -> None:
     print(f"qa_count={qid_count}")
     print(f"missing_gold_pages={missing_gold}")
     print(f"dataset_counts={dict(sorted(dataset_counts.items()))}")
+    if args.streaming_corpus:
+        # Some HPC Python/datasets/pyarrow combinations can abort during
+        # interpreter finalization after streaming iteration. At this point all
+        # output files are closed and the run has completed successfully.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
 
 
 if __name__ == "__main__":

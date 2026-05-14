@@ -32,7 +32,8 @@ Full benchmark:
 ```bash
 python opendocvqa/prepare_opendocvqa.py \
   --cache-dir "$OPENDOCVQA_WORK_ROOT/hf_cache" \
-  --output-root "$LOCAL_DATA_DIR/opendocvqa"
+  --output-root "$LOCAL_DATA_DIR/opendocvqa" \
+  --streaming-corpus
 ```
 
 This is heavy because OpenDocVQA-Corpus is about 63 GB before rendered-copy output. For a useful first smoke test:
@@ -45,7 +46,8 @@ python opendocvqa/prepare_opendocvqa.py \
   --qa-split test \
   --dataset-name infovqa \
   --corpus-scope relevant_only \
-  --max-queries 50
+  --max-queries 50 \
+  --streaming-corpus
 ```
 
 Expected full outputs:
