@@ -168,9 +168,28 @@ def keep_corpus_row(row: dict, dataset_filters: set[str], wanted_doc_ids: set[st
     doc_id = normalize_doc_id(row.get("doc_id"))
     if wanted_doc_ids is not None and doc_id not in wanted_doc_ids:
         return False
+    if wanted_doc_ids is not None:
+        return True
     if not dataset_filters:
         return True
     return corpus_dataset_name(row).lower() in dataset_filters
+
+
+def doc_id_variants(value: str) -> set[str]:
+    text = normalize_doc_id(value)
+    if not text:
+        return set()
+    variants = {text}
+    path = Path(text)
+    variants.add(path.name)
+    variants.add(path.stem)
+    if "/" in text:
+        variants.add(text.split("/", 1)[1])
+        variants.add(text.rsplit("/", 1)[-1])
+    for ext in (".png", ".jpg", ".jpeg", ".pdf"):
+        if text.lower().endswith(ext):
+            variants.add(text[: -len(ext)])
+    return {item for item in variants if item}
 
 
 def save_image(value, path: Path, overwrite: bool) -> None:
@@ -219,14 +238,15 @@ def read_queries(
         row = dict(row)
         if not keep_query(row, dataset_filters):
             continue
-        relevant_doc_ids = [normalize_doc_id(item) for item in normalize_list(row.get("relevant_doc_ids"))]
-        relevant_doc_ids = [item for item in relevant_doc_ids if item]
+        raw_relevant_doc_ids = [normalize_doc_id(item) for item in normalize_list(row.get("relevant_doc_ids"))]
+        relevant_doc_ids = [item for item in raw_relevant_doc_ids if item]
         if not relevant_doc_ids:
             continue
         row["_relevant_doc_ids"] = relevant_doc_ids
         row["_dataset_names"] = query_dataset_names(row)
         rows.append(row)
-        wanted_doc_ids.update(relevant_doc_ids)
+        for doc_id in relevant_doc_ids:
+            wanted_doc_ids.update(doc_id_variants(doc_id))
         if max_queries > 0 and len(rows) >= max_queries:
             break
     return rows, wanted_doc_ids
@@ -266,7 +286,7 @@ def write_outputs(
 
             gold_items = []
             for source_doc_id in row["_relevant_doc_ids"]:
-                page = source_to_page.get(source_doc_id)
+                page = lookup_source_page(source_to_page, source_doc_id)
                 if page is None:
                     missing_gold += 1
                     continue
@@ -324,10 +344,25 @@ def write_outputs(
     doc_ids_path.write_text(json.dumps(doc_ids, indent=2) + "\n", encoding="utf-8")
     doc_id_map_path.write_text(json.dumps(doc_id_map, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     source_map_path.write_text(
-        json.dumps(source_to_page, indent=2, ensure_ascii=False) + "\n",
+        json.dumps(dedupe_source_to_page(source_to_page), indent=2, ensure_ascii=False) + "\n",
         encoding="utf-8",
     )
     return qid_count, missing_gold
+
+
+def lookup_source_page(source_to_page: dict[str, dict], source_doc_id: str) -> dict | None:
+    for variant in doc_id_variants(source_doc_id):
+        page = source_to_page.get(variant)
+        if page is not None:
+            return page
+    return None
+
+
+def dedupe_source_to_page(source_to_page: dict[str, dict]) -> dict[str, dict]:
+    deduped: dict[str, dict] = {}
+    for page in source_to_page.values():
+        deduped[page["source_doc_id"]] = page
+    return deduped
 
 
 def main() -> None:
@@ -402,12 +437,13 @@ def main() -> None:
                 "dataset_name": dataset_name,
             }
             manifest.write(json.dumps(page_row, ensure_ascii=False) + "\n")
-            source_to_page[source_doc_id] = page_row
+            for variant in doc_id_variants(source_doc_id):
+                source_to_page.setdefault(variant, page_row)
             corpus_count += 1
             page_count += 1
             if args.max_corpus_docs > 0 and corpus_count >= args.max_corpus_docs:
                 break
-            if wanted_doc_ids is not None and len(source_to_page) >= len(wanted_doc_ids):
+            if wanted_doc_ids is not None and all(doc_id in source_to_page for doc_id in wanted_doc_ids):
                 break
 
     qid_count, missing_gold = write_outputs(
@@ -420,7 +456,8 @@ def main() -> None:
     )
 
     dataset_counts = defaultdict(int)
-    for page in source_to_page.values():
+    unique_pages = {page["page_uid"]: page for page in source_to_page.values()}
+    for page in unique_pages.values():
         dataset_counts[page.get("dataset_name", "") or "UNKNOWN"] += 1
 
     print(f"prepared_output_root={output_root}")
@@ -433,6 +470,10 @@ def main() -> None:
     print(f"page_count={page_count}")
     print(f"qa_count={qid_count}")
     print(f"missing_gold_pages={missing_gold}")
+    if wanted_doc_ids is not None:
+        missing_wanted = sorted(doc_id for doc_id in wanted_doc_ids if doc_id not in source_to_page)
+        print(f"missing_wanted_doc_id_variants={len(missing_wanted)}")
+        print(f"first_missing_wanted_doc_id_variants={missing_wanted[:20]}")
     print(f"dataset_counts={dict(sorted(dataset_counts.items()))}")
     if args.streaming_corpus:
         # Some HPC Python/datasets/pyarrow combinations can abort during
