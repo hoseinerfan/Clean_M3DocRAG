@@ -65,6 +65,17 @@ def parse_args() -> argparse.Namespace:
         help="Query-token filter used before crop scoring.",
     )
     parser.add_argument(
+        "--cue-token-substring",
+        action="append",
+        default=[],
+        help=(
+            "Optional cue-token substring used to restrict query scoring to only matching query "
+            "tokens after light normalization. Pass multiple times, e.g. "
+            "--cue-token-substring dolphin or --cue-token-substring soccer "
+            "--cue-token-substring ball."
+        ),
+    )
+    parser.add_argument(
         "--window-frac",
         type=float,
         action="append",
@@ -216,6 +227,19 @@ def infer_patch_grid(page_token_count: int) -> tuple[int, int]:
             if prefix_tokens >= 0:
                 return prefix_tokens, side
     raise ValueError(f"Unable to infer patch grid from page_token_count={page_token_count}")
+
+
+def clean_token_label(token: str) -> str:
+    token = token.replace("▁", " ")
+    token = token.replace("<pad>", "[PAD]")
+    token = token.replace("<bos>", "[BOS]")
+    token = token.replace("<eos>", "[EOS]")
+    token = token.strip()
+    return token if token else "[WS]"
+
+
+def normalize_token_label(token: str) -> str:
+    return " ".join(clean_token_label(token).strip().lower().split())
 
 
 def classify_patch_from_splice_row(row: dict) -> str:
@@ -427,6 +451,45 @@ def score_single_embedding(
     }
 
 
+def restrict_query_to_cue_tokens(
+    *,
+    query_emb: torch.Tensor,
+    query_tokens: list[str],
+    cue_token_substrings: list[str],
+) -> tuple[torch.Tensor, list[str], list[str], list[int], list[str]]:
+    normalized_query_tokens = [normalize_token_label(token) for token in query_tokens]
+    normalized_cue_substrings = [
+        " ".join(str(value).strip().lower().split())
+        for value in cue_token_substrings
+        if str(value).strip()
+    ]
+    if not normalized_cue_substrings:
+        return query_emb, query_tokens, normalized_query_tokens, list(range(len(query_tokens))), []
+
+    selected_indices = [
+        idx
+        for idx, token_label in enumerate(normalized_query_tokens)
+        if any(substring in token_label for substring in normalized_cue_substrings)
+    ]
+    if not selected_indices:
+        raise ValueError(
+            "No query tokens matched cue-token-substring filters. "
+            f"filters={normalized_cue_substrings} "
+            f"query_tokens={normalized_query_tokens}"
+        )
+    index_tensor = torch.tensor(selected_indices, dtype=torch.long, device=query_emb.device)
+    filtered_query_emb = query_emb.index_select(0, index_tensor)
+    filtered_query_tokens = [query_tokens[idx] for idx in selected_indices]
+    filtered_query_token_labels = [normalized_query_tokens[idx] for idx in selected_indices]
+    return (
+        filtered_query_emb,
+        filtered_query_tokens,
+        filtered_query_token_labels,
+        selected_indices,
+        normalized_cue_substrings,
+    )
+
+
 def annotate_page(
     page_image: Image.Image,
     top_crops: list[dict],
@@ -496,8 +559,19 @@ def main() -> None:
         to_cpu=True,
         query_token_filter=args.query_token_filter,
     )
-    query_emb = query_meta["embeddings"]
-    query_tokens = query_meta["raw_tokens"]
+    query_emb_full = query_meta["embeddings"]
+    query_tokens_full = query_meta["raw_tokens"]
+    (
+        query_emb,
+        query_tokens,
+        query_token_labels,
+        selected_query_token_indices,
+        normalized_cue_substrings,
+    ) = restrict_query_to_cue_tokens(
+        query_emb=query_emb_full,
+        query_tokens=query_tokens_full,
+        cue_token_substrings=args.cue_token_substring,
+    )
 
     full_page_emb = retrieval_model.encode_images(
         images=[page_image],
@@ -651,7 +725,13 @@ def main() -> None:
         "page_image_path": str(page_path),
         "overlay_path": str(annotated_path),
         "query_token_filter": args.query_token_filter,
+        "query_tokens_full": query_tokens_full,
+        "query_token_labels_full": [normalize_token_label(token) for token in query_tokens_full],
         "query_tokens": query_tokens,
+        "query_token_labels": query_token_labels,
+        "cue_token_substrings_requested": args.cue_token_substring,
+        "cue_token_substrings_applied": normalized_cue_substrings,
+        "selected_query_token_indices": selected_query_token_indices,
         "window_fracs": window_fracs,
         "stride_frac": float(args.stride_frac),
         "crop_region_source_requested": args.crop_region_source,
@@ -677,6 +757,9 @@ def main() -> None:
     print(f"page_image_path: {page_path}")
     print(f"overlay_path: {annotated_path}")
     print(f"summary_json: {summary_path}")
+    if normalized_cue_substrings:
+        print(f"cue_token_substrings_applied: {normalized_cue_substrings}")
+        print(f"selected_query_token_labels: {query_token_labels}")
     print(f"full_page_score: {full_page_result['score']:.6f}")
     if top_crops:
         best_crop = top_crops[0]
