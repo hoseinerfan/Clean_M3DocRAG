@@ -29,6 +29,8 @@ unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
 source vidore/env_hpc.sh
 ```
 
+The ViDoRe env file forces Hugging Face Hub, datasets, transformers, and XDG caches under `$VIDORE_WORK_ROOT` to avoid home-directory quota failures.
+
 ## 2. Download and convert ViDoRe V3
 
 Prepare all public V3 domains:

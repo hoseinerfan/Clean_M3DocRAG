@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from collections import defaultdict
 from io import BytesIO
 from pathlib import Path
@@ -130,6 +131,25 @@ def load_subset(repo_id: str, subset: str, split: str, cache_dir: Path | None):
     if cache_dir is not None:
         kwargs["cache_dir"] = str(cache_dir)
     return load_dataset(repo_id, subset, split=split, **kwargs)
+
+
+def configure_hf_cache(cache_dir: Path | None) -> None:
+    if cache_dir is None:
+        return
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    hf_home = cache_dir / "hf_home"
+    hub_cache = hf_home / "hub"
+    datasets_cache = hf_home / "datasets"
+    transformers_cache = hf_home / "transformers"
+    xdg_cache = cache_dir / "xdg_cache"
+    for path in (hf_home, hub_cache, datasets_cache, transformers_cache, xdg_cache):
+        path.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(hf_home))
+    os.environ.setdefault("HF_DATASETS_CACHE", str(datasets_cache))
+    os.environ.setdefault("HUGGINGFACE_HUB_CACHE", str(hub_cache))
+    os.environ.setdefault("HF_HUB_CACHE", str(hub_cache))
+    os.environ.setdefault("TRANSFORMERS_CACHE", str(transformers_cache))
+    os.environ.setdefault("XDG_CACHE_HOME", str(xdg_cache))
 
 
 def save_image(value, path: Path, overwrite: bool) -> None:
@@ -446,8 +466,7 @@ def main() -> None:
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
     cache_dir = Path(args.cache_dir) if args.cache_dir else None
-    if cache_dir is not None:
-        cache_dir.mkdir(parents=True, exist_ok=True)
+    configure_hf_cache(cache_dir)
 
     repos = args.dataset_repos or DEFAULT_DATASET_REPOS
     if args.max_repos > 0:
