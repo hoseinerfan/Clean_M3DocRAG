@@ -25,7 +25,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--qa-repo", default="NTT-hil-insight/OpenDocVQA")
     parser.add_argument("--corpus-repo", default="NTT-hil-insight/OpenDocVQA-Corpus")
     parser.add_argument("--qa-config", default="default")
-    parser.add_argument("--qa-split", default="train")
+    parser.add_argument("--qa-split", default="test")
     parser.add_argument("--corpus-split", default="train")
     parser.add_argument("--cache-dir", default="")
     parser.add_argument("--output-root", required=True)

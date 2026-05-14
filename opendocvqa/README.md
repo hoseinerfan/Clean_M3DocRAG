@@ -42,6 +42,7 @@ python opendocvqa/prepare_opendocvqa.py \
   --cache-dir "$OPENDOCVQA_WORK_ROOT/hf_cache" \
   --output-root "$LOCAL_DATA_DIR/opendocvqa_smoke_infovqa" \
   --qa-config infovqa \
+  --qa-split test \
   --dataset-name infovqa \
   --corpus-scope relevant_only \
   --max-queries 50
