@@ -44,6 +44,7 @@ python opendocvqa/prepare_opendocvqa.py \
   --output-root "$LOCAL_DATA_DIR/opendocvqa_smoke_infovqa" \
   --qa-config infovqa \
   --qa-split test \
+  --corpus-split test \
   --dataset-name infovqa \
   --corpus-scope relevant_only \
   --max-queries 50 \
