@@ -70,6 +70,8 @@ LOCAL_OUTPUT_DIR="/job/output" # where to store model outputs
 
 You can adjust variables in [`.env`](.env) to change where to store data/embeddings/model checkpoints/outputs by default. They are loaded in [`src/m3docrag/utils/paths.py`](./src/m3docrag/utils/paths.py) via [python-dotenv](https://github.com/theskumar/python-dotenv).
 
+For the external dataset workflows added for MMDocIR, SciEGQA-Bench, ViDoSeek, ViDoRe V3, and OpenDocVQA, see [`DATASET_WORKFLOWS.md`](DATASET_WORKFLOWS.md). That file lists each HPC env script, scratch work root, dataset folder, embedding name, output folder, sanity counts, and the baseline/`plain_top224` command sequence.
+
 ## Download the M3DocVQA dataset
 
 Please see [m3docvqa/README.md](m3docvqa/README.md) for the download instructions.
