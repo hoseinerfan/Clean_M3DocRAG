@@ -9,6 +9,11 @@ if [[ -f "$SCRIPT_DIR/env_hpc.sh" ]]; then
   source "$SCRIPT_DIR/env_hpc.sh"
 fi
 
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/env/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python}"
+fi
+
 DATA_ROOT="${DATA_ROOT:-$LOCAL_DATA_DIR/vidore-v3}"
 EMBEDDING_NAME="${EMBEDDING_NAME:-colpali-v1.2_vidore-v3_dev}"
 BASELINE_PRED="${BASELINE_PRED:-$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000.json}"
@@ -22,7 +27,7 @@ EMPTY_PATCH_LABELS="$OUT_DIR/empty_patch_labels.jsonl"
 printf '{}\n' > "$EMPTY_QUERY_LABELS"
 : > "$EMPTY_PATCH_LABELS"
 
-python "$REPO_ROOT/scripts/run_visual_rerank_batch.py" \
+"$PYTHON_BIN" "$REPO_ROOT/scripts/run_visual_rerank_batch.py" \
   --qid-jsonl "$DATA_ROOT/qids_dev.jsonl" \
   --gold "$DATA_ROOT/MMQA_dev.jsonl" \
   --baseline-pred "$BASELINE_PRED" \
