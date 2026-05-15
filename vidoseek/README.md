@@ -39,6 +39,15 @@ Expected outputs:
 
 ## 3. Sanity check conversion
 
+Observed conversion sanity on the UNC HPC:
+
+```text
+docs 290
+pages 5349
+qas 1142
+missing_gold_pages 0
+```
+
 ```bash
 python - <<'PY'
 import json, os
@@ -96,7 +105,7 @@ Expected count should match `jq length "$LOCAL_DATA_DIR/vidoseek/dev_doc_ids.jso
 ## 5. Build FAISS index
 
 ```bash
-python mmdocir/run_indexing_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_indexing_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/vidoseek" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev" \
   --output-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev_pageindex_ivfflat" \
@@ -108,7 +117,7 @@ python mmdocir/run_indexing_mmdocir.py \
 ```bash
 mkdir -p "$LOCAL_OUTPUT_DIR/vidoseek"
 
-python mmdocir/run_retrieval_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_retrieval_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/vidoseek" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev" \
   --index-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev_pageindex_ivfflat" \
@@ -120,9 +129,23 @@ python mmdocir/run_retrieval_mmdocir.py \
 Evaluate exact reference-page retrieval:
 
 ```bash
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/vidoseek/baseline_ret1000.json" \
   --gold "$LOCAL_DATA_DIR/vidoseek/MMQA_dev.jsonl"
+```
+
+Observed baseline:
+
+```text
+n_qids 1142
+page_recall@1 0.6979
+page_recall@4 0.8958
+page_recall@10 0.9545
+page_recall@20 0.9746
+doc_recall@1 0.9921
+doc_recall@4 0.9982
+page_hit@4 1023/1142
+doc_hit@4 1140/1142
 ```
 
 ## 7. Run `plain_top224`
@@ -134,7 +157,23 @@ bash vidoseek/run_plain_top224_vidoseek.sh
 Then evaluate:
 
 ```bash
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/vidoseek/plain_top224_ret1000_prediction.json" \
   --gold "$LOCAL_DATA_DIR/vidoseek/MMQA_dev.jsonl"
+```
+
+Observed `plain_top224`:
+
+```text
+n_qids 1142
+page_recall@1 0.6830
+page_recall@4 0.8958
+page_recall@10 0.9623
+page_recall@20 0.9842
+doc_recall@1 0.9939
+doc_recall@4 0.9982
+page_hit@4 1023/1142
+doc_hit@4 1140/1142
+improved_doc_rank_count 6
+reranked_top4_doc_count 1140
 ```

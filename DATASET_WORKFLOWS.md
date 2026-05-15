@@ -59,7 +59,7 @@ The env files set:
 | SciEGQA-Bench | `sciegqa/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG` | `$LOCAL_DATA_DIR/sci-egqa-bench` | `colpali-v1.2_sci-egqa-bench_dev` | `$LOCAL_OUTPUT_DIR/sciegqa` | 80 docs, 1823 pages, 1623 QAs |
 | ViDoSeek | `vidoseek/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG` | `$LOCAL_DATA_DIR/vidoseek` | `colpali-v1.2_vidoseek_dev` | `$LOCAL_OUTPUT_DIR/vidoseek` | 290 docs, 5349 pages, 1142 QAs |
 | ViDoRe V3 | `vidore/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG` | `$LOCAL_DATA_DIR/vidore-v3` | `colpali-v1.2_vidore-v3_dev` | `$LOCAL_OUTPUT_DIR/vidore-v3` | 189 docs, 19252 pages, 14514 QAs, all languages |
-| OpenDocVQA | `opendocvqa/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/OpenDocVQA_M3DocRAG` | `$LOCAL_DATA_DIR/opendocvqa` | `colpali-v1.2_opendocvqa_dev` | `$LOCAL_OUTPUT_DIR/opendocvqa` | gated, large; about 43k QAs and about 170k images/pages in full corpus |
+| OpenDocVQA | `opendocvqa/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/OpenDocVQA_M3DocRAG` | `$LOCAL_DATA_DIR/opendocvqa` | `colpali-v1.2_opendocvqa_dev` | `$LOCAL_OUTPUT_DIR/opendocvqa` | gated; 3223 packed docs, 206267 pages, 41017 QAs |
 
 Notes:
 
@@ -67,6 +67,7 @@ Notes:
 - ViDoRe V3 uses input HF split `test` but writes local M3DocRAG split files named `*_dev.*`.
 - ViDoRe and OpenDocVQA env files force Hugging Face caches under their scratch work roots to avoid home quota failures.
 - All embedding sbatch files use `--resume`, so resubmitting after timeout is safe.
+- On compute nodes where plain `python` points to base and misses `torch`/`faiss`, use `"$REPO_ROOT/env/bin/python"` for direct commands. The dataset `run_plain_top224_*.sh` wrappers now default to that interpreter through `PYTHON_BIN`.
 
 ## MMDocIR
 
@@ -288,7 +289,7 @@ find "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev" -name "*.safetensors" | w
 Index:
 
 ```bash
-python mmdocir/run_indexing_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_indexing_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/vidoseek" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev" \
   --output-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev_pageindex_ivfflat" \
@@ -300,7 +301,7 @@ Baseline retrieval:
 ```bash
 mkdir -p "$LOCAL_OUTPUT_DIR/vidoseek"
 
-python mmdocir/run_retrieval_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_retrieval_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/vidoseek" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev" \
   --index-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidoseek_dev_pageindex_ivfflat" \
@@ -309,14 +310,54 @@ python mmdocir/run_retrieval_mmdocir.py \
   --faiss-nprobe 4
 ```
 
+Evaluate:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$LOCAL_OUTPUT_DIR/vidoseek/baseline_ret1000.json" \
+  --gold "$LOCAL_DATA_DIR/vidoseek/MMQA_dev.jsonl"
+```
+
+Observed full baseline:
+
+```text
+n_qids 1142
+page_recall@1 0.6979
+page_recall@4 0.8958
+page_recall@10 0.9545
+page_recall@20 0.9746
+doc_recall@1 0.9921
+doc_recall@4 0.9982
+doc_recall@10 1.0
+page_hit@4 1023/1142
+doc_hit@4 1140/1142
+```
+
 `plain_top224`:
 
 ```bash
 bash vidoseek/run_plain_top224_vidoseek.sh
 
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/vidoseek/plain_top224_ret1000_prediction.json" \
   --gold "$LOCAL_DATA_DIR/vidoseek/MMQA_dev.jsonl"
+```
+
+Observed full `plain_top224`:
+
+```text
+n_qids 1142
+page_recall@1 0.6830
+page_recall@4 0.8958
+page_recall@10 0.9623
+page_recall@20 0.9842
+doc_recall@1 0.9939
+doc_recall@4 0.9982
+doc_recall@20 1.0
+page_hit@4 1023/1142
+doc_hit@4 1140/1142
+improved_doc_rank_count 6
+reranked_top4_doc_count 1140
 ```
 
 ## ViDoRe V3
@@ -439,7 +480,8 @@ from datasets import load_dataset
 
 ds = load_dataset(
     "NTT-hil-insight/OpenDocVQA-Corpus",
-    split="train",
+    "all",
+    split="test",
     streaming=True,
 )
 row = next(iter(ds))
@@ -454,7 +496,7 @@ If the row prints, access is working. A Python shutdown abort after printing the
 Smoke prep:
 
 ```bash
-python opendocvqa/prepare_opendocvqa.py \
+"$REPO_ROOT/env/bin/python" opendocvqa/prepare_opendocvqa.py \
   --cache-dir "$OPENDOCVQA_WORK_ROOT/hf_cache" \
   --output-root "$LOCAL_DATA_DIR/opendocvqa_smoke_infovqa_v6" \
   --qa-config infovqa \
@@ -476,21 +518,56 @@ qas 50
 missing_gold_pages 0
 ```
 
-Full prep:
+Observed smoke retrieval results:
+
+```text
+baseline page_recall@1 0.92
+baseline page_recall@4 0.98
+baseline page_recall@20 1.0
+plain_top224 page_recall@1 0.94
+plain_top224 page_recall@4 0.98
+plain_top224 page_recall@10 1.0
+doc_recall@1 1.0 for both, because all smoke pages are in one artificial pack
+```
+
+Full prep uses a node-local Hugging Face cache to avoid shared-filesystem lock errors such as `OSError: [Errno 37] No locks available`:
 
 ```bash
-python opendocvqa/prepare_opendocvqa.py \
-  --cache-dir "$OPENDOCVQA_WORK_ROOT/hf_cache" \
+export HF_TOKEN="$(cat "$OPENDOCVQA_WORK_ROOT/hf_home/token")"
+export ODVQA_NODE_CACHE="${SLURM_TMPDIR:-${TMPDIR:-/tmp}}/$USER/opendocvqa_hf_cache"
+mkdir -p "$ODVQA_NODE_CACHE"
+
+export HF_HOME="$ODVQA_NODE_CACHE/hf_home"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+export HF_HUB_CACHE="$HUGGINGFACE_HUB_CACHE"
+export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+export XDG_CACHE_HOME="$ODVQA_NODE_CACHE/xdg_cache"
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$XDG_CACHE_HOME"
+
+"$REPO_ROOT/env/bin/python" opendocvqa/prepare_opendocvqa.py \
+  --cache-dir "$ODVQA_NODE_CACHE/load_dataset_cache" \
   --output-root "$LOCAL_DATA_DIR/opendocvqa" \
   --corpus-config all \
   --corpus-split test \
   --streaming-corpus
 ```
 
+Observed full prep sanity:
+
+```text
+docs 3223
+pages 206267
+qas 41017
+missing_final_gold_page_uids 0
+dataset_counts {'chartqa': 20882, 'coyo': 65294, 'docvqa': 12767, 'dude': 27955, 'infovqa': 5485, 'mpmqa': 10018, 'openwikitable': 1257, 'slidevqa': 52380, 'visualmrc': 10229}
+```
+
 Embedding:
 
 ```bash
-sbatch --time=24:00:00 --array=0-15 --export=ALL,NUM_SHARDS=16,BATCH_SIZE=2 \
+sbatch --time=24:00:00 --array=0-63%8 \
+  --export=ALL,NUM_SHARDS=64,BATCH_SIZE=2,DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa",EMBEDDING_NAME=colpali-v1.2_opendocvqa_dev \
   opendocvqa/sbatch_embed_opendocvqa_array.sh
 ```
 
@@ -507,13 +584,13 @@ Expected embedding count:
 ```bash
 find "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev" -name "*.safetensors" | wc -l
 jq length "$LOCAL_DATA_DIR/opendocvqa/dev_doc_ids.json"
-# counts should match
+# counts should match; expected full count: 3223
 ```
 
 Index:
 
 ```bash
-python mmdocir/run_indexing_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_indexing_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/opendocvqa" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev" \
   --output-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev_pageindex_ivfflat" \
@@ -525,7 +602,7 @@ Baseline retrieval:
 ```bash
 mkdir -p "$LOCAL_OUTPUT_DIR/opendocvqa"
 
-python mmdocir/run_retrieval_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_retrieval_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/opendocvqa" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev" \
   --index-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev_pageindex_ivfflat" \
@@ -534,12 +611,20 @@ python mmdocir/run_retrieval_mmdocir.py \
   --faiss-nprobe 4
 ```
 
+Evaluate:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000.json" \
+  --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
+```
+
 `plain_top224`:
 
 ```bash
 bash opendocvqa/run_plain_top224_opendocvqa.sh
 
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
   --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
 ```

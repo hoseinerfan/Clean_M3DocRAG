@@ -10,7 +10,7 @@ Default HPC work root:
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/OpenDocVQA_M3DocRAG
 ```
 
-The corpus stores individual document images, not multi-page PDFs. To avoid creating about 170k tiny embedding files, the converter groups images into artificial packs of 64 pages by default. Page-level gold labels remain exact, but doc-level recall is only an artifact of the packing; use page recall as the main metric.
+The corpus stores individual document images, not multi-page PDFs. To avoid creating one embedding file per image, the converter groups images into artificial packs of 64 pages by default. Page-level gold labels remain exact, but doc-level recall is only an artifact of the packing; use page recall as the main metric.
 
 ## 1. Environment
 
@@ -30,19 +30,32 @@ The env file forces Hugging Face Hub, datasets, transformers, and XDG caches und
 Full benchmark:
 
 ```bash
-python opendocvqa/prepare_opendocvqa.py \
-  --cache-dir "$OPENDOCVQA_WORK_ROOT/hf_cache" \
+export HF_TOKEN="$(cat "$OPENDOCVQA_WORK_ROOT/hf_home/token")"
+export ODVQA_NODE_CACHE="${SLURM_TMPDIR:-${TMPDIR:-/tmp}}/$USER/opendocvqa_hf_cache"
+mkdir -p "$ODVQA_NODE_CACHE"
+
+export HF_HOME="$ODVQA_NODE_CACHE/hf_home"
+export HF_DATASETS_CACHE="$HF_HOME/datasets"
+export HUGGINGFACE_HUB_CACHE="$HF_HOME/hub"
+export HF_HUB_CACHE="$HUGGINGFACE_HUB_CACHE"
+export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+export XDG_CACHE_HOME="$ODVQA_NODE_CACHE/xdg_cache"
+mkdir -p "$HF_HOME" "$HF_DATASETS_CACHE" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$XDG_CACHE_HOME"
+
+"$REPO_ROOT/env/bin/python" opendocvqa/prepare_opendocvqa.py \
+  --cache-dir "$ODVQA_NODE_CACHE/load_dataset_cache" \
   --output-root "$LOCAL_DATA_DIR/opendocvqa" \
   --corpus-config all \
+  --corpus-split test \
   --streaming-corpus
 ```
 
-This is heavy because OpenDocVQA-Corpus is about 63 GB before rendered-copy output. For a useful first smoke test:
+The node-local cache avoids shared-filesystem lock failures from Hugging Face `datasets`. This is heavy because OpenDocVQA-Corpus is about 63 GB before rendered-copy output. For a useful first smoke test:
 
 ```bash
-python opendocvqa/prepare_opendocvqa.py \
+"$REPO_ROOT/env/bin/python" opendocvqa/prepare_opendocvqa.py \
   --cache-dir "$OPENDOCVQA_WORK_ROOT/hf_cache" \
-  --output-root "$LOCAL_DATA_DIR/opendocvqa_smoke_infovqa" \
+  --output-root "$LOCAL_DATA_DIR/opendocvqa_smoke_infovqa_v6" \
   --qa-config infovqa \
   --corpus-config infovqa \
   --qa-split test \
@@ -64,6 +77,24 @@ Expected full outputs:
 - `$LOCAL_DATA_DIR/opendocvqa/pages_dev/`
 
 ## 3. Sanity check conversion
+
+Observed full conversion sanity:
+
+```text
+docs 3223
+pages 206267
+qas 41017
+missing_final_gold_page_uids 0
+```
+
+Observed InfoVQA smoke sanity:
+
+```text
+docs 1
+pages 15
+qas 50
+missing_gold_pages 0
+```
 
 ```bash
 python - <<'PY'
@@ -98,18 +129,15 @@ PY
 
 ## 4. Embed pages
 
-OpenDocVQA is much larger than the other prepared datasets. The default sbatch uses 16 shards and 24 hours:
+OpenDocVQA is much larger than the other prepared datasets. The full prepared dataset has 3223 artificial packed docs and 206267 pages. Use more shards and limit concurrency:
 
 ```bash
-sbatch opendocvqa/sbatch_embed_opendocvqa_array.sh
-```
-
-If you need fewer concurrent GPUs, use 8 shards and resubmit with `--resume` if it times out:
-
-```bash
-sbatch --time=24:00:00 --array=0-7 --export=ALL,NUM_SHARDS=8,BATCH_SIZE=2 \
+sbatch --time=24:00:00 --array=0-63%8 \
+  --export=ALL,NUM_SHARDS=64,BATCH_SIZE=2,DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa",EMBEDDING_NAME=colpali-v1.2_opendocvqa_dev \
   opendocvqa/sbatch_embed_opendocvqa_array.sh
 ```
+
+If it times out, resubmit the same command. The embedding script uses `--resume`.
 
 Check completion:
 
@@ -118,12 +146,12 @@ find "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev" -name "*.safetensors" |
 jq length "$LOCAL_DATA_DIR/opendocvqa/dev_doc_ids.json"
 ```
 
-The two counts should match.
+The two counts should match. Expected full count: `3223`.
 
 ## 5. Build FAISS index
 
 ```bash
-python mmdocir/run_indexing_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_indexing_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/opendocvqa" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev" \
   --output-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev_pageindex_ivfflat" \
@@ -135,7 +163,7 @@ python mmdocir/run_indexing_mmdocir.py \
 ```bash
 mkdir -p "$LOCAL_OUTPUT_DIR/opendocvqa"
 
-python mmdocir/run_retrieval_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_retrieval_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/opendocvqa" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev" \
   --index-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_opendocvqa_dev_pageindex_ivfflat" \
@@ -147,7 +175,7 @@ python mmdocir/run_retrieval_mmdocir.py \
 Evaluate exact relevant-image page retrieval:
 
 ```bash
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000.json" \
   --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
 ```
@@ -161,7 +189,18 @@ bash opendocvqa/run_plain_top224_opendocvqa.sh
 Then evaluate:
 
 ```bash
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
   --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
+```
+
+Observed smoke end-to-end results:
+
+```text
+baseline page_recall@1 0.92
+baseline page_recall@4 0.98
+baseline page_recall@20 1.0
+plain_top224 page_recall@1 0.94
+plain_top224 page_recall@4 0.98
+plain_top224 page_recall@10 1.0
 ```
