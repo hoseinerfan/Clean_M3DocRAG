@@ -483,6 +483,7 @@ python opendocvqa/prepare_opendocvqa.py \
   --cache-dir "$OPENDOCVQA_WORK_ROOT/hf_cache" \
   --output-root "$LOCAL_DATA_DIR/opendocvqa" \
   --corpus-config all \
+  --corpus-split test \
   --streaming-corpus
 ```
 

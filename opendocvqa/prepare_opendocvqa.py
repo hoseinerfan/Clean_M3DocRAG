@@ -77,18 +77,24 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def default_split_for_config(config: str) -> str:
+def default_qa_split_for_config(config: str) -> str:
     normalized = str(config or "").strip().lower()
     if normalized in {"", "all", "default"}:
         return "train"
     return "test"
 
 
-def resolve_split(explicit_split: str, config: str) -> str:
+def default_corpus_split_for_config(_config: str) -> str:
+    return "test"
+
+
+def resolve_split(explicit_split: str, config: str, *, corpus: bool = False) -> str:
     explicit_split = str(explicit_split or "").strip()
     if explicit_split:
         return explicit_split
-    return default_split_for_config(config)
+    if corpus:
+        return default_corpus_split_for_config(config)
+    return default_qa_split_for_config(config)
 
 
 def configure_hf_cache(cache_dir: Path | None) -> None:
@@ -429,7 +435,7 @@ def main() -> None:
     with manifest_path.open("w", encoding="utf-8") as manifest:
         stop_corpus = False
         for corpus_config in corpus_configs:
-            corpus_split = resolve_split(args.corpus_split, corpus_config)
+            corpus_split = resolve_split(args.corpus_split, corpus_config, corpus=True)
             corpus_splits[corpus_config] = corpus_split
             corpus = load_hf_dataset(
                 repo_id=args.corpus_repo,
