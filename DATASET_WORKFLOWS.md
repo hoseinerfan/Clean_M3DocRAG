@@ -611,6 +611,29 @@ mkdir -p "$LOCAL_OUTPUT_DIR/opendocvqa"
   --faiss-nprobe 4
 ```
 
+Full OpenDocVQA retrieval is very slow as one foreground process. Run it as a sharded GPU array instead:
+
+```bash
+sbatch --time=24:00:00 --array=0-63%4 \
+  --export=ALL,NUM_SHARDS=64,TOP_PAGES=1000,FAISS_NPROBE=4,SAVE_EVERY=25 \
+  opendocvqa/sbatch_retrieval_opendocvqa_array.sh
+```
+
+Each shard writes:
+
+```text
+$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000_shards/shard_<idx>_of_64.json
+```
+
+After all shards finish, merge them:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/merge_retrieval_predictions.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000_shards/shard_*_of_64.json" \
+  --output-json "$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000.json" \
+  --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
+```
+
 Evaluate:
 
 ```bash

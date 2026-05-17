@@ -37,6 +37,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query-token-filter", default="full", choices=["full", "drop_pad_like", "semantic_only"])
     parser.add_argument("--ignore-pad-scores-in-final-ranking", action="store_true")
     parser.add_argument("--max-qids", type=int, default=0)
+    parser.add_argument("--num-shards", type=int, default=1)
+    parser.add_argument("--shard-index", type=int, default=0)
+    parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--save-every",
+        type=int,
+        default=0,
+        help="Write partial predictions every N newly processed queries. 0 writes only at the end.",
+    )
     return parser.parse_args()
 
 
@@ -58,6 +67,12 @@ def read_jsonl(path: Path) -> list[dict]:
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def write_predictions(path: Path, predictions: dict[str, dict]) -> None:
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(predictions, indent=2) + "\n", encoding="utf-8")
+    tmp_path.replace(path)
 
 
 def load_doc_ids(data_root: Path, split: str) -> list[str]:
@@ -142,6 +157,13 @@ def retrieve_one(
 
 def main() -> None:
     args = parse_args()
+    if args.num_shards <= 0:
+        raise ValueError("--num-shards must be positive.")
+    if args.shard_index < 0 or args.shard_index >= args.num_shards:
+        raise ValueError("--shard-index must be in [0, num_shards).")
+    if args.save_every < 0:
+        raise ValueError("--save-every must be non-negative.")
+
     data_root = Path(args.data_root)
     embedding_dir = Path(args.embedding_dir)
     index_path = Path(args.index_dir) / "index.bin"
@@ -167,10 +189,27 @@ def main() -> None:
     gold_rows = read_jsonl(data_root / f"MMQA_{args.split}.jsonl")
     if args.max_qids > 0:
         gold_rows = gold_rows[: args.max_qids]
+    total_rows_before_shard = len(gold_rows)
+    if args.num_shards > 1:
+        gold_rows = [row for idx, row in enumerate(gold_rows) if idx % args.num_shards == args.shard_index]
 
     predictions: dict[str, dict] = {}
+    if args.resume and output_path.exists():
+        predictions = json.loads(output_path.read_text(encoding="utf-8"))
+        if not isinstance(predictions, dict):
+            raise TypeError(f"Existing prediction file is not a JSON object: {output_path}")
+    done_qids = set(predictions)
+    print(
+        "retrieval_shard "
+        f"index={args.shard_index} num_shards={args.num_shards} "
+        f"total_qids={total_rows_before_shard} shard_qids={len(gold_rows)} resume_done={len(done_qids)}"
+    )
+
+    new_since_save = 0
     for gold_row in tqdm(gold_rows, desc="Retrieving MMDocIR queries"):
         qid = str(gold_row["qid"])
+        if qid in done_qids:
+            continue
         query = str(gold_row["question"])
         start = time.perf_counter()
         retrieval_rows = retrieve_one(
@@ -191,11 +230,14 @@ def main() -> None:
             "time_retrieval": time.perf_counter() - start,
             "time_qa": None,
         }
+        new_since_save += 1
+        if args.save_every and new_since_save >= args.save_every:
+            write_predictions(output_path, predictions)
+            new_since_save = 0
 
-    output_path.write_text(json.dumps(predictions, indent=2) + "\n", encoding="utf-8")
+    write_predictions(output_path, predictions)
     print(f"saved_prediction={output_path}")
 
 
 if __name__ == "__main__":
     main()
-

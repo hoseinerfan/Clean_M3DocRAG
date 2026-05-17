@@ -160,6 +160,31 @@ The two counts should match. Expected full count: `3223`.
 
 ## 6. Run baseline retrieval
 
+Full OpenDocVQA retrieval is too slow as a single foreground process. Use the sharded GPU array:
+
+```bash
+sbatch --time=24:00:00 --array=0-63%4 \
+  --export=ALL,NUM_SHARDS=64,TOP_PAGES=1000,FAISS_NPROBE=4,SAVE_EVERY=25 \
+  opendocvqa/sbatch_retrieval_opendocvqa_array.sh
+```
+
+Each shard writes to:
+
+```text
+$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000_shards/shard_<idx>_of_64.json
+```
+
+After all shards finish, merge:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/merge_retrieval_predictions.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000_shards/shard_*_of_64.json" \
+  --output-json "$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000.json" \
+  --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
+```
+
+Single-process command, useful only for small sanity runs:
+
 ```bash
 mkdir -p "$LOCAL_OUTPUT_DIR/opendocvqa"
 
