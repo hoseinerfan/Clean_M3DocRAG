@@ -184,6 +184,25 @@ Evaluate exact qrel page retrieval:
 
 ## 7. Run `plain_top224`
 
+For the full ViDoRe V3 set, run `plain_top224` as an array after the merged baseline prediction exists:
+
+```bash
+sbatch --time=24:00:00 --array=0-15%4 \
+  --export=ALL,NUM_SHARDS=16,TOP_PAGES=1000,BASE_ONLY_PAGE_BATCH_SIZE=64 \
+  vidore/sbatch_plain_top224_vidore_v3_array.sh
+```
+
+Merge sharded predictions:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/merge_retrieval_predictions.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_shards/shard_*_of_16_prediction.json" \
+  --output-json "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
+  --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
+```
+
+Single-process command:
+
 ```bash
 bash vidore/run_plain_top224_vidore_v3.sh
 ```
