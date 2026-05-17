@@ -23,7 +23,9 @@ ENV_PREFIX="${ENV_PREFIX:-$REPO_ROOT/env}"
 CONDA_SH="${CONDA_SH:-/mmfs1/cm/shared/apps_local/ondemand/anaconda/etc/profile.d/conda.sh}"
 CUDA_MODULE="${CUDA_MODULE:-cuda/12.1.1}"
 
-export LOCAL_DATA_DIR="${LOCAL_DATA_DIR:-$REPO_ROOT/data}"
+# Force this launcher to use the Clean_M3DocRAG dataset tree even if the
+# submitting shell inherited LOCAL_* variables from another dataset workflow.
+export LOCAL_DATA_DIR="$REPO_ROOT/data"
 
 OUT_DIR="${OUT_DIR:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/cue_verifier_subset_top20_notop4_all}"
 QIDS="${QIDS:-$OUT_DIR/reviewed_qids.jsonl}"
