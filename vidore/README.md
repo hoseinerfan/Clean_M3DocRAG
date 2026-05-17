@@ -137,10 +137,35 @@ python mmdocir/run_indexing_mmdocir.py \
 
 ## 6. Run baseline retrieval
 
+For the full `14514`-query ViDoRe V3 set, use the sharded GPU array:
+
+```bash
+sbatch --time=24:00:00 --array=0-15%4 \
+  --export=ALL,NUM_SHARDS=16,TOP_PAGES=1000,FAISS_NPROBE=4,SAVE_EVERY=25 \
+  vidore/sbatch_retrieval_vidore_v3_array.sh
+```
+
+Each shard writes to:
+
+```text
+$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000_shards/shard_<idx>_of_16.json
+```
+
+After all shards finish, merge:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/merge_retrieval_predictions.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000_shards/shard_*_of_16.json" \
+  --output-json "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000.json" \
+  --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
+```
+
+Single-process command, useful only for small sanity runs:
+
 ```bash
 mkdir -p "$LOCAL_OUTPUT_DIR/vidore-v3"
 
-python mmdocir/run_retrieval_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_retrieval_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/vidore-v3" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidore-v3_dev" \
   --index-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidore-v3_dev_pageindex_ivfflat" \
@@ -152,7 +177,7 @@ python mmdocir/run_retrieval_mmdocir.py \
 Evaluate exact qrel page retrieval:
 
 ```bash
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000.json" \
   --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
 ```
@@ -166,7 +191,7 @@ bash vidore/run_plain_top224_vidore_v3.sh
 Then evaluate:
 
 ```bash
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
   --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
 ```

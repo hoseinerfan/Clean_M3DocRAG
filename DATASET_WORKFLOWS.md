@@ -430,7 +430,7 @@ Baseline retrieval:
 ```bash
 mkdir -p "$LOCAL_OUTPUT_DIR/vidore-v3"
 
-python mmdocir/run_retrieval_mmdocir.py \
+"$REPO_ROOT/env/bin/python" mmdocir/run_retrieval_mmdocir.py \
   --data-root "$LOCAL_DATA_DIR/vidore-v3" \
   --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidore-v3_dev" \
   --index-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_vidore-v3_dev_pageindex_ivfflat" \
@@ -439,12 +439,29 @@ python mmdocir/run_retrieval_mmdocir.py \
   --faiss-nprobe 4
 ```
 
+ViDoRe has 14514 queries, so the batch array is safer:
+
+```bash
+sbatch --time=24:00:00 --array=0-15%4 \
+  --export=ALL,NUM_SHARDS=16,TOP_PAGES=1000,FAISS_NPROBE=4,SAVE_EVERY=25 \
+  vidore/sbatch_retrieval_vidore_v3_array.sh
+```
+
+After all shards finish, merge them:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/merge_retrieval_predictions.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000_shards/shard_*_of_16.json" \
+  --output-json "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000.json" \
+  --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
+```
+
 `plain_top224`:
 
 ```bash
 bash vidore/run_plain_top224_vidore_v3.sh
 
-python mmdocir/evaluate_mmdocir_retrieval.py \
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
   --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
 ```
