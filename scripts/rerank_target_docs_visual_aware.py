@@ -5575,6 +5575,40 @@ def summarize_token_pruning_diagnostics(page_features: list[PageFeature]) -> dic
             return None
         return float(statistics.median(collected))
 
+    def ratio_values(numerator_attr: str, denominator_attr: str) -> list[float]:
+        collected: list[float] = []
+        for item in diagnostic_pages:
+            numerator = getattr(item, numerator_attr, None)
+            denominator = getattr(item, denominator_attr, None)
+            if numerator is None or denominator is None:
+                continue
+            denominator = float(denominator)
+            if denominator <= 0.0:
+                continue
+            collected.append(float(numerator) / denominator)
+        return collected
+
+    def ratio_mean_or_none(numerator_attr: str, denominator_attr: str) -> float | None:
+        collected = ratio_values(numerator_attr, denominator_attr)
+        if not collected:
+            return None
+        return float(statistics.fmean(collected))
+
+    def ratio_median_or_none(numerator_attr: str, denominator_attr: str) -> float | None:
+        collected = ratio_values(numerator_attr, denominator_attr)
+        if not collected:
+            return None
+        return float(statistics.median(collected))
+
+    mean_selected_token_fraction = ratio_mean_or_none(
+        "selector_selected_token_count",
+        "selector_full_token_count",
+    )
+    mean_candidate_token_fraction = ratio_mean_or_none(
+        "selector_candidate_token_count",
+        "selector_full_token_count",
+    )
+
     return {
         "enabled": True,
         "page_count": len(diagnostic_pages),
@@ -5583,6 +5617,26 @@ def summarize_token_pruning_diagnostics(page_features: list[PageFeature]) -> dic
         "mean_candidate_token_count": mean_or_none("selector_candidate_token_count"),
         "mean_full_token_count": mean_or_none("selector_full_token_count"),
         "mean_active_query_token_count": mean_or_none("selector_active_query_token_count"),
+        "mean_selected_token_fraction": mean_selected_token_fraction,
+        "median_selected_token_fraction": ratio_median_or_none(
+            "selector_selected_token_count",
+            "selector_full_token_count",
+        ),
+        "mean_candidate_token_fraction": mean_candidate_token_fraction,
+        "median_candidate_token_fraction": ratio_median_or_none(
+            "selector_candidate_token_count",
+            "selector_full_token_count",
+        ),
+        "mean_selected_token_reduction_ratio": (
+            None
+            if mean_selected_token_fraction is None
+            else float(max(0.0, 1.0 - mean_selected_token_fraction))
+        ),
+        "mean_candidate_token_reduction_ratio": (
+            None
+            if mean_candidate_token_fraction is None
+            else float(max(0.0, 1.0 - mean_candidate_token_fraction))
+        ),
         "mean_exact_score_loss": mean_or_none("selector_exact_score_loss"),
         "mean_shifted_score_preservation_ratio": mean_or_none(
             "selector_shifted_score_preservation_ratio"

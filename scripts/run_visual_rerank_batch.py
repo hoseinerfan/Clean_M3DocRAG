@@ -6,6 +6,7 @@ import argparse
 import json
 import statistics
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -336,6 +337,15 @@ def parse_args() -> argparse.Namespace:
             "retention. This is useful for scientific analysis but can slow approximate reranking. "
             "For maxsim_greedy it forces a full-page diagnostic pass even when a cheaper "
             "candidate-budgeted run would otherwise avoid that."
+        ),
+    )
+    parser.add_argument(
+        "--report-efficiency-diagnostics",
+        action="store_true",
+        help=(
+            "Export qid-level runtime, throughput, and best-effort CUDA peak-memory diagnostics. "
+            "This complements --report-pruning-diagnostics by measuring cost rather than only "
+            "MaxSim-preservation quality."
         ),
     )
     parser.add_argument(
@@ -965,6 +975,16 @@ def aggregate_token_pruning_diagnostic_summaries(qid_summaries: list[dict]) -> d
         "mean_candidate_token_count": weighted_mean("mean_candidate_token_count"),
         "mean_full_token_count": weighted_mean("mean_full_token_count"),
         "mean_active_query_token_count": weighted_mean("mean_active_query_token_count"),
+        "mean_selected_token_fraction": weighted_mean("mean_selected_token_fraction"),
+        "median_selected_token_fraction_across_qids": median_of_qid_metric(
+            "median_selected_token_fraction"
+        ),
+        "mean_candidate_token_fraction": weighted_mean("mean_candidate_token_fraction"),
+        "median_candidate_token_fraction_across_qids": median_of_qid_metric(
+            "median_candidate_token_fraction"
+        ),
+        "mean_selected_token_reduction_ratio": weighted_mean("mean_selected_token_reduction_ratio"),
+        "mean_candidate_token_reduction_ratio": weighted_mean("mean_candidate_token_reduction_ratio"),
         "mean_exact_score_loss": weighted_mean("mean_exact_score_loss"),
         "mean_shifted_score_preservation_ratio": weighted_mean(
             "mean_shifted_score_preservation_ratio"
@@ -985,6 +1005,196 @@ def aggregate_token_pruning_diagnostic_summaries(qid_summaries: list[dict]) -> d
         "perfect_argmax_retention_page_count": sum(
             int(item.get("perfect_argmax_retention_page_count", 0))
             for item in enabled_summaries
+        ),
+    }
+
+
+def _maybe_synchronize_cuda(torch_module, device) -> None:
+    if torch_module is None or device is None or getattr(device, "type", None) != "cuda":
+        return
+    torch_module.cuda.synchronize(device)
+
+
+def build_efficiency_diagnostic_summary(
+    *,
+    qid_wall_time_sec: float,
+    page_feature_wall_time_sec: float,
+    final_ranking_wall_time_sec: float,
+    candidate_doc_count: int,
+    candidate_page_count: int,
+    reranked_page_count: int,
+    token_pruning_diagnostic_summary: dict,
+    cuda_peak_memory_allocated_mb: float | None,
+    cuda_peak_memory_reserved_mb: float | None,
+) -> dict:
+    token_page_count = int(token_pruning_diagnostic_summary.get("page_count", 0))
+    mean_selected_token_count = token_pruning_diagnostic_summary.get("mean_selected_token_count")
+    mean_candidate_token_count = token_pruning_diagnostic_summary.get("mean_candidate_token_count")
+    mean_full_token_count = token_pruning_diagnostic_summary.get("mean_full_token_count")
+    mean_active_query_token_count = token_pruning_diagnostic_summary.get("mean_active_query_token_count")
+    mean_selected_token_fraction = token_pruning_diagnostic_summary.get("mean_selected_token_fraction")
+    mean_candidate_token_fraction = token_pruning_diagnostic_summary.get("mean_candidate_token_fraction")
+
+    return {
+        "enabled": True,
+        "qid_wall_time_sec": float(qid_wall_time_sec),
+        "page_feature_wall_time_sec": float(page_feature_wall_time_sec),
+        "final_ranking_wall_time_sec": float(final_ranking_wall_time_sec),
+        "candidate_doc_count": int(candidate_doc_count),
+        "candidate_page_count": int(candidate_page_count),
+        "reranked_page_count": int(reranked_page_count),
+        "page_feature_pages_per_second": (
+            None
+            if page_feature_wall_time_sec <= 0.0
+            else float(candidate_page_count / page_feature_wall_time_sec)
+        ),
+        "final_ranking_pages_per_second": (
+            None
+            if final_ranking_wall_time_sec <= 0.0
+            else float(reranked_page_count / final_ranking_wall_time_sec)
+        ),
+        "cuda_peak_memory_allocated_mb": (
+            None if cuda_peak_memory_allocated_mb is None else float(cuda_peak_memory_allocated_mb)
+        ),
+        "cuda_peak_memory_reserved_mb": (
+            None if cuda_peak_memory_reserved_mb is None else float(cuda_peak_memory_reserved_mb)
+        ),
+        "token_pruning_enabled": bool(token_pruning_diagnostic_summary.get("enabled")),
+        "token_pruning_page_count": token_page_count,
+        "mean_selected_token_count": mean_selected_token_count,
+        "mean_candidate_token_count": mean_candidate_token_count,
+        "mean_full_token_count": mean_full_token_count,
+        "mean_active_query_token_count": mean_active_query_token_count,
+        "mean_selected_token_fraction": mean_selected_token_fraction,
+        "mean_candidate_token_fraction": mean_candidate_token_fraction,
+        "mean_estimated_selected_compute_ratio": mean_selected_token_fraction,
+        "mean_estimated_candidate_compute_ratio": mean_candidate_token_fraction,
+        "mean_estimated_selected_compute_reduction_ratio": (
+            None
+            if mean_selected_token_fraction is None
+            else float(max(0.0, 1.0 - float(mean_selected_token_fraction)))
+        ),
+        "mean_estimated_candidate_compute_reduction_ratio": (
+            None
+            if mean_candidate_token_fraction is None
+            else float(max(0.0, 1.0 - float(mean_candidate_token_fraction)))
+        ),
+    }
+
+
+def aggregate_efficiency_diagnostic_summaries(qid_summaries: list[dict]) -> dict:
+    enabled_summaries = [
+        item for item in qid_summaries if isinstance(item, dict) and item.get("enabled")
+    ]
+    if not enabled_summaries:
+        return {
+            "enabled": False,
+            "qid_count": 0,
+        }
+
+    def mean_metric(key: str) -> float | None:
+        values = [float(item[key]) for item in enabled_summaries if item.get(key) is not None]
+        if not values:
+            return None
+        return float(statistics.fmean(values))
+
+    def median_metric(key: str) -> float | None:
+        values = [float(item[key]) for item in enabled_summaries if item.get(key) is not None]
+        if not values:
+            return None
+        return float(statistics.median(values))
+
+    def max_metric(key: str) -> float | None:
+        values = [float(item[key]) for item in enabled_summaries if item.get(key) is not None]
+        if not values:
+            return None
+        return float(max(values))
+
+    def weighted_mean(key: str, weight_key: str) -> float | None:
+        numerator = 0.0
+        denominator = 0
+        for item in enabled_summaries:
+            value = item.get(key)
+            weight = int(item.get(weight_key, 0))
+            if value is None or weight <= 0:
+                continue
+            numerator += float(value) * weight
+            denominator += weight
+        if denominator == 0:
+            return None
+        return float(numerator / denominator)
+
+    total_candidate_pages = sum(int(item.get("candidate_page_count", 0)) for item in enabled_summaries)
+    total_reranked_pages = sum(int(item.get("reranked_page_count", 0)) for item in enabled_summaries)
+    total_page_feature_wall_time_sec = sum(
+        float(item.get("page_feature_wall_time_sec", 0.0))
+        for item in enabled_summaries
+        if item.get("page_feature_wall_time_sec") is not None
+    )
+    total_final_ranking_wall_time_sec = sum(
+        float(item.get("final_ranking_wall_time_sec", 0.0))
+        for item in enabled_summaries
+        if item.get("final_ranking_wall_time_sec") is not None
+    )
+    total_qid_wall_time_sec = sum(
+        float(item.get("qid_wall_time_sec", 0.0))
+        for item in enabled_summaries
+        if item.get("qid_wall_time_sec") is not None
+    )
+
+    return {
+        "enabled": True,
+        "qid_count": len(enabled_summaries),
+        "total_qid_wall_time_sec": total_qid_wall_time_sec,
+        "mean_qid_wall_time_sec": mean_metric("qid_wall_time_sec"),
+        "median_qid_wall_time_sec": median_metric("qid_wall_time_sec"),
+        "mean_page_feature_wall_time_sec": mean_metric("page_feature_wall_time_sec"),
+        "median_page_feature_wall_time_sec": median_metric("page_feature_wall_time_sec"),
+        "mean_final_ranking_wall_time_sec": mean_metric("final_ranking_wall_time_sec"),
+        "median_final_ranking_wall_time_sec": median_metric("final_ranking_wall_time_sec"),
+        "mean_candidate_doc_count": mean_metric("candidate_doc_count"),
+        "mean_candidate_page_count": mean_metric("candidate_page_count"),
+        "mean_reranked_page_count": mean_metric("reranked_page_count"),
+        "total_candidate_page_count": total_candidate_pages,
+        "total_reranked_page_count": total_reranked_pages,
+        "page_feature_pages_per_second": (
+            None
+            if total_page_feature_wall_time_sec <= 0.0
+            else float(total_candidate_pages / total_page_feature_wall_time_sec)
+        ),
+        "final_ranking_pages_per_second": (
+            None
+            if total_final_ranking_wall_time_sec <= 0.0
+            else float(total_reranked_pages / total_final_ranking_wall_time_sec)
+        ),
+        "mean_cuda_peak_memory_allocated_mb": mean_metric("cuda_peak_memory_allocated_mb"),
+        "max_cuda_peak_memory_allocated_mb": max_metric("cuda_peak_memory_allocated_mb"),
+        "mean_cuda_peak_memory_reserved_mb": mean_metric("cuda_peak_memory_reserved_mb"),
+        "max_cuda_peak_memory_reserved_mb": max_metric("cuda_peak_memory_reserved_mb"),
+        "token_pruning_qid_count": sum(1 for item in enabled_summaries if item.get("token_pruning_enabled")),
+        "token_pruning_page_count": sum(int(item.get("token_pruning_page_count", 0)) for item in enabled_summaries),
+        "mean_selected_token_count": weighted_mean("mean_selected_token_count", "token_pruning_page_count"),
+        "mean_candidate_token_count": weighted_mean("mean_candidate_token_count", "token_pruning_page_count"),
+        "mean_full_token_count": weighted_mean("mean_full_token_count", "token_pruning_page_count"),
+        "mean_active_query_token_count": weighted_mean(
+            "mean_active_query_token_count",
+            "token_pruning_page_count",
+        ),
+        "mean_selected_token_fraction": weighted_mean(
+            "mean_selected_token_fraction",
+            "token_pruning_page_count",
+        ),
+        "mean_candidate_token_fraction": weighted_mean(
+            "mean_candidate_token_fraction",
+            "token_pruning_page_count",
+        ),
+        "mean_estimated_selected_compute_reduction_ratio": weighted_mean(
+            "mean_estimated_selected_compute_reduction_ratio",
+            "token_pruning_page_count",
+        ),
+        "mean_estimated_candidate_compute_reduction_ratio": weighted_mean(
+            "mean_estimated_candidate_compute_reduction_ratio",
+            "token_pruning_page_count",
         ),
     }
 
@@ -1853,6 +2063,15 @@ def main() -> None:
             args.from_baseline_top_pages,
         )
         explicit_page_uids = set(baseline_page_uids)
+        qid_wall_time_start = time.perf_counter()
+        page_feature_wall_time_sec = 0.0
+        final_ranking_wall_time_sec = 0.0
+        cuda_peak_memory_allocated_mb: float | None = None
+        cuda_peak_memory_reserved_mb: float | None = None
+        if args.report_efficiency_diagnostics:
+            _maybe_synchronize_cuda(torch, device)
+            if torch is not None and device is not None and getattr(device, "type", None) == "cuda":
+                torch.cuda.reset_peak_memory_stats(device)
 
         query_text = gold_row["question"]
         stage1_base_doc_rank_map: dict[str, int] | None = None
@@ -1868,6 +2087,7 @@ def main() -> None:
             if route_config is not None
             else {"route_decision": default_route_decision, "matched_rule_index": None, "matched_rule": None}
         )
+        page_feature_wall_time_start = time.perf_counter()
         if (
             fixed_base_only
             and args.base_score_source == "baseline_pred"
@@ -2232,8 +2452,11 @@ def main() -> None:
                         visual_score_query_mode=args.visual_score_query_mode,
                         non_visual_page_mode=args.non_visual_page_mode,
                     )
-            if args.gated_visual_top_docs > 0 and apply_staged_visual_rerank and stage1_base_doc_rank_map is None:
-                stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
+                if args.gated_visual_top_docs > 0 and apply_staged_visual_rerank and stage1_base_doc_rank_map is None:
+                    stage1_base_doc_rank_map = build_stage1_base_doc_rank_map(page_features)
+        if args.report_efficiency_diagnostics:
+            _maybe_synchronize_cuda(torch, device)
+        page_feature_wall_time_sec = float(time.perf_counter() - page_feature_wall_time_start)
         if args.grid_search:
             weights, best_grid_record, _grid_leaderboard = grid_search_weights(
                 page_features=page_features,
@@ -2271,6 +2494,7 @@ def main() -> None:
         vlm_records: list[dict] = []
         coarse_pre_exact_docs: list[dict] = []
         coarse_pre_exact_pages: list[dict] = []
+        final_ranking_wall_time_start = time.perf_counter()
         if vlm_rerank_active:
             assert vlm_dataset is not None
             assert vlm_model is not None
@@ -2302,6 +2526,12 @@ def main() -> None:
                 doc_aggregation_mode=args.doc_aggregation_mode,
                 doc_aggregation_second_page_weight=args.doc_aggregation_second_page_weight,
             )
+        if args.report_efficiency_diagnostics:
+            _maybe_synchronize_cuda(torch, device)
+        final_ranking_wall_time_sec = float(time.perf_counter() - final_ranking_wall_time_start)
+        if args.report_efficiency_diagnostics and torch is not None and device is not None and getattr(device, "type", None) == "cuda":
+            cuda_peak_memory_allocated_mb = float(torch.cuda.max_memory_allocated(device) / (1024 ** 2))
+            cuda_peak_memory_reserved_mb = float(torch.cuda.max_memory_reserved(device) / (1024 ** 2))
         if visual_prefilter_exact_trace is not None:
             selected_page_uid_set = {
                 str(item["page_uid"])
@@ -2357,6 +2587,24 @@ def main() -> None:
         ranking_focus_token_pruning_summary = summarize_ranking_focus_token_pruning(
             reranked_pages=reranked_pages,
             gold_doc_id_set=gold_doc_id_set,
+        )
+        if args.report_efficiency_diagnostics:
+            _maybe_synchronize_cuda(torch, device)
+        qid_wall_time_sec = float(time.perf_counter() - qid_wall_time_start)
+        efficiency_diagnostic_summary = (
+            build_efficiency_diagnostic_summary(
+                qid_wall_time_sec=qid_wall_time_sec,
+                page_feature_wall_time_sec=page_feature_wall_time_sec,
+                final_ranking_wall_time_sec=final_ranking_wall_time_sec,
+                candidate_doc_count=len(candidate_doc_ids),
+                candidate_page_count=len(page_features),
+                reranked_page_count=len(reranked_pages),
+                token_pruning_diagnostic_summary=token_pruning_diagnostic_summary,
+                cuda_peak_memory_allocated_mb=cuda_peak_memory_allocated_mb,
+                cuda_peak_memory_reserved_mb=cuda_peak_memory_reserved_mb,
+            )
+            if args.report_efficiency_diagnostics
+            else {"enabled": False}
         )
         coarse_pre_exact_first_gold_page_rank = (
             coarse_pre_exact_page_hits[0]["rank"] if coarse_pre_exact_page_hits else None
@@ -2427,6 +2675,7 @@ def main() -> None:
             "approx_base_page_token_soft_patch_visual_bonus": args.approx_base_page_token_soft_patch_visual_bonus,
             "approx_base_page_token_nonspatial_policy": args.approx_base_page_token_nonspatial_policy,
             "report_pruning_diagnostics": args.report_pruning_diagnostics,
+            "report_efficiency_diagnostics": args.report_efficiency_diagnostics,
             "base_only_page_batch_size": args.base_only_page_batch_size,
             "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
             "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -2481,6 +2730,7 @@ def main() -> None:
             "vlm_record_count": len(vlm_records),
             "vlm_records": vlm_records,
             "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
+            "efficiency_diagnostic_summary": efficiency_diagnostic_summary,
             "ranking_focus_token_pruning_summary": ranking_focus_token_pruning_summary,
             "visual_prefilter_exact_page_trace": visual_prefilter_exact_trace,
             "baseline_first_gold_doc_rank": baseline_first_gold_doc_rank,
@@ -2556,6 +2806,9 @@ def main() -> None:
     token_pruning_diagnostic_summary = aggregate_token_pruning_diagnostic_summaries(
         [row["token_pruning_diagnostic_summary"] for row in all_rows]
     )
+    efficiency_diagnostic_summary = aggregate_efficiency_diagnostic_summaries(
+        [row.get("efficiency_diagnostic_summary", {}) for row in all_rows]
+    )
     ranking_focus_token_pruning_summary = aggregate_ranking_focus_token_pruning_summaries(
         [row.get("ranking_focus_token_pruning_summary", {}) for row in all_rows]
     )
@@ -2590,6 +2843,7 @@ def main() -> None:
         "approx_base_page_token_nonspatial_policy": args.approx_base_page_token_nonspatial_policy,
         "resume_output_jsonl": args.resume_output_jsonl,
         "report_pruning_diagnostics": args.report_pruning_diagnostics,
+        "report_efficiency_diagnostics": args.report_efficiency_diagnostics,
         "base_only_page_batch_size": args.base_only_page_batch_size,
         "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -2639,6 +2893,7 @@ def main() -> None:
         "grid_non_visual_values": grid_non_visual_values,
         "grid_balance_values": grid_balance_values,
         "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
+        "efficiency_diagnostic_summary": efficiency_diagnostic_summary,
         "ranking_focus_token_pruning_summary": ranking_focus_token_pruning_summary,
         "num_qids": len(all_rows),
         "baseline_top4_doc_count": baseline_top4_doc,
