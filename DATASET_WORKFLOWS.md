@@ -152,6 +152,29 @@ python mmdocir/evaluate_mmdocir_retrieval.py \
   --gold "$LOCAL_DATA_DIR/mm-docir/MMQA_dev.jsonl"
 ```
 
+Observed full `plain_top224`:
+
+```text
+n_qids 1658
+page_recall@1 0.4136
+page_recall@4 0.6075
+page_recall@10 0.6913
+page_recall@20 0.7480
+page_recall@100 0.8305
+page_recall@1000 0.9192
+doc_recall@1 0.6852
+doc_recall@4 0.8058
+doc_recall@20 0.8890
+doc_recall@100 0.9692
+doc_recall@1000 0.9867
+page_hit@4 1068/1658
+doc_hit@4 1336/1658
+improved_doc_rank_count 326
+reranked_top4_doc_count 1336
+```
+
+MMDocIR full baseline metrics are not recorded here yet. Re-run the baseline eval command above if the comparison table is needed.
+
 ## SciEGQA-Bench
 
 Source env:
@@ -491,6 +514,8 @@ Then evaluate:
   --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
 ```
 
+ViDoRe V3 embeddings and FAISS index are complete. Full baseline and `plain_top224` retrieval arrays were added; final metrics are pending merge/evaluation.
+
 ## OpenDocVQA
 
 Source env:
@@ -629,6 +654,15 @@ jq length "$LOCAL_DATA_DIR/opendocvqa/dev_doc_ids.json"
 # counts should match; expected full count: 3223
 ```
 
+Observed full embedding/index status:
+
+```text
+embedding_count 3223/3223
+index_path /mmfs1/scratch/jacks.local/aerfanshekooh/custom/OpenDocVQA_M3DocRAG/embeddings/colpali-v1.2_opendocvqa_dev_pageindex_ivfflat/index.bin
+index_size 103G
+index_meta_size 95K
+```
+
 Index:
 
 ```bash
@@ -683,6 +717,25 @@ Evaluate:
   --pred "$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000.json" \
   --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
 ```
+
+Observed full-index first-100 baseline sanity:
+
+```text
+n_qids 100
+page_recall@1 0.46
+page_recall@4 0.635
+page_recall@20 0.735
+page_recall@100 0.845
+page_recall@1000 0.96
+doc_recall@1 0.47
+doc_recall@4 0.66
+doc_recall@100 0.9
+doc_recall@1000 0.995
+page_hit@4 68/100
+doc_hit@4 71/100
+```
+
+OpenDocVQA full baseline and full `plain_top224` metrics are pending the sharded retrieval merge/evaluation.
 
 `plain_top224`:
 
