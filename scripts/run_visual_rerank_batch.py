@@ -23,6 +23,7 @@ from scripts.rerank_target_docs_visual_aware import (
     APPROX_BASE_PAGE_TOKEN_SCORER_CHOICES,
     APPROX_BASE_PAGE_TOKEN_SELECTOR_CHOICES,
     APPROX_BASE_PAGE_TOKEN_ADAPTIVE_K_MODE_CHOICES,
+    BaseOnlyPageScoringDiagnostics,
     BALANCE_SCORE_MODE_CHOICES,
     BASE_SCORE_SOURCE_CHOICES,
     COARSE_SCORE_DTYPE_CHOICES,
@@ -346,6 +347,15 @@ def parse_args() -> argparse.Namespace:
             "Export qid-level runtime, throughput, and best-effort CUDA peak-memory diagnostics. "
             "This complements --report-pruning-diagnostics by measuring cost rather than only "
             "MaxSim-preservation quality."
+        ),
+    )
+    parser.add_argument(
+        "--report-base-only-stage-diagnostics",
+        action="store_true",
+        help=(
+            "When base-only scoring is active, export a deeper timing breakdown for exact vs compact "
+            "page scoring, including batch usage plus coarse-score, top-k, gather, and pruned-MaxSim "
+            "substage times. This is intended for debugging runtime regressions and can perturb timing."
         ),
     )
     parser.add_argument(
@@ -1024,6 +1034,7 @@ def build_efficiency_diagnostic_summary(
     candidate_page_count: int,
     reranked_page_count: int,
     token_pruning_diagnostic_summary: dict,
+    base_only_page_scoring_summary: dict | None,
     cuda_peak_memory_allocated_mb: float | None,
     cuda_peak_memory_reserved_mb: float | None,
 ) -> dict:
@@ -1078,6 +1089,125 @@ def build_efficiency_diagnostic_summary(
             None
             if mean_candidate_token_fraction is None
             else float(max(0.0, 1.0 - float(mean_candidate_token_fraction)))
+        ),
+        "base_only_page_scoring_summary": base_only_page_scoring_summary,
+    }
+
+
+def build_base_only_page_scoring_summary(
+    diagnostics: BaseOnlyPageScoringDiagnostics | None,
+) -> dict | None:
+    if diagnostics is None:
+        return None
+    if diagnostics.page_count <= 0 and diagnostics.flush_count <= 0:
+        return {"enabled": False, "page_count": 0}
+    return {
+        "enabled": True,
+        "page_count": int(diagnostics.page_count),
+        "single_page_count": int(diagnostics.single_page_count),
+        "single_exact_page_count": int(diagnostics.single_exact_page_count),
+        "single_approx_page_count": int(diagnostics.single_approx_page_count),
+        "batched_page_count": int(diagnostics.batched_page_count),
+        "batched_exact_page_count": int(diagnostics.batched_exact_page_count),
+        "batched_approx_page_count": int(diagnostics.batched_approx_page_count),
+        "flush_count": int(diagnostics.flush_count),
+        "single_flush_count": int(diagnostics.single_flush_count),
+        "batched_flush_count": int(diagnostics.batched_flush_count),
+        "total_batched_batch_size": int(diagnostics.total_batched_batch_size),
+        "max_batch_size": int(diagnostics.max_batch_size),
+        "mean_effective_batched_batch_size": (
+            None
+            if diagnostics.batched_flush_count <= 0
+            else float(diagnostics.total_batched_batch_size / diagnostics.batched_flush_count)
+        ),
+        "batch_tensor_stack_wall_time_sec": float(diagnostics.batch_tensor_stack_wall_time_sec),
+        "exact_single_page_wall_time_sec": float(diagnostics.exact_single_page_wall_time_sec),
+        "approx_single_page_wall_time_sec": float(diagnostics.approx_single_page_wall_time_sec),
+        "exact_batched_page_wall_time_sec": float(diagnostics.exact_batched_page_wall_time_sec),
+        "coarse_score_wall_time_sec": float(diagnostics.coarse_score_wall_time_sec),
+        "topk_wall_time_sec": float(diagnostics.topk_wall_time_sec),
+        "gather_wall_time_sec": float(diagnostics.gather_wall_time_sec),
+        "pruned_exact_wall_time_sec": float(diagnostics.pruned_exact_wall_time_sec),
+    }
+
+
+def aggregate_base_only_page_scoring_summaries(qid_summaries: list[dict | None]) -> dict:
+    enabled_summaries = [
+        item for item in qid_summaries if isinstance(item, dict) and item.get("enabled")
+    ]
+    if not enabled_summaries:
+        return {"enabled": False, "qid_count": 0}
+
+    def sum_int(key: str) -> int:
+        return sum(int(item.get(key, 0)) for item in enabled_summaries)
+
+    def sum_float(key: str) -> float:
+        return float(sum(float(item.get(key, 0.0)) for item in enabled_summaries))
+
+    def mean_over_count(total_key: str, count_key: str) -> float | None:
+        total = sum_float(total_key)
+        count = sum_int(count_key)
+        if count <= 0:
+            return None
+        return float(total / count)
+
+    total_batched_flush_count = sum_int("batched_flush_count")
+    total_batched_batch_size = sum_int("total_batched_batch_size")
+    return {
+        "enabled": True,
+        "qid_count": len(enabled_summaries),
+        "page_count": sum_int("page_count"),
+        "single_page_count": sum_int("single_page_count"),
+        "single_exact_page_count": sum_int("single_exact_page_count"),
+        "single_approx_page_count": sum_int("single_approx_page_count"),
+        "batched_page_count": sum_int("batched_page_count"),
+        "batched_exact_page_count": sum_int("batched_exact_page_count"),
+        "batched_approx_page_count": sum_int("batched_approx_page_count"),
+        "flush_count": sum_int("flush_count"),
+        "single_flush_count": sum_int("single_flush_count"),
+        "batched_flush_count": total_batched_flush_count,
+        "total_batched_batch_size": total_batched_batch_size,
+        "max_batch_size": max(int(item.get("max_batch_size", 0)) for item in enabled_summaries),
+        "mean_effective_batched_batch_size": (
+            None
+            if total_batched_flush_count <= 0
+            else float(total_batched_batch_size / total_batched_flush_count)
+        ),
+        "batch_tensor_stack_wall_time_sec": sum_float("batch_tensor_stack_wall_time_sec"),
+        "exact_single_page_wall_time_sec": sum_float("exact_single_page_wall_time_sec"),
+        "approx_single_page_wall_time_sec": sum_float("approx_single_page_wall_time_sec"),
+        "exact_batched_page_wall_time_sec": sum_float("exact_batched_page_wall_time_sec"),
+        "coarse_score_wall_time_sec": sum_float("coarse_score_wall_time_sec"),
+        "topk_wall_time_sec": sum_float("topk_wall_time_sec"),
+        "gather_wall_time_sec": sum_float("gather_wall_time_sec"),
+        "pruned_exact_wall_time_sec": sum_float("pruned_exact_wall_time_sec"),
+        "mean_exact_single_page_wall_time_sec": mean_over_count(
+            "exact_single_page_wall_time_sec",
+            "single_exact_page_count",
+        ),
+        "mean_approx_single_page_wall_time_sec": mean_over_count(
+            "approx_single_page_wall_time_sec",
+            "single_approx_page_count",
+        ),
+        "mean_exact_batched_page_wall_time_sec": mean_over_count(
+            "exact_batched_page_wall_time_sec",
+            "batched_exact_page_count",
+        ),
+        "mean_coarse_score_wall_time_sec": mean_over_count(
+            "coarse_score_wall_time_sec",
+            "batched_approx_page_count",
+        ),
+        "mean_topk_wall_time_sec": mean_over_count(
+            "topk_wall_time_sec",
+            "batched_approx_page_count",
+        ),
+        "mean_gather_wall_time_sec": mean_over_count(
+            "gather_wall_time_sec",
+            "batched_approx_page_count",
+        ),
+        "mean_pruned_exact_wall_time_sec": mean_over_count(
+            "pruned_exact_wall_time_sec",
+            "batched_approx_page_count",
         ),
     }
 
@@ -1195,6 +1325,9 @@ def aggregate_efficiency_diagnostic_summaries(qid_summaries: list[dict]) -> dict
         "mean_estimated_candidate_compute_reduction_ratio": weighted_mean(
             "mean_estimated_candidate_compute_reduction_ratio",
             "token_pruning_page_count",
+        ),
+        "base_only_page_scoring_summary": aggregate_base_only_page_scoring_summaries(
+            [item.get("base_only_page_scoring_summary") for item in enabled_summaries]
         ),
     }
 
@@ -2066,6 +2199,12 @@ def main() -> None:
         qid_wall_time_start = time.perf_counter()
         page_feature_wall_time_sec = 0.0
         final_ranking_wall_time_sec = 0.0
+        base_only_page_scoring_diagnostics = (
+            BaseOnlyPageScoringDiagnostics()
+            if args.report_base_only_stage_diagnostics
+            and (fixed_base_only or staged_visual_rerank or visual_prefilter_exact_active)
+            else None
+        )
         cuda_peak_memory_allocated_mb: float | None = None
         cuda_peak_memory_reserved_mb: float | None = None
         if args.report_efficiency_diagnostics:
@@ -2266,6 +2405,7 @@ def main() -> None:
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                         page_batch_size=args.base_only_page_batch_size,
+                        timing_diagnostics=base_only_page_scoring_diagnostics,
                     )
                 elif staged_visual_rerank:
                     page_features = compute_base_only_page_features(
@@ -2312,6 +2452,7 @@ def main() -> None:
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                         page_batch_size=args.base_only_page_batch_size,
+                        timing_diagnostics=base_only_page_scoring_diagnostics,
                     )
                 else:
                     for doc_id, page_idx in page_specs:
@@ -2584,6 +2725,9 @@ def main() -> None:
             else []
         )
         token_pruning_diagnostic_summary = summarize_token_pruning_diagnostics(page_features)
+        base_only_page_scoring_summary = build_base_only_page_scoring_summary(
+            base_only_page_scoring_diagnostics
+        )
         ranking_focus_token_pruning_summary = summarize_ranking_focus_token_pruning(
             reranked_pages=reranked_pages,
             gold_doc_id_set=gold_doc_id_set,
@@ -2600,6 +2744,7 @@ def main() -> None:
                 candidate_page_count=len(page_features),
                 reranked_page_count=len(reranked_pages),
                 token_pruning_diagnostic_summary=token_pruning_diagnostic_summary,
+                base_only_page_scoring_summary=base_only_page_scoring_summary,
                 cuda_peak_memory_allocated_mb=cuda_peak_memory_allocated_mb,
                 cuda_peak_memory_reserved_mb=cuda_peak_memory_reserved_mb,
             )
@@ -2730,6 +2875,7 @@ def main() -> None:
             "vlm_record_count": len(vlm_records),
             "vlm_records": vlm_records,
             "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
+            "base_only_page_scoring_summary": base_only_page_scoring_summary,
             "efficiency_diagnostic_summary": efficiency_diagnostic_summary,
             "ranking_focus_token_pruning_summary": ranking_focus_token_pruning_summary,
             "visual_prefilter_exact_page_trace": visual_prefilter_exact_trace,
@@ -2806,6 +2952,9 @@ def main() -> None:
     token_pruning_diagnostic_summary = aggregate_token_pruning_diagnostic_summaries(
         [row["token_pruning_diagnostic_summary"] for row in all_rows]
     )
+    base_only_page_scoring_summary = aggregate_base_only_page_scoring_summaries(
+        [row.get("base_only_page_scoring_summary") for row in all_rows]
+    )
     efficiency_diagnostic_summary = aggregate_efficiency_diagnostic_summaries(
         [row.get("efficiency_diagnostic_summary", {}) for row in all_rows]
     )
@@ -2844,6 +2993,7 @@ def main() -> None:
         "resume_output_jsonl": args.resume_output_jsonl,
         "report_pruning_diagnostics": args.report_pruning_diagnostics,
         "report_efficiency_diagnostics": args.report_efficiency_diagnostics,
+        "report_base_only_stage_diagnostics": args.report_base_only_stage_diagnostics,
         "base_only_page_batch_size": args.base_only_page_batch_size,
         "approx_base_page_token_coarse_dtype": args.approx_base_page_token_coarse_dtype,
         "two_stage_exact_top_pages": args.two_stage_exact_top_pages,
@@ -2893,6 +3043,7 @@ def main() -> None:
         "grid_non_visual_values": grid_non_visual_values,
         "grid_balance_values": grid_balance_values,
         "token_pruning_diagnostic_summary": token_pruning_diagnostic_summary,
+        "base_only_page_scoring_summary": base_only_page_scoring_summary,
         "efficiency_diagnostic_summary": efficiency_diagnostic_summary,
         "ranking_focus_token_pruning_summary": ranking_focus_token_pruning_summary,
         "num_qids": len(all_rows),

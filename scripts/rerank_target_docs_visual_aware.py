@@ -8,6 +8,7 @@ import json
 import math
 import statistics
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -270,6 +271,30 @@ class TokenPruningDiagnostics:
     candidate_argmax_coverage_ratio: float | None
 
 
+@dataclass
+class BaseOnlyPageScoringDiagnostics:
+    page_count: int = 0
+    single_page_count: int = 0
+    single_exact_page_count: int = 0
+    single_approx_page_count: int = 0
+    batched_page_count: int = 0
+    batched_exact_page_count: int = 0
+    batched_approx_page_count: int = 0
+    flush_count: int = 0
+    single_flush_count: int = 0
+    batched_flush_count: int = 0
+    total_batched_batch_size: int = 0
+    max_batch_size: int = 0
+    batch_tensor_stack_wall_time_sec: float = 0.0
+    exact_single_page_wall_time_sec: float = 0.0
+    approx_single_page_wall_time_sec: float = 0.0
+    exact_batched_page_wall_time_sec: float = 0.0
+    coarse_score_wall_time_sec: float = 0.0
+    topk_wall_time_sec: float = 0.0
+    gather_wall_time_sec: float = 0.0
+    pruned_exact_wall_time_sec: float = 0.0
+
+
 def is_base_only_weights(weights: WeightConfig) -> bool:
     return (
         float(weights.visual) == 0.0
@@ -371,6 +396,22 @@ def make_base_only_page_feature(
             else float(token_pruning_diagnostics.candidate_argmax_coverage_ratio)
         ),
     )
+
+
+def _maybe_synchronize_device_for_timing(device) -> None:
+    import torch
+
+    if device is None or getattr(device, "type", None) != "cuda":
+        return
+    torch.cuda.synchronize(device)
+
+
+def _measure_with_optional_device_sync(device, fn):
+    _maybe_synchronize_device_for_timing(device)
+    start = time.perf_counter()
+    result = fn()
+    _maybe_synchronize_device_for_timing(device)
+    return result, float(time.perf_counter() - start)
 
 
 def compute_coarse_page_token_scores(
@@ -835,6 +876,7 @@ def compute_approx_base_page_score(
         report_pruning_diagnostics=report_pruning_diagnostics,
         learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
+        coarse_scores=coarse_scores,
     )
     return compute_exact_base_page_score(
         page_emb=pruned_page_emb,
@@ -1450,6 +1492,7 @@ def select_page_token_indices_for_base_only(
     report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
+    coarse_scores: torch.Tensor | None = None,
 ) -> tuple[list[int], TokenPruningDiagnostics | None]:
     import torch
 
@@ -1465,20 +1508,21 @@ def select_page_token_indices_for_base_only(
             "approx_page_token_selector='global_topk'."
         )
 
-    coarse_scores = compute_coarse_page_token_scores(
-        page_emb=page_emb,
-        query_emb=query_emb,
-        query_score_mask=query_score_mask,
-        approx_page_token_scorer=approx_page_token_scorer,
-        approx_page_token_query_prototypes=approx_page_token_query_prototypes,
-        query_axis_classes=query_axis_classes,
-        query_token_labels=query_token_labels,
-        visual_query_weight=approx_page_token_visual_query_weight,
-        non_visual_query_weight=approx_page_token_non_visual_query_weight,
-        unknown_query_weight=approx_page_token_unknown_query_weight,
-        informative_visual_query_weight=approx_page_token_informative_visual_weight,
-        coarse_score_dtype=coarse_score_dtype,
-    )
+    if coarse_scores is None:
+        coarse_scores = compute_coarse_page_token_scores(
+            page_emb=page_emb,
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+            approx_page_token_scorer=approx_page_token_scorer,
+            approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+            visual_query_weight=approx_page_token_visual_query_weight,
+            non_visual_query_weight=approx_page_token_non_visual_query_weight,
+            unknown_query_weight=approx_page_token_unknown_query_weight,
+            informative_visual_query_weight=approx_page_token_informative_visual_weight,
+            coarse_score_dtype=coarse_score_dtype,
+        )
     diagnostics: TokenPruningDiagnostics | None = None
     selector_candidate_indices = list(range(int(page_emb.shape[0])))
 
@@ -4157,6 +4201,7 @@ def compute_base_only_page_feature(
     report_pruning_diagnostics: bool = False,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
+    timing_diagnostics: BaseOnlyPageScoringDiagnostics | None = None,
 ) -> PageFeature:
     exact_base_page_score: float
     coarse_page_score: float | None = None
@@ -4166,44 +4211,96 @@ def compute_base_only_page_feature(
             raise ValueError(f"{base_score_source} requires a baseline page-score override.")
         exact_base_page_score = float(base_score_override)
     elif base_score_source == "exact_page_maxsim":
-        exact_base_page_score = compute_exact_base_page_score(
-            page_emb=page_emb,
-            query_emb=query_emb,
-            query_score_mask=query_score_mask,
-        )
+        if timing_diagnostics is None:
+            exact_base_page_score = compute_exact_base_page_score(
+                page_emb=page_emb,
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+            )
+        else:
+            exact_base_page_score, elapsed = _measure_with_optional_device_sync(
+                page_emb.device,
+                lambda: compute_exact_base_page_score(
+                    page_emb=page_emb,
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                ),
+            )
+            timing_diagnostics.exact_single_page_wall_time_sec += elapsed
     elif base_score_override is None:
-        exact_base_page_score, coarse_page_score, token_pruning_diagnostics = compute_approx_base_page_score_with_coarse_diagnostic(
-            page_emb=page_emb,
-            query_emb=query_emb,
-            query_score_mask=query_score_mask,
-            approx_page_token_topk=approx_page_token_topk,
-            approx_page_token_scorer=approx_page_token_scorer,
-            approx_page_token_query_prototypes=approx_page_token_query_prototypes,
-            approx_page_token_selector=approx_page_token_selector,
-            approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
-            query_axis_classes=query_axis_classes,
-            query_token_labels=query_token_labels,
-            page_token_classes=page_token_classes,
-            page_meta=page_meta,
-            approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
-            approx_page_token_label_reserve=approx_page_token_label_reserve,
-            approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
-            approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
-            approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
-            approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
-            approx_page_token_visual_query_weight=approx_page_token_visual_query_weight,
-            approx_page_token_non_visual_query_weight=approx_page_token_non_visual_query_weight,
-            approx_page_token_unknown_query_weight=approx_page_token_unknown_query_weight,
-            approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
-            approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
-            approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
-            approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
-            approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
-            approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
-            report_pruning_diagnostics=report_pruning_diagnostics,
-            learned_token_selector_model=learned_token_selector_model,
-            coarse_score_dtype=coarse_score_dtype,
-        )
+        if timing_diagnostics is None:
+            exact_base_page_score, coarse_page_score, token_pruning_diagnostics = compute_approx_base_page_score_with_coarse_diagnostic(
+                page_emb=page_emb,
+                query_emb=query_emb,
+                query_score_mask=query_score_mask,
+                approx_page_token_topk=approx_page_token_topk,
+                approx_page_token_scorer=approx_page_token_scorer,
+                approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+                approx_page_token_selector=approx_page_token_selector,
+                approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+                query_axis_classes=query_axis_classes,
+                query_token_labels=query_token_labels,
+                page_token_classes=page_token_classes,
+                page_meta=page_meta,
+                approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
+                approx_page_token_label_reserve=approx_page_token_label_reserve,
+                approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
+                approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
+                approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
+                approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+                approx_page_token_visual_query_weight=approx_page_token_visual_query_weight,
+                approx_page_token_non_visual_query_weight=approx_page_token_non_visual_query_weight,
+                approx_page_token_unknown_query_weight=approx_page_token_unknown_query_weight,
+                approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
+                approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
+                approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+                approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
+                approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+                approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
+                report_pruning_diagnostics=report_pruning_diagnostics,
+                learned_token_selector_model=learned_token_selector_model,
+                coarse_score_dtype=coarse_score_dtype,
+            )
+        else:
+            (
+                (exact_base_page_score, coarse_page_score, token_pruning_diagnostics),
+                elapsed,
+            ) = _measure_with_optional_device_sync(
+                page_emb.device,
+                lambda: compute_approx_base_page_score_with_coarse_diagnostic(
+                    page_emb=page_emb,
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                    approx_page_token_topk=approx_page_token_topk,
+                    approx_page_token_scorer=approx_page_token_scorer,
+                    approx_page_token_query_prototypes=approx_page_token_query_prototypes,
+                    approx_page_token_selector=approx_page_token_selector,
+                    approx_page_token_spatial_reserve=approx_page_token_spatial_reserve,
+                    query_axis_classes=query_axis_classes,
+                    query_token_labels=query_token_labels,
+                    page_token_classes=page_token_classes,
+                    page_meta=page_meta,
+                    approx_page_token_coverage_reserve=approx_page_token_coverage_reserve,
+                    approx_page_token_label_reserve=approx_page_token_label_reserve,
+                    approx_page_token_redundancy_lambda=approx_page_token_redundancy_lambda,
+                    approx_page_token_adaptive_k_mode=approx_page_token_adaptive_k_mode,
+                    approx_page_token_adaptive_k_min=approx_page_token_adaptive_k_min,
+                    approx_page_token_adaptive_k_max=approx_page_token_adaptive_k_max,
+                    approx_page_token_visual_query_weight=approx_page_token_visual_query_weight,
+                    approx_page_token_non_visual_query_weight=approx_page_token_non_visual_query_weight,
+                    approx_page_token_unknown_query_weight=approx_page_token_unknown_query_weight,
+                    approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
+                    approx_page_token_soft_visual_query_weight=approx_page_token_soft_visual_query_weight,
+                    approx_page_token_soft_patch_visual_bonus=approx_page_token_soft_patch_visual_bonus,
+                    approx_page_token_nonspatial_policy=approx_page_token_nonspatial_policy,
+                    approx_page_token_maxsim_greedy_candidate_budget=approx_page_token_maxsim_greedy_candidate_budget,
+                    approx_page_token_maxsim_preservation_target=approx_page_token_maxsim_preservation_target,
+                    report_pruning_diagnostics=report_pruning_diagnostics,
+                    learned_token_selector_model=learned_token_selector_model,
+                    coarse_score_dtype=coarse_score_dtype,
+                ),
+            )
+            timing_diagnostics.approx_single_page_wall_time_sec += elapsed
     else:
         exact_base_page_score = compute_approx_base_page_score(
             page_emb=page_emb,
@@ -4263,14 +4360,29 @@ def compute_base_only_page_feature_scores_batched(
     approx_page_token_unknown_query_weight: float,
     approx_page_token_informative_visual_weight: float,
     coarse_score_dtype: str,
+    timing_diagnostics: BaseOnlyPageScoringDiagnostics | None = None,
 ) -> tuple[list[float], list[float | None]]:
     import torch
 
     if base_score_source == "exact_page_maxsim":
-        score_matrix = batch_page_embs @ query_emb.T
-        full_best_scores = score_matrix.max(dim=1).values
-        active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
-        exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+        if timing_diagnostics is None:
+            score_matrix = batch_page_embs @ query_emb.T
+            full_best_scores = score_matrix.max(dim=1).values
+            active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
+            exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+        else:
+            exact_scores, elapsed = _measure_with_optional_device_sync(
+                batch_page_embs.device,
+                lambda: (
+                    (batch_page_embs @ query_emb.T)
+                    .max(dim=1)
+                    .values[:, query_score_mask.to(query_emb.device)]
+                    .sum(dim=1)
+                    .to(dtype=torch.float32)
+                    .tolist()
+                ),
+            )
+            timing_diagnostics.exact_batched_page_wall_time_sec += elapsed
         return exact_scores, [None for _ in exact_scores]
 
     if base_score_source not in {
@@ -4286,56 +4398,100 @@ def compute_base_only_page_feature_scores_batched(
     if topk <= 0:
         raise ValueError("Batched approximate base scoring requires approx_page_token_topk > 0.")
 
-    if coarse_score_dtype == "fp32" or batch_page_embs.device.type != "cuda":
-        batch_page_embs_coarse = batch_page_embs
-        query_emb_coarse = query_emb
-    else:
-        dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
-        batch_page_embs_coarse = batch_page_embs.to(dtype=dtype)
-        query_emb_coarse = query_emb.to(dtype=dtype)
+    def _build_coarse_scores() -> torch.Tensor:
+        if coarse_score_dtype == "fp32" or batch_page_embs.device.type != "cuda":
+            batch_page_embs_coarse = batch_page_embs
+            query_emb_coarse = query_emb
+        else:
+            dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
+            batch_page_embs_coarse = batch_page_embs.to(dtype=dtype)
+            query_emb_coarse = query_emb.to(dtype=dtype)
 
-    query_emb_active = query_emb_coarse
-    if int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
-        query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
-        if bool(query_mask_device.any()):
-            query_emb_active = query_emb_coarse[query_mask_device]
+        query_emb_active = query_emb_coarse
+        if int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
+            query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
+            if bool(query_mask_device.any()):
+                query_emb_active = query_emb_coarse[query_mask_device]
 
-    if approx_page_token_scorer == "query_mean":
-        coarse_query = build_weighted_query_mean(
-            query_emb=query_emb_coarse,
-            query_emb_active=query_emb_active,
-            query_score_mask=query_score_mask,
-            query_axis_classes=query_axis_classes,
-            query_token_labels=query_token_labels,
-            visual_query_weight=approx_page_token_visual_query_weight,
-            non_visual_query_weight=approx_page_token_non_visual_query_weight,
-            unknown_query_weight=approx_page_token_unknown_query_weight,
-            informative_visual_query_weight=approx_page_token_informative_visual_weight,
-        )
-        coarse_scores = (batch_page_embs_coarse @ coarse_query).to(dtype=torch.float32)
-    elif approx_page_token_scorer == "query_prototype_max":
-        prototype_count = max(1, int(approx_page_token_query_prototypes))
-        prototypes = build_query_prototypes(
-            query_emb=query_emb_active,
-            prototype_count=prototype_count,
-        ).to(device=batch_page_embs_coarse.device, dtype=batch_page_embs_coarse.dtype)
-        coarse_score_matrix = batch_page_embs_coarse @ prototypes.T
-        coarse_scores = coarse_score_matrix.max(dim=2).values.to(dtype=torch.float32)
-    elif approx_page_token_scorer == "query_token_max":
-        coarse_score_matrix = batch_page_embs_coarse @ query_emb_active.T
-        coarse_scores = coarse_score_matrix.max(dim=2).values.to(dtype=torch.float32)
-    else:
+        if approx_page_token_scorer == "query_mean":
+            coarse_query = build_weighted_query_mean(
+                query_emb=query_emb_coarse,
+                query_emb_active=query_emb_active,
+                query_score_mask=query_score_mask,
+                query_axis_classes=query_axis_classes,
+                query_token_labels=query_token_labels,
+                visual_query_weight=approx_page_token_visual_query_weight,
+                non_visual_query_weight=approx_page_token_non_visual_query_weight,
+                unknown_query_weight=approx_page_token_unknown_query_weight,
+                informative_visual_query_weight=approx_page_token_informative_visual_weight,
+            )
+            return (batch_page_embs_coarse @ coarse_query).to(dtype=torch.float32)
+        if approx_page_token_scorer == "query_prototype_max":
+            prototype_count = max(1, int(approx_page_token_query_prototypes))
+            prototypes = build_query_prototypes(
+                query_emb=query_emb_active,
+                prototype_count=prototype_count,
+            ).to(device=batch_page_embs_coarse.device, dtype=batch_page_embs_coarse.dtype)
+            coarse_score_matrix = batch_page_embs_coarse @ prototypes.T
+            return coarse_score_matrix.max(dim=2).values.to(dtype=torch.float32)
+        if approx_page_token_scorer == "query_token_max":
+            coarse_score_matrix = batch_page_embs_coarse @ query_emb_active.T
+            return coarse_score_matrix.max(dim=2).values.to(dtype=torch.float32)
         raise ValueError(f"Unsupported batched approx_page_token_scorer: {approx_page_token_scorer!r}")
 
-    top_indices = torch.topk(coarse_scores, k=topk, dim=1, largest=True, sorted=False).indices
-    gather_index = top_indices.unsqueeze(-1).expand(-1, -1, batch_page_embs.shape[-1])
-    pruned_page_embs = batch_page_embs.gather(dim=1, index=gather_index)
+    if timing_diagnostics is None:
+        coarse_scores = _build_coarse_scores()
+    else:
+        coarse_scores, elapsed = _measure_with_optional_device_sync(
+            batch_page_embs.device,
+            _build_coarse_scores,
+        )
+        timing_diagnostics.coarse_score_wall_time_sec += elapsed
+
+    if timing_diagnostics is None:
+        top_indices = torch.topk(coarse_scores, k=topk, dim=1, largest=True, sorted=False).indices
+    else:
+        top_indices, elapsed = _measure_with_optional_device_sync(
+            batch_page_embs.device,
+            lambda: torch.topk(coarse_scores, k=topk, dim=1, largest=True, sorted=False).indices,
+        )
+        timing_diagnostics.topk_wall_time_sec += elapsed
+    if timing_diagnostics is None:
+        gather_index = top_indices.unsqueeze(-1).expand(-1, -1, batch_page_embs.shape[-1])
+        pruned_page_embs = batch_page_embs.gather(dim=1, index=gather_index)
+    else:
+        gather_index, pruned_page_embs = None, None
+        (gather_index, pruned_page_embs), elapsed = _measure_with_optional_device_sync(
+            batch_page_embs.device,
+            lambda: (
+                top_indices.unsqueeze(-1).expand(-1, -1, batch_page_embs.shape[-1]),
+                batch_page_embs.gather(
+                    dim=1,
+                    index=top_indices.unsqueeze(-1).expand(-1, -1, batch_page_embs.shape[-1]),
+                ),
+            ),
+        )
+        timing_diagnostics.gather_wall_time_sec += elapsed
     coarse_selected_scores = coarse_scores.gather(dim=1, index=top_indices).sum(dim=1).to(dtype=torch.float32)
 
-    score_matrix = pruned_page_embs @ query_emb.T
-    full_best_scores = score_matrix.max(dim=1).values
-    active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
-    exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+    if timing_diagnostics is None:
+        score_matrix = pruned_page_embs @ query_emb.T
+        full_best_scores = score_matrix.max(dim=1).values
+        active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
+        exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+    else:
+        exact_scores, elapsed = _measure_with_optional_device_sync(
+            batch_page_embs.device,
+            lambda: (
+                (pruned_page_embs @ query_emb.T)
+                .max(dim=1)
+                .values[:, query_score_mask.to(query_emb.device)]
+                .sum(dim=1)
+                .to(dtype=torch.float32)
+                .tolist()
+            ),
+        )
+        timing_diagnostics.pruned_exact_wall_time_sec += elapsed
     coarse_scores_out = coarse_selected_scores.tolist()
     return exact_scores, coarse_scores_out
 
@@ -4376,6 +4532,7 @@ def compute_base_only_page_features(
     learned_token_selector_model: dict | None,
     coarse_score_dtype: str,
     page_batch_size: int,
+    timing_diagnostics: BaseOnlyPageScoringDiagnostics | None = None,
 ) -> list[PageFeature]:
     import torch
 
@@ -4403,8 +4560,20 @@ def compute_base_only_page_features(
         nonlocal batch_meta, batch_embs, batch_token_count
         if not batch_meta:
             return
+        batch_size = len(batch_meta)
+        if timing_diagnostics is not None:
+            timing_diagnostics.flush_count += 1
         if len(batch_meta) == 1 or not can_batch:
+            if timing_diagnostics is not None:
+                timing_diagnostics.single_flush_count += 1
             for (doc_id, page_idx, base_score_override), page_emb in zip(batch_meta, batch_embs):
+                if timing_diagnostics is not None:
+                    timing_diagnostics.page_count += 1
+                    timing_diagnostics.single_page_count += 1
+                    if base_score_source == "exact_page_maxsim":
+                        timing_diagnostics.single_exact_page_count += 1
+                    elif base_score_override is None:
+                        timing_diagnostics.single_approx_page_count += 1
                 features.append(
                     compute_base_only_page_feature(
                         page_emb=page_emb,
@@ -4449,10 +4618,27 @@ def compute_base_only_page_features(
                         report_pruning_diagnostics=report_pruning_diagnostics,
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=coarse_score_dtype,
+                        timing_diagnostics=timing_diagnostics,
                     )
                 )
         else:
-            batch_tensor = torch.stack(batch_embs, dim=0)
+            if timing_diagnostics is not None:
+                timing_diagnostics.batched_flush_count += 1
+                timing_diagnostics.page_count += batch_size
+                timing_diagnostics.batched_page_count += batch_size
+                timing_diagnostics.total_batched_batch_size += batch_size
+                timing_diagnostics.max_batch_size = max(timing_diagnostics.max_batch_size, batch_size)
+                if base_score_source == "exact_page_maxsim":
+                    timing_diagnostics.batched_exact_page_count += batch_size
+                else:
+                    timing_diagnostics.batched_approx_page_count += batch_size
+                batch_tensor, elapsed = _measure_with_optional_device_sync(
+                    batch_embs[0].device,
+                    lambda: torch.stack(batch_embs, dim=0),
+                )
+                timing_diagnostics.batch_tensor_stack_wall_time_sec += elapsed
+            else:
+                batch_tensor = torch.stack(batch_embs, dim=0)
             batch_scores, batch_coarse_scores = compute_base_only_page_feature_scores_batched(
                 batch_page_embs=batch_tensor,
                 query_emb=query_emb,
@@ -4468,6 +4654,7 @@ def compute_base_only_page_features(
                 approx_page_token_unknown_query_weight=approx_page_token_unknown_query_weight,
                 approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
                 coarse_score_dtype=coarse_score_dtype,
+                timing_diagnostics=timing_diagnostics,
             )
             for (doc_id, page_idx, base_score_override), batch_score, coarse_score in zip(
                 batch_meta,
