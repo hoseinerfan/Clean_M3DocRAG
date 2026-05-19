@@ -59,6 +59,7 @@ from scripts.rerank_target_docs_visual_aware import (
     load_learned_doc_reranker,
     load_learned_token_selector_model,
     load_patch_axis_classes_for_pages,
+    prepare_coarse_query_state,
     load_query_route_config,
     load_splice_query_axis_classes,
     make_base_only_page_feature,
@@ -2346,6 +2347,30 @@ def main() -> None:
                 )
 
             page_features = []
+            base_only_prepared_query_state = (
+                prepare_coarse_query_state(
+                    query_emb=query_emb,
+                    query_score_mask=query_score_mask,
+                    approx_page_token_scorer=args.approx_base_page_token_scorer,
+                    approx_page_token_query_prototypes=args.approx_base_page_token_query_prototypes,
+                    query_axis_classes=query_axis_classes,
+                    query_token_labels=query_token_labels,
+                    visual_query_weight=args.approx_base_page_token_visual_query_weight,
+                    non_visual_query_weight=args.approx_base_page_token_non_visual_query_weight,
+                    unknown_query_weight=args.approx_base_page_token_unknown_query_weight,
+                    informative_visual_query_weight=args.approx_base_page_token_informative_visual_weight,
+                    coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
+                )
+                if (
+                    args.base_score_source in {
+                        "approx_page_maxsim_topk",
+                        "two_stage_page_maxsim",
+                        "two_stage_doc_maxsim",
+                        "visual_prefilter_exact_page_maxsim",
+                    }
+                )
+                else None
+            )
             with torch.no_grad():
                 page_token_classes_by_uid = (
                     None
@@ -2405,6 +2430,7 @@ def main() -> None:
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                         page_batch_size=args.base_only_page_batch_size,
+                        prepared_query_state=base_only_prepared_query_state,
                         timing_diagnostics=base_only_page_scoring_diagnostics,
                     )
                 elif staged_visual_rerank:
@@ -2452,6 +2478,7 @@ def main() -> None:
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                         page_batch_size=args.base_only_page_batch_size,
+                        prepared_query_state=base_only_prepared_query_state,
                         timing_diagnostics=base_only_page_scoring_diagnostics,
                     )
                 else:

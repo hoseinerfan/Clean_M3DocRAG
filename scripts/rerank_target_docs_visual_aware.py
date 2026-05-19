@@ -414,6 +414,64 @@ def _measure_with_optional_device_sync(device, fn):
     return result, float(time.perf_counter() - start)
 
 
+def prepare_coarse_query_state(
+    *,
+    query_emb: torch.Tensor,
+    query_score_mask: torch.Tensor | None,
+    approx_page_token_scorer: str,
+    approx_page_token_query_prototypes: int = 4,
+    query_axis_classes: list[str] | None = None,
+    query_token_labels: list[str] | None = None,
+    visual_query_weight: float = 1.0,
+    non_visual_query_weight: float = 1.0,
+    unknown_query_weight: float = 1.0,
+    informative_visual_query_weight: float = 1.0,
+    coarse_score_dtype: str = "fp32",
+) -> dict:
+    import torch
+
+    if coarse_score_dtype == "fp32" or query_emb.device.type != "cuda":
+        query_emb_coarse = query_emb
+    else:
+        dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
+        query_emb_coarse = query_emb.to(dtype=dtype)
+
+    query_emb_active = query_emb_coarse
+    if query_score_mask is not None and int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
+        query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
+        if bool(query_mask_device.any()):
+            query_emb_active = query_emb_coarse[query_mask_device]
+
+    state = {
+        "approx_page_token_scorer": approx_page_token_scorer,
+        "coarse_score_dtype": coarse_score_dtype,
+        "device": str(query_emb.device),
+        "dtype": str(query_emb_coarse.dtype),
+        "query_emb_active": query_emb_active,
+    }
+    if approx_page_token_scorer == "query_mean":
+        state["coarse_query"] = build_weighted_query_mean(
+            query_emb=query_emb_coarse,
+            query_emb_active=query_emb_active,
+            query_score_mask=query_score_mask,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+            visual_query_weight=visual_query_weight,
+            non_visual_query_weight=non_visual_query_weight,
+            unknown_query_weight=unknown_query_weight,
+            informative_visual_query_weight=informative_visual_query_weight,
+        )
+    elif approx_page_token_scorer == "query_prototype_max":
+        prototype_count = max(1, int(approx_page_token_query_prototypes))
+        state["prototypes"] = build_query_prototypes(
+            query_emb=query_emb_active,
+            prototype_count=prototype_count,
+        ).to(device=query_emb_coarse.device, dtype=query_emb_coarse.dtype)
+    elif approx_page_token_scorer != "query_token_max":
+        raise ValueError(f"Unsupported approx_page_token_scorer: {approx_page_token_scorer!r}")
+    return state
+
+
 def compute_coarse_page_token_scores(
     *,
     page_emb: torch.Tensor,
@@ -428,42 +486,62 @@ def compute_coarse_page_token_scores(
     unknown_query_weight: float = 1.0,
     informative_visual_query_weight: float = 1.0,
     coarse_score_dtype: str = "fp32",
+    prepared_query_state: dict | None = None,
 ) -> torch.Tensor:
     import torch
 
-    if coarse_score_dtype == "fp32" or page_emb.device.type != "cuda":
-        page_emb_coarse = page_emb
-        query_emb_coarse = query_emb
+    use_prepared_state = (
+        prepared_query_state is not None
+        and prepared_query_state.get("approx_page_token_scorer") == approx_page_token_scorer
+        and prepared_query_state.get("coarse_score_dtype") == coarse_score_dtype
+        and prepared_query_state.get("device") == str(page_emb.device)
+    )
+    if use_prepared_state:
+        query_emb_active = prepared_query_state["query_emb_active"]
+        target_dtype = query_emb_active.dtype
+        page_emb_coarse = page_emb if page_emb.dtype == target_dtype else page_emb.to(dtype=target_dtype)
+        query_emb_coarse = query_emb if query_emb.dtype == target_dtype else query_emb.to(dtype=target_dtype)
     else:
-        dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
-        page_emb_coarse = page_emb.to(dtype=dtype)
-        query_emb_coarse = query_emb.to(dtype=dtype)
+        if coarse_score_dtype == "fp32" or page_emb.device.type != "cuda":
+            page_emb_coarse = page_emb
+            query_emb_coarse = query_emb
+        else:
+            dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
+            page_emb_coarse = page_emb.to(dtype=dtype)
+            query_emb_coarse = query_emb.to(dtype=dtype)
 
-    query_emb_active = query_emb_coarse
-    if query_score_mask is not None and int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
-        query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
-        if bool(query_mask_device.any()):
-            query_emb_active = query_emb_coarse[query_mask_device]
+        query_emb_active = query_emb_coarse
+        if query_score_mask is not None and int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
+            query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
+            if bool(query_mask_device.any()):
+                query_emb_active = query_emb_coarse[query_mask_device]
 
     if approx_page_token_scorer == "query_mean":
-        coarse_query = build_weighted_query_mean(
-            query_emb=query_emb_coarse,
-            query_emb_active=query_emb_active,
-            query_score_mask=query_score_mask,
-            query_axis_classes=query_axis_classes,
-            query_token_labels=query_token_labels,
-            visual_query_weight=visual_query_weight,
-            non_visual_query_weight=non_visual_query_weight,
-            unknown_query_weight=unknown_query_weight,
-            informative_visual_query_weight=informative_visual_query_weight,
+        coarse_query = (
+            prepared_query_state["coarse_query"]
+            if use_prepared_state and "coarse_query" in prepared_query_state
+            else build_weighted_query_mean(
+                query_emb=query_emb_coarse,
+                query_emb_active=query_emb_active,
+                query_score_mask=query_score_mask,
+                query_axis_classes=query_axis_classes,
+                query_token_labels=query_token_labels,
+                visual_query_weight=visual_query_weight,
+                non_visual_query_weight=non_visual_query_weight,
+                unknown_query_weight=unknown_query_weight,
+                informative_visual_query_weight=informative_visual_query_weight,
+            )
         )
         return (page_emb_coarse @ coarse_query).to(dtype=torch.float32)
     if approx_page_token_scorer == "query_prototype_max":
-        prototype_count = max(1, int(approx_page_token_query_prototypes))
-        prototypes = build_query_prototypes(
-            query_emb=query_emb_active,
-            prototype_count=prototype_count,
-        ).to(device=page_emb_coarse.device, dtype=page_emb_coarse.dtype)
+        if use_prepared_state and "prototypes" in prepared_query_state:
+            prototypes = prepared_query_state["prototypes"]
+        else:
+            prototype_count = max(1, int(approx_page_token_query_prototypes))
+            prototypes = build_query_prototypes(
+                query_emb=query_emb_active,
+                prototype_count=prototype_count,
+            ).to(device=page_emb_coarse.device, dtype=page_emb_coarse.dtype)
         score_matrix = page_emb_coarse @ prototypes.T
         return score_matrix.max(dim=1).values.to(dtype=torch.float32)
     if approx_page_token_scorer == "query_token_max":
@@ -844,6 +922,7 @@ def compute_approx_base_page_score(
     report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
+    prepared_query_state: dict | None = None,
 ) -> float:
     pruned_page_emb, _diagnostics = maybe_prune_page_tokens_for_base_only(
         page_emb=page_emb,
@@ -876,7 +955,7 @@ def compute_approx_base_page_score(
         report_pruning_diagnostics=report_pruning_diagnostics,
         learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
-        coarse_scores=coarse_scores,
+        prepared_query_state=prepared_query_state,
     )
     return compute_exact_base_page_score(
         page_emb=pruned_page_emb,
@@ -917,6 +996,7 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
     report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
+    prepared_query_state: dict | None = None,
 ) -> tuple[float, float, TokenPruningDiagnostics | None]:
     import torch
 
@@ -933,6 +1013,7 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
         unknown_query_weight=approx_page_token_unknown_query_weight,
         informative_visual_query_weight=approx_page_token_informative_visual_weight,
         coarse_score_dtype=coarse_score_dtype,
+        prepared_query_state=prepared_query_state,
     )
     top_indices, diagnostics = select_page_token_indices_for_base_only(
         page_emb=page_emb,
@@ -965,6 +1046,7 @@ def compute_approx_base_page_score_with_coarse_diagnostic(
         report_pruning_diagnostics=report_pruning_diagnostics,
         learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
+        prepared_query_state=prepared_query_state,
     )
     top_index_tensor = torch.tensor(top_indices, device=page_emb.device, dtype=torch.long)
     pruned_page_emb = page_emb.index_select(0, top_index_tensor)
@@ -1492,6 +1574,7 @@ def select_page_token_indices_for_base_only(
     report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
+    prepared_query_state: dict | None = None,
     coarse_scores: torch.Tensor | None = None,
 ) -> tuple[list[int], TokenPruningDiagnostics | None]:
     import torch
@@ -1522,6 +1605,7 @@ def select_page_token_indices_for_base_only(
             unknown_query_weight=approx_page_token_unknown_query_weight,
             informative_visual_query_weight=approx_page_token_informative_visual_weight,
             coarse_score_dtype=coarse_score_dtype,
+            prepared_query_state=prepared_query_state,
         )
     diagnostics: TokenPruningDiagnostics | None = None
     selector_candidate_indices = list(range(int(page_emb.shape[0])))
@@ -2111,6 +2195,7 @@ def maybe_prune_page_tokens_for_base_only(
     report_pruning_diagnostics: bool,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
+    prepared_query_state: dict | None = None,
 ) -> tuple[torch.Tensor, TokenPruningDiagnostics | None]:
     import torch
 
@@ -2153,6 +2238,7 @@ def maybe_prune_page_tokens_for_base_only(
         report_pruning_diagnostics=report_pruning_diagnostics,
         learned_token_selector_model=learned_token_selector_model,
         coarse_score_dtype=coarse_score_dtype,
+        prepared_query_state=prepared_query_state,
     )
     top_index_tensor = torch.tensor(top_indices, device=page_emb.device, dtype=torch.long)
     return page_emb.index_select(0, top_index_tensor), diagnostics
@@ -4201,6 +4287,7 @@ def compute_base_only_page_feature(
     report_pruning_diagnostics: bool = False,
     learned_token_selector_model: dict | None = None,
     coarse_score_dtype: str = "fp32",
+    prepared_query_state: dict | None = None,
     timing_diagnostics: BaseOnlyPageScoringDiagnostics | None = None,
 ) -> PageFeature:
     exact_base_page_score: float
@@ -4260,6 +4347,7 @@ def compute_base_only_page_feature(
                 report_pruning_diagnostics=report_pruning_diagnostics,
                 learned_token_selector_model=learned_token_selector_model,
                 coarse_score_dtype=coarse_score_dtype,
+                prepared_query_state=prepared_query_state,
             )
         else:
             (
@@ -4298,6 +4386,7 @@ def compute_base_only_page_feature(
                     report_pruning_diagnostics=report_pruning_diagnostics,
                     learned_token_selector_model=learned_token_selector_model,
                     coarse_score_dtype=coarse_score_dtype,
+                    prepared_query_state=prepared_query_state,
                 ),
             )
             timing_diagnostics.approx_single_page_wall_time_sec += elapsed
@@ -4333,6 +4422,7 @@ def compute_base_only_page_feature(
             report_pruning_diagnostics=report_pruning_diagnostics,
             learned_token_selector_model=learned_token_selector_model,
             coarse_score_dtype=coarse_score_dtype,
+            prepared_query_state=prepared_query_state,
         )
     base_page_score = exact_base_page_score if base_score_override is None else float(base_score_override)
     return make_base_only_page_feature(
@@ -4360,6 +4450,7 @@ def compute_base_only_page_feature_scores_batched(
     approx_page_token_unknown_query_weight: float,
     approx_page_token_informative_visual_weight: float,
     coarse_score_dtype: str,
+    prepared_query_state: dict | None = None,
     timing_diagnostics: BaseOnlyPageScoringDiagnostics | None = None,
 ) -> tuple[list[float], list[float | None]]:
     import torch
@@ -4399,39 +4490,60 @@ def compute_base_only_page_feature_scores_batched(
         raise ValueError("Batched approximate base scoring requires approx_page_token_topk > 0.")
 
     def _build_coarse_scores() -> torch.Tensor:
-        if coarse_score_dtype == "fp32" or batch_page_embs.device.type != "cuda":
-            batch_page_embs_coarse = batch_page_embs
-            query_emb_coarse = query_emb
+        use_prepared_state = (
+            prepared_query_state is not None
+            and prepared_query_state.get("approx_page_token_scorer") == approx_page_token_scorer
+            and prepared_query_state.get("coarse_score_dtype") == coarse_score_dtype
+            and prepared_query_state.get("device") == str(batch_page_embs.device)
+        )
+        if use_prepared_state:
+            query_emb_active = prepared_query_state["query_emb_active"]
+            target_dtype = query_emb_active.dtype
+            batch_page_embs_coarse = (
+                batch_page_embs if batch_page_embs.dtype == target_dtype else batch_page_embs.to(dtype=target_dtype)
+            )
+            query_emb_coarse = query_emb if query_emb.dtype == target_dtype else query_emb.to(dtype=target_dtype)
         else:
-            dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
-            batch_page_embs_coarse = batch_page_embs.to(dtype=dtype)
-            query_emb_coarse = query_emb.to(dtype=dtype)
+            if coarse_score_dtype == "fp32" or batch_page_embs.device.type != "cuda":
+                batch_page_embs_coarse = batch_page_embs
+                query_emb_coarse = query_emb
+            else:
+                dtype = torch.bfloat16 if coarse_score_dtype == "bf16" else torch.float16
+                batch_page_embs_coarse = batch_page_embs.to(dtype=dtype)
+                query_emb_coarse = query_emb.to(dtype=dtype)
 
-        query_emb_active = query_emb_coarse
-        if int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
-            query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
-            if bool(query_mask_device.any()):
-                query_emb_active = query_emb_coarse[query_mask_device]
+            query_emb_active = query_emb_coarse
+            if int(query_score_mask.numel()) == int(query_emb_coarse.shape[0]):
+                query_mask_device = query_score_mask.to(device=query_emb_coarse.device, dtype=torch.bool)
+                if bool(query_mask_device.any()):
+                    query_emb_active = query_emb_coarse[query_mask_device]
 
         if approx_page_token_scorer == "query_mean":
-            coarse_query = build_weighted_query_mean(
-                query_emb=query_emb_coarse,
-                query_emb_active=query_emb_active,
-                query_score_mask=query_score_mask,
-                query_axis_classes=query_axis_classes,
-                query_token_labels=query_token_labels,
-                visual_query_weight=approx_page_token_visual_query_weight,
-                non_visual_query_weight=approx_page_token_non_visual_query_weight,
-                unknown_query_weight=approx_page_token_unknown_query_weight,
-                informative_visual_query_weight=approx_page_token_informative_visual_weight,
+            coarse_query = (
+                prepared_query_state["coarse_query"]
+                if use_prepared_state and "coarse_query" in prepared_query_state
+                else build_weighted_query_mean(
+                    query_emb=query_emb_coarse,
+                    query_emb_active=query_emb_active,
+                    query_score_mask=query_score_mask,
+                    query_axis_classes=query_axis_classes,
+                    query_token_labels=query_token_labels,
+                    visual_query_weight=approx_page_token_visual_query_weight,
+                    non_visual_query_weight=approx_page_token_non_visual_query_weight,
+                    unknown_query_weight=approx_page_token_unknown_query_weight,
+                    informative_visual_query_weight=approx_page_token_informative_visual_weight,
+                )
             )
             return (batch_page_embs_coarse @ coarse_query).to(dtype=torch.float32)
         if approx_page_token_scorer == "query_prototype_max":
-            prototype_count = max(1, int(approx_page_token_query_prototypes))
-            prototypes = build_query_prototypes(
-                query_emb=query_emb_active,
-                prototype_count=prototype_count,
-            ).to(device=batch_page_embs_coarse.device, dtype=batch_page_embs_coarse.dtype)
+            if use_prepared_state and "prototypes" in prepared_query_state:
+                prototypes = prepared_query_state["prototypes"]
+            else:
+                prototype_count = max(1, int(approx_page_token_query_prototypes))
+                prototypes = build_query_prototypes(
+                    query_emb=query_emb_active,
+                    prototype_count=prototype_count,
+                ).to(device=batch_page_embs_coarse.device, dtype=batch_page_embs_coarse.dtype)
             coarse_score_matrix = batch_page_embs_coarse @ prototypes.T
             return coarse_score_matrix.max(dim=2).values.to(dtype=torch.float32)
         if approx_page_token_scorer == "query_token_max":
@@ -4532,6 +4644,7 @@ def compute_base_only_page_features(
     learned_token_selector_model: dict | None,
     coarse_score_dtype: str,
     page_batch_size: int,
+    prepared_query_state: dict | None = None,
     timing_diagnostics: BaseOnlyPageScoringDiagnostics | None = None,
 ) -> list[PageFeature]:
     import torch
@@ -4618,6 +4731,7 @@ def compute_base_only_page_features(
                         report_pruning_diagnostics=report_pruning_diagnostics,
                         learned_token_selector_model=learned_token_selector_model,
                         coarse_score_dtype=coarse_score_dtype,
+                        prepared_query_state=prepared_query_state,
                         timing_diagnostics=timing_diagnostics,
                     )
                 )
@@ -4654,6 +4768,7 @@ def compute_base_only_page_features(
                 approx_page_token_unknown_query_weight=approx_page_token_unknown_query_weight,
                 approx_page_token_informative_visual_weight=approx_page_token_informative_visual_weight,
                 coarse_score_dtype=coarse_score_dtype,
+                prepared_query_state=prepared_query_state,
                 timing_diagnostics=timing_diagnostics,
             )
             for (doc_id, page_idx, base_score_override), batch_score, coarse_score in zip(
@@ -6654,6 +6769,28 @@ def main() -> None:
     query_emb = query_emb.to(device=device, dtype=torch.float32)
 
     page_features: list[PageFeature] = []
+    base_only_prepared_query_state = (
+        prepare_coarse_query_state(
+            query_emb=query_emb,
+            query_score_mask=query_score_mask,
+            approx_page_token_scorer=args.approx_base_page_token_scorer,
+            approx_page_token_query_prototypes=args.approx_base_page_token_query_prototypes,
+            query_axis_classes=query_axis_classes,
+            query_token_labels=query_token_labels,
+            visual_query_weight=args.approx_base_page_token_visual_query_weight,
+            non_visual_query_weight=args.approx_base_page_token_non_visual_query_weight,
+            unknown_query_weight=args.approx_base_page_token_unknown_query_weight,
+            informative_visual_query_weight=args.approx_base_page_token_informative_visual_weight,
+            coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
+        )
+        if args.base_score_source in {
+            "approx_page_maxsim_topk",
+            "two_stage_page_maxsim",
+            "two_stage_doc_maxsim",
+            "visual_prefilter_exact_page_maxsim",
+        }
+        else None
+    )
     with torch.no_grad():
         if fixed_base_only:
             page_features = compute_base_only_page_features(
@@ -6700,6 +6837,7 @@ def main() -> None:
                 learned_token_selector_model=learned_token_selector_model,
                 coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                 page_batch_size=args.base_only_page_batch_size,
+                prepared_query_state=base_only_prepared_query_state,
             )
         elif staged_visual_rerank:
             page_features = compute_base_only_page_features(
@@ -6746,6 +6884,7 @@ def main() -> None:
                 learned_token_selector_model=learned_token_selector_model,
                 coarse_score_dtype=args.approx_base_page_token_coarse_dtype,
                 page_batch_size=args.base_only_page_batch_size,
+                prepared_query_state=base_only_prepared_query_state,
             )
         else:
             for doc_id, page_idx in page_specs:
