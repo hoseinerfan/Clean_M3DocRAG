@@ -735,7 +735,23 @@ page_hit@4 68/100
 doc_hit@4 71/100
 ```
 
-OpenDocVQA full baseline and full `plain_top224` metrics are pending the sharded retrieval merge/evaluation.
+Observed full baseline after merging 64 retrieval shards:
+
+```text
+n_qids 41017
+page_recall@1 0.4251
+page_recall@4 0.5803
+page_recall@20 0.6968
+page_recall@100 0.7949
+page_recall@1000 0.9130
+doc_recall@1 0.4334
+doc_recall@4 0.5944
+doc_recall@20 0.7241
+doc_recall@100 0.8401
+doc_recall@1000 0.9668
+page_hit@4 26161/41017
+doc_hit@4 26756/41017
+```
 
 `plain_top224`:
 
@@ -746,6 +762,33 @@ bash opendocvqa/run_plain_top224_opendocvqa.sh
   --pred "$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
   --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
 ```
+
+For the full OpenDocVQA set, run `plain_top224` as a sharded GPU array after the merged baseline prediction exists:
+
+```bash
+sbatch --time=24:00:00 --array=0-63%4 \
+  --export=ALL,NUM_SHARDS=64,TOP_PAGES=1000,BASE_ONLY_PAGE_BATCH_SIZE=64 \
+  opendocvqa/sbatch_plain_top224_opendocvqa_array.sh
+```
+
+Merge sharded `plain_top224` predictions:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/merge_retrieval_predictions.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_shards/shard_*_of_64_prediction.json" \
+  --output-json "$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
+  --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
+```
+
+Then evaluate:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
+  --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
+```
+
+OpenDocVQA full `plain_top224` metrics are pending the sharded rerank merge/evaluation.
 
 ## Common Sanity Check
 
