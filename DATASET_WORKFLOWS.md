@@ -94,6 +94,39 @@ source vidore/env_hpc.sh
 
 The table is sorted by the highest `both_page_miss@4` rate by default. The JSON output also keeps example questions where both systems miss the gold page in the top 4.
 
+To inspect concrete failed qids and gold page image paths, use `mmdocir/show_failed_gold_pages.py`.
+
+MMDocIR metadata-style failures:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/show_failed_gold_pages.py \
+  --data-root "$LOCAL_DATA_DIR/mm-docir" \
+  --exact-pred "$LOCAL_OUTPUT_DIR/mmdocir/baseline_ret1000.json" \
+  --compact-pred "$LOCAL_OUTPUT_DIR/mmdocir/plain_top224_ret1000_prediction.json" \
+  --where metadata.type=meta-data \
+  --fail-mode both_page_miss \
+  --max-examples 10 \
+  --top-retrieved 3 \
+  --copy-gold-pages-dir "$LOCAL_OUTPUT_DIR/mmdocir/failed_gold_pages/meta-data" \
+  --output-md "$LOCAL_OUTPUT_DIR/mmdocir/failed_gold_pages_meta-data.md"
+```
+
+ViDoRe finance/table-heavy failures:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/show_failed_gold_pages.py \
+  --data-root "$LOCAL_DATA_DIR/vidore-v3" \
+  --exact-pred "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000.json" \
+  --compact-pred "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
+  --where metadata.repo_slug=finance_fr \
+  --where metadata.content_type~=Table \
+  --fail-mode both_page_miss \
+  --max-examples 10 \
+  --top-retrieved 3 \
+  --copy-gold-pages-dir "$LOCAL_OUTPUT_DIR/vidore-v3/failed_gold_pages/finance_fr_table" \
+  --output-md "$LOCAL_OUTPUT_DIR/vidore-v3/failed_gold_pages_finance_fr_table.md"
+```
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |
