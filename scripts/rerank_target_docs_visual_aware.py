@@ -688,9 +688,12 @@ def compute_exact_base_page_score(
     query_emb: torch.Tensor,
     query_score_mask: torch.Tensor,
 ) -> float:
-    score_matrix = page_emb @ query_emb.T
-    full_best_scores = score_matrix.max(dim=0).values
-    active_best_scores = full_best_scores[query_score_mask.to(full_best_scores.device)]
+    query_emb_active, _query_mask_device = _select_active_query_embeddings(
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+    )
+    score_matrix_active = page_emb @ query_emb_active.T
+    active_best_scores = score_matrix_active.max(dim=0).values
     return float(active_best_scores.sum().item())
 
 
@@ -4455,19 +4458,22 @@ def compute_base_only_page_feature_scores_batched(
 ) -> tuple[list[float], list[float | None]]:
     import torch
 
+    query_emb_active, _query_mask_device = _select_active_query_embeddings(
+        query_emb=query_emb,
+        query_score_mask=query_score_mask,
+    )
+
     if base_score_source == "exact_page_maxsim":
         if timing_diagnostics is None:
-            score_matrix = batch_page_embs @ query_emb.T
-            full_best_scores = score_matrix.max(dim=1).values
-            active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
-            exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+            score_matrix_active = batch_page_embs @ query_emb_active.T
+            exact_scores = score_matrix_active.max(dim=1).values.sum(dim=1).to(dtype=torch.float32).tolist()
         else:
             exact_scores, elapsed = _measure_with_optional_device_sync(
                 batch_page_embs.device,
                 lambda: (
-                    (batch_page_embs @ query_emb.T)
+                    (batch_page_embs @ query_emb_active.T)
                     .max(dim=1)
-                    .values[:, query_score_mask.to(query_emb.device)]
+                    .values
                     .sum(dim=1)
                     .to(dtype=torch.float32)
                     .tolist()
@@ -4587,17 +4593,15 @@ def compute_base_only_page_feature_scores_batched(
     coarse_selected_scores = coarse_scores.gather(dim=1, index=top_indices).sum(dim=1).to(dtype=torch.float32)
 
     if timing_diagnostics is None:
-        score_matrix = pruned_page_embs @ query_emb.T
-        full_best_scores = score_matrix.max(dim=1).values
-        active_best_scores = full_best_scores[:, query_score_mask.to(full_best_scores.device)]
-        exact_scores = active_best_scores.sum(dim=1).to(dtype=torch.float32).tolist()
+        score_matrix_active = pruned_page_embs @ query_emb_active.T
+        exact_scores = score_matrix_active.max(dim=1).values.sum(dim=1).to(dtype=torch.float32).tolist()
     else:
         exact_scores, elapsed = _measure_with_optional_device_sync(
             batch_page_embs.device,
             lambda: (
-                (pruned_page_embs @ query_emb.T)
+                (pruned_page_embs @ query_emb_active.T)
                 .max(dim=1)
-                .values[:, query_score_mask.to(query_emb.device)]
+                .values
                 .sum(dim=1)
                 .to(dtype=torch.float32)
                 .tolist()
