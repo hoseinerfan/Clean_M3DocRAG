@@ -51,6 +51,49 @@ The env files set:
 - `LOCAL_MODEL_DIR`
 - `PYTHONPATH`
 
+## Question-Type Failure Analysis
+
+Use `mmdocir/analyze_retrieval_by_question_type.py` to compare full/exact MaxSim retrieval against compact `plain_top224` by metadata-defined question type.
+
+For MMDocIR:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source mmdocir/env_hpc.sh
+
+"$REPO_ROOT/env/bin/python" mmdocir/analyze_retrieval_by_question_type.py \
+  --gold "$LOCAL_DATA_DIR/mm-docir/MMQA_dev.jsonl" \
+  --exact-pred "$LOCAL_OUTPUT_DIR/mmdocir/baseline_ret1000.json" \
+  --compact-pred "$LOCAL_OUTPUT_DIR/mmdocir/plain_top224_ret1000_prediction.json" \
+  --group-field metadata.type \
+  --group-field metadata.domain \
+  --min-count 5 \
+  --output-md "$LOCAL_OUTPUT_DIR/mmdocir/question_type_failure_exact_vs_compact.md" \
+  --output-json "$LOCAL_OUTPUT_DIR/mmdocir/question_type_failure_exact_vs_compact.json"
+```
+
+For ViDoRe V3:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source vidore/env_hpc.sh
+
+"$REPO_ROOT/env/bin/python" mmdocir/analyze_retrieval_by_question_type.py \
+  --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl" \
+  --exact-pred "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000.json" \
+  --compact-pred "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
+  --group-field metadata.query_types \
+  --group-field metadata.query_format \
+  --group-field metadata.content_type \
+  --group-field metadata.repo_slug \
+  --min-count 25 \
+  --output-md "$LOCAL_OUTPUT_DIR/vidore-v3/question_type_failure_exact_vs_compact.md" \
+  --output-json "$LOCAL_OUTPUT_DIR/vidore-v3/question_type_failure_exact_vs_compact.json"
+```
+
+The table is sorted by the highest `both_page_miss@4` rate by default. The JSON output also keeps example questions where both systems miss the gold page in the top 4.
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |
