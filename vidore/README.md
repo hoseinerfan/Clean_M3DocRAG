@@ -182,6 +182,24 @@ Evaluate exact qrel page retrieval:
   --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
 ```
 
+Observed full baseline:
+
+```text
+n_qids 14514
+page_recall@1 0.1555
+page_recall@4 0.3001
+page_recall@20 0.4925
+page_recall@100 0.6689
+page_recall@1000 0.8922
+doc_recall@1 0.6344
+doc_recall@4 0.8700
+doc_recall@20 0.9729
+doc_recall@100 0.9985
+doc_recall@1000 0.9989
+page_hit@4 8417/14514
+doc_hit@4 12833/14514
+```
+
 ## 7. Run `plain_top224`
 
 For the full ViDoRe V3 set, run `plain_top224` as an array after the merged baseline prediction exists:
@@ -213,4 +231,22 @@ Then evaluate:
 "$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
   --pred "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
   --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
+```
+
+Observed full `plain_top224`:
+
+```text
+n_qids 14514
+page_recall@1 0.1730
+page_recall@4 0.3312
+page_recall@20 0.5431
+page_recall@100 0.7246
+page_recall@1000 0.8922
+doc_recall@1 0.6586
+doc_recall@4 0.8854
+doc_recall@20 0.9809
+doc_recall@100 0.9986
+doc_recall@1000 0.9989
+page_hit@4 9092/14514
+doc_hit@4 13039/14514
 ```
