@@ -16,7 +16,7 @@ EXPAND_DENSE_PRED="${EXPAND_DENSE_PRED:-$DENSE_PRED}"
 SPLADE_PRED="${SPLADE_PRED:-$OUTDIR/mmqa_dev_splade.prediction.json}"
 SPLADE_INDEX_PT="${SPLADE_INDEX_PT:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt}"
 
-QUESTION_TYPE="${QUESTION_TYPE:-ImageListQ}"
+QUESTION_TYPE="${QUESTION_TYPE-ImageListQ}"
 LABEL_PREFIX="${LABEL_PREFIX:-imagelistq}"
 RRF_K="${RRF_K:-10}"
 DENSE_WEIGHT="${DENSE_WEIGHT:-1.0}"
