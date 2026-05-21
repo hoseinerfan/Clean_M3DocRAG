@@ -360,16 +360,25 @@ The current takeaway is that the M3DocVQA RRF method is not a direct out-of-the-
 
 ## Graph-PPR Verification
 
-Use `scripts/run_external_graph_ppr_pipeline.sh` to test the graph-PPR method on the same dense/SPLADE artifacts. The default configuration mirrors the current M3DocVQA graph-PPR setting for page ranking:
+Use `scripts/run_external_graph_ppr_pipeline.sh` to test the graph-PPR method on the same dense/SPLADE artifacts. The default profile now matches the best M3DocVQA/MMQA transfer setting from `notes/visual_reranker_handoff_2026-04-27.md`:
 
 - dense source: `plain_top224_ret1000_prediction.json`
 - sparse source: SPLADE `*_splade_ret1000.prediction.json`
 - graph budget: dense top 1000 + sparse top 1000
-- final output: top 1000 pages, no per-document cap
-- PPR: `DOC_SEED_WEIGHT=0.0`, `RESTART_PROB=0.20`, `FINAL_PPR_PAGE_WEIGHT=1.5`, `FINAL_PPR_DOC_WEIGHT=0.5`
-- source weights: equal by default; set `DENSE_WEIGHT=1.25 SPARSE_WEIGHT=0.75` for the dense-heavy variant
+- profile: `GRAPH_PROFILE=doc_shortlist_best`
+- final output: top 20 pages with `PER_DOC_PAGE_LIMIT=1`, so it behaves as a document shortlist
+- PPR: `DOC_SEED_WEIGHT=0.0`, `RESTART_PROB=0.15`, `FINAL_PPR_PAGE_WEIGHT=1.5`, `FINAL_PPR_DOC_WEIGHT=0.75`
+- source weights: equal by default
 
-Start with the smaller datasets first.
+This is the config to use when asking whether Graph-PPR transfers as the best M3DocVQA document retriever. The earlier `page1000_nodocseed` runs are a page-ranking probe, not the exact handoff-best config. To reproduce that page-ranking probe, set:
+
+```bash
+GRAPH_PROFILE=page_rank_probe \
+FINAL_TOP_PAGES=1000 \
+PER_DOC_PAGE_LIMIT=0
+```
+
+Run the best-config doc-shortlist check on the smaller datasets first.
 
 SciEGQA-Bench:
 
@@ -382,7 +391,7 @@ DATA_ROOT="$LOCAL_DATA_DIR/sci-egqa-bench" \
 DENSE_PRED="$LOCAL_OUTPUT_DIR/sciegqa/plain_top224_ret1000_prediction.json" \
 SPARSE_PRED="$LOCAL_OUTPUT_DIR/sciegqa/doc_rrf_plain_top224_splade/sciegqa_splade_ret1000.prediction.json" \
 OUT_DIR="$LOCAL_OUTPUT_DIR/sciegqa/graph_ppr_plain_top224_splade" \
-GRAPH_LABEL="sciegqa_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+GRAPH_LABEL="sciegqa_plain_top224_splade_graph1000_top20_best" \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
@@ -397,7 +406,7 @@ DATA_ROOT="$LOCAL_DATA_DIR/vidoseek" \
 DENSE_PRED="$LOCAL_OUTPUT_DIR/vidoseek/plain_top224_ret1000_prediction.json" \
 SPARSE_PRED="$LOCAL_OUTPUT_DIR/vidoseek/doc_rrf_plain_top224_splade/vidoseek_splade_ret1000.prediction.json" \
 OUT_DIR="$LOCAL_OUTPUT_DIR/vidoseek/graph_ppr_plain_top224_splade" \
-GRAPH_LABEL="vidoseek_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+GRAPH_LABEL="vidoseek_plain_top224_splade_graph1000_top20_best" \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
@@ -412,7 +421,7 @@ DATA_ROOT="$LOCAL_DATA_DIR/mm-docir" \
 DENSE_PRED="$LOCAL_OUTPUT_DIR/mmdocir/plain_top224_ret1000_prediction.json" \
 SPARSE_PRED="$LOCAL_OUTPUT_DIR/mmdocir/doc_rrf_exact_dense_splade/mmdocir_splade_ret1000.prediction.json" \
 OUT_DIR="$LOCAL_OUTPUT_DIR/mmdocir/graph_ppr_plain_top224_splade" \
-GRAPH_LABEL="mmdocir_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+GRAPH_LABEL="mmdocir_plain_top224_splade_graph1000_top20_best" \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
@@ -428,7 +437,7 @@ DATA_ROOT="$LOCAL_DATA_DIR/vidore-v3" \
 DENSE_PRED="$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
 SPARSE_PRED="$LOCAL_OUTPUT_DIR/vidore-v3/doc_rrf_exact_dense_splade/vidore-v3_splade_ret1000.prediction.json" \
 OUT_DIR="$LOCAL_OUTPUT_DIR/vidore-v3/graph_ppr_plain_top224_splade" \
-GRAPH_LABEL="vidore-v3_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+GRAPH_LABEL="vidore-v3_plain_top224_splade_graph1000_top20_best" \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
@@ -444,9 +453,18 @@ DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa" \
 DENSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
 SPARSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_splade_ret1000.prediction.json" \
 OUT_DIR="$LOCAL_OUTPUT_DIR/opendocvqa/graph_ppr_plain_top224_splade" \
-GRAPH_LABEL="opendocvqa_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+GRAPH_LABEL="opendocvqa_plain_top224_splade_graph1000_top20_best" \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
+
+Observed page-ranking-probe results from `GRAPH_PROFILE=page_rank_probe`:
+
+| Dataset | qids | page@4 | page@20 | doc@4 | doc@20 | note |
+|---|---:|---:|---:|---:|---:|---|
+| SciEGQA-Bench | 1623 | 0.7686 | 0.9091 | 0.9298 | 0.9852 | strong page-ranking result; not the doc-shortlist-best profile |
+| ViDoSeek | 1142 | 0.8905 | 0.9982 | 0.9991 | 1.0000 | slight page@4 drop vs plain_top224, better deeper page recall |
+
+Do not mix these with the doc-shortlist-best results; they use different output caps and slightly different PPR weights.
 
 ## Dataset Summary
 

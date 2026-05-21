@@ -3523,3 +3523,49 @@ Do not yet claim:
 - adjacent-page edges are important
 - page-level metrics are meaningful on full MMQA dev
 - the same weights are guaranteed optimal on another dataset
+
+### External runner profile check
+
+The reusable external-dataset wrapper is:
+
+- `scripts/run_external_graph_ppr_pipeline.sh`
+
+It now has two explicit profiles:
+
+1. `GRAPH_PROFILE=doc_shortlist_best`
+   - this is the default
+   - matches the best M3DocVQA/MMQA transfer config above
+   - uses:
+     - `DENSE_TOP_PAGES=1000`
+     - `SPARSE_TOP_PAGES=1000`
+     - `FINAL_TOP_PAGES=20`
+     - `PER_DOC_PAGE_LIMIT=1`
+     - `DOC_SEED_WEIGHT=0.0`
+     - `RESTART_PROB=0.15`
+     - `FINAL_PAGE_SEED_WEIGHT=1.0`
+     - `FINAL_PPR_PAGE_WEIGHT=1.5`
+     - `FINAL_PPR_DOC_WEIGHT=0.75`
+   - use this for the main transfer claim
+2. `GRAPH_PROFILE=page_rank_probe`
+   - uses:
+     - `FINAL_TOP_PAGES=1000`
+     - `PER_DOC_PAGE_LIMIT=0`
+     - `RESTART_PROB=0.20`
+     - `FINAL_PPR_DOC_WEIGHT=0.5`
+   - use this only to inspect page ranking behavior when reliable page labels exist
+
+This distinction matters. The first SciEGQA/ViDoSeek external runs used the page-ranking probe profile, so they are encouraging sanity checks but not the exact handoff-best document-shortlist transfer config.
+
+Observed page-ranking-probe results:
+
+| dataset | qids | page@4 | page@20 | doc@4 | doc@20 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SciEGQA-Bench | 1623 | 0.7686 | 0.9091 | 0.9298 | 0.9852 |
+| ViDoSeek | 1142 | 0.8905 | 0.9982 | 0.9991 | 1.0000 |
+
+Next external sanity check should rerun those same datasets with `GRAPH_PROFILE=doc_shortlist_best`, then compare against:
+
+- dense `plain_top224`
+- SPLADE only
+- matched seed-only/page-RRF control
+- `GRAPH_PROFILE=page_rank_probe` only as a separate page-ranking diagnostic
