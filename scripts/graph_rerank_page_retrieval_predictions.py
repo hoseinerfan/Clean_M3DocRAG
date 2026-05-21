@@ -522,6 +522,7 @@ def build_qid_graph_ranking(
     sparse_row: dict,
     args: argparse.Namespace,
     sparse_index: SparsePageIndex | None = None,
+    gold_row: dict | None = None,
 ) -> tuple[list[list[object]], dict]:
     dense_pages = ranked_unique_pages(
         dense_row.get("page_retrieval_results", []),
@@ -676,6 +677,8 @@ def build_qid_graph_ranking(
         }
         for record, final_score, seed_component, page_ppr_component, doc_ppr_component in ranked_records[:20]
     ]
+    candidate_doc_ids = {record.doc_id for record in records.values()}
+    candidate_page_uids = set(records)
     metadata = {
         "qid": qid,
         "candidate_page_count": len(records),
@@ -688,6 +691,11 @@ def build_qid_graph_ranking(
         "graph_edge_count_undirected": sum(len(neighbors) for neighbors in graph.values()) // 2,
         "top_graph_pages": trace_top,
     }
+    if gold_row is not None:
+        doc_gold = gold_doc_ids(gold_row)
+        page_gold = gold_page_uids(gold_row)
+        metadata["candidate_has_gold_doc"] = bool(candidate_doc_ids & doc_gold)
+        metadata["candidate_has_gold_page"] = bool(candidate_page_uids & page_gold) if page_gold else None
     return final_rows, metadata
 
 
@@ -706,6 +714,10 @@ def summarize_prediction_rows(rows: list[list[object]], gold_row: dict | None) -
         summary["gold_page_uids"] = sorted(page_gold)
         summary["reranked_first_gold_doc_rank"] = first_rank(ranked_docs, doc_gold)
         summary["reranked_first_gold_page_rank"] = first_rank(ranked_pages, page_gold) if page_gold else None
+        summary["contains_gold_doc"] = summary["reranked_first_gold_doc_rank"] is not None
+        summary["contains_gold_page"] = (
+            summary["reranked_first_gold_page_rank"] is not None if page_gold else None
+        )
     return summary
 
 
@@ -713,6 +725,8 @@ def prefixed_gold_ranks(prefix: str, summary: dict) -> dict[str, object]:
     return {
         f"{prefix}_first_gold_doc_rank": summary.get("reranked_first_gold_doc_rank"),
         f"{prefix}_first_gold_page_rank": summary.get("reranked_first_gold_page_rank"),
+        f"{prefix}_contains_gold_doc": summary.get("contains_gold_doc"),
+        f"{prefix}_contains_gold_page": summary.get("contains_gold_page"),
     }
 
 
@@ -739,15 +753,16 @@ def main() -> None:
     fused_payload: dict[str, dict] = {}
     per_qid: list[dict] = []
     for qid in qids:
+        gold_row = gold_rows.get(qid)
         final_rows, graph_metadata = build_qid_graph_ranking(
             qid=qid,
             dense_row=dense_pred[qid],
             sparse_row=sparse_pred[qid],
             args=args,
             sparse_index=sparse_index,
+            gold_row=gold_row,
         )
         question = dense_pred[qid].get("question") or sparse_pred[qid].get("question", "")
-        gold_row = gold_rows.get(qid)
         dense_source_summary = summarize_prediction_rows(
             page_rows_from_ranked_unique_pages(
                 dense_pred[qid].get("page_retrieval_results", []),
@@ -810,7 +825,11 @@ def main() -> None:
                 "final_page_seed_weight": float(args.final_page_seed_weight),
                 "final_ppr_page_weight": float(args.final_ppr_page_weight),
                 "final_ppr_doc_weight": float(args.final_ppr_doc_weight),
-                "graph": graph_metadata,
+                "graph": {
+                    key: value
+                    for key, value in graph_metadata.items()
+                    if key not in {"candidate_has_gold_doc", "candidate_has_gold_page"}
+                },
             },
         }
 
@@ -865,6 +884,12 @@ def main() -> None:
         sparse_doc_ranks = [row.get("sparse_first_gold_doc_rank") for row in per_qid]
         dense_page_ranks = [row.get("dense_first_gold_page_rank") for row in per_qid]
         sparse_page_ranks = [row.get("sparse_first_gold_page_rank") for row in per_qid]
+        candidate_doc_hits = [row["graph"].get("candidate_has_gold_doc") for row in per_qid]
+        candidate_page_hits = [row["graph"].get("candidate_has_gold_page") for row in per_qid]
+        dense_doc_hits = [row.get("dense_contains_gold_doc") for row in per_qid]
+        sparse_doc_hits = [row.get("sparse_contains_gold_doc") for row in per_qid]
+        dense_page_hits = [row.get("dense_contains_gold_page") for row in per_qid]
+        sparse_page_hits = [row.get("sparse_contains_gold_page") for row in per_qid]
         summary["reranked_top4_doc_count"] = sum(
             1 for rank in doc_ranks if rank is not None and int(rank) <= 4
         )
@@ -901,6 +926,13 @@ def main() -> None:
         summary["sparse_top20_page_count"] = sum(
             1 for rank in sparse_page_ranks if rank is not None and int(rank) <= 20
         )
+        summary["candidate_gold_doc_count"] = sum(1 for hit in candidate_doc_hits if hit is True)
+        summary["candidate_gold_doc_miss_count"] = len(qids) - int(summary["candidate_gold_doc_count"])
+        summary["candidate_gold_page_count"] = sum(1 for hit in candidate_page_hits if hit is True)
+        summary["dense_candidate_gold_doc_count"] = sum(1 for hit in dense_doc_hits if hit is True)
+        summary["sparse_candidate_gold_doc_count"] = sum(1 for hit in sparse_doc_hits if hit is True)
+        summary["dense_candidate_gold_page_count"] = sum(1 for hit in dense_page_hits if hit is True)
+        summary["sparse_candidate_gold_page_count"] = sum(1 for hit in sparse_page_hits if hit is True)
         summary["graph_recovers_top4_doc_vs_dense_count"] = sum(
             1
             for dense_rank, graph_rank in zip(dense_doc_ranks, doc_ranks)

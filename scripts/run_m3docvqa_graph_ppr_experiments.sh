@@ -163,6 +163,210 @@ if [[ "${RUN_SOURCE_ABLATIONS:-0}" == "1" ]]; then
     --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
 fi
 
+if [[ "${RUN_BUDGET_SWEEP:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  for budget in ${BUDGET_VALUES:-20 50 100 200 500 1000}; do
+    run_graph "${LABEL_PREFIX}_graph_ppr_budget${budget}_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+      --dense-top-pages "$budget" \
+      --sparse-top-pages "$budget" \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --restart-prob "$BEST_RESTART_PROB" \
+      --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+      --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+  done
+fi
+
+if [[ "${RUN_GRAPH_STRUCTURE_ABLATIONS:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  run_graph "${LABEL_PREFIX}_graph_ppr_structure_no_page_doc_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --page-doc-edge-weight 0.0 \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_structure_no_adjacent_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --same-doc-window 0 \
+    --adjacent-page-edge-weight 0.0 \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_structure_no_edges_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --page-doc-edge-weight 0.0 \
+    --same-doc-window 0 \
+    --adjacent-page-edge-weight 0.0 \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+fi
+
+if [[ "${RUN_BEST_COMPONENT_ABLATIONS:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  base_label="${LABEL_PREFIX}_graph_ppr_components_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}"
+
+  run_graph "${base_label}_full" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  run_graph "${base_label}_seedonly" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-page-seed-weight 1.0 \
+    --final-ppr-page-weight 0.0 \
+    --final-ppr-doc-weight 0.0
+
+  run_graph "${base_label}_pageppr_only" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-page-seed-weight 0.0 \
+    --final-ppr-page-weight 1.0 \
+    --final-ppr-doc-weight 0.0
+
+  run_graph "${base_label}_docppr_only" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-page-seed-weight 0.0 \
+    --final-ppr-page-weight 0.0 \
+    --final-ppr-doc-weight 1.0
+
+  run_graph "${base_label}_ppr_no_final_seed" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-page-seed-weight 0.0 \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+fi
+
+if [[ "${RUN_BEST_RESTART_SWEEP:-0}" == "1" ]]; then
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  for restart_prob in ${RESTART_VALUES:-0.05 0.10 0.15 0.20 0.25 0.35}; do
+    label_restart="${restart_prob/./p}"
+    run_graph "${LABEL_PREFIX}_graph_ppr_restart${label_restart}_top20_nodocseed_pagew${label_page_weight}_docw${label_doc_weight}" \
+      --dense-top-pages 1000 \
+      --sparse-top-pages 1000 \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --restart-prob "$restart_prob" \
+      --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+      --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+  done
+fi
+
+if [[ "${RUN_PPR_ITER_SWEEP:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  for ppr_iters in ${PPR_ITER_VALUES:-5 10 20 30 50}; do
+    run_graph "${LABEL_PREFIX}_graph_ppr_iters${ppr_iters}_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+      --dense-top-pages 1000 \
+      --sparse-top-pages 1000 \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --restart-prob "$BEST_RESTART_PROB" \
+      --ppr-iters "$ppr_iters" \
+      --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+      --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+  done
+fi
+
+if [[ "${RUN_BEST_SOURCE_WEIGHT_SWEEP:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  DENSE_WEIGHT=1.0 SPARSE_WEIGHT=1.0 run_graph "${LABEL_PREFIX}_graph_ppr_sourcew_equal_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  DENSE_WEIGHT=0.75 SPARSE_WEIGHT=1.25 run_graph "${LABEL_PREFIX}_graph_ppr_sourcew_sparseheavy_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  DENSE_WEIGHT=1.25 SPARSE_WEIGHT=0.75 run_graph "${LABEL_PREFIX}_graph_ppr_sourcew_denseheavy_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+fi
+
+if [[ "${RUN_BEST_PAGE_TOP500:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  run_graph "${LABEL_PREFIX}_graph_ppr_top500pages_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 500 \
+    --per-doc-page-limit 0 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+fi
+
 if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
   run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_seedonly" \
     --dense-top-pages 1000 \
@@ -299,6 +503,8 @@ print("=" * 100)
 print(path)
 for key in [
     "qid_count",
+    "dense_top_pages",
+    "sparse_top_pages",
     "dense_top4_doc_count",
     "sparse_top4_doc_count",
     "reranked_top4_doc_count",
@@ -307,6 +513,10 @@ for key in [
     "reranked_top20_doc_count",
     "reranked_top4_page_count",
     "reranked_top20_page_count",
+    "candidate_gold_doc_count",
+    "candidate_gold_doc_miss_count",
+    "dense_candidate_gold_doc_count",
+    "sparse_candidate_gold_doc_count",
     "graph_recovers_top4_doc_vs_dense_count",
     "graph_loses_top4_doc_vs_dense_count",
     "mean_candidate_page_count",
