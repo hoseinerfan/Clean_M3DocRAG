@@ -2148,3 +2148,1315 @@ Current priorities after all follow-up experiments are:
    - keep as interpretability / scientific control
 5. smooth adaptive `K`
    - deprioritized
+
+### Whole-page non-visual complement and single-qid workbench
+
+Additional follow-up commits:
+
+- `a4115a6` Add whole-page non-visual complement mode
+- `2391dce` Fix helper calls to shared prefilter sort functions
+- `eec483e` Add confirmed-visual-gated non-visual prefilter mode
+
+The whole-page non-visual complement mode added:
+
+- `--non-visual-page-mode all_non_visual_patches`
+
+Meaning:
+
+- use all spatial page patches except those labeled visual
+- do not rely only on explicitly labeled `non_visual` patches
+
+This was tested first on the earlier hard 3-qid set with:
+
+- `balance_only`
+- `balance_score_mode=visual_x_nonvisual_avg`
+
+Result:
+
+- mixed
+- `10b619...` improved
+- `39d123...` slightly worsened
+- `299e684...` worsened
+
+Interpretation:
+
+- page-side non-visual patch-label cleanliness is a real partial bottleneck
+- but replacing labeled non-visual patches with the full non-visual complement is too blunt
+- this is not the main fix for the hard qids
+
+### New single-qid debugging strategy: pick an exact-MaxSim success case
+
+Instead of continuing to average across hard qids, the next step was to choose one qid that exact MaxSim already solves and use it as a workbench.
+
+Chosen qid:
+
+- `095fc3a41d77542e31001da8c68fd350`
+- `There is a flag with a roaring lion on it for which team that is included among the stadiums and locations of the 2017-18 I liga?`
+
+From the exact-MaxSim batch file:
+
+- baseline gold-doc rank: `25`
+- exact-MaxSim gold-doc rank: `2`
+
+This makes it a good qid for debugging lightweight prefilters, because exact late interaction clearly has the right signal even though baseline document ranking is not already top-4.
+
+### Key finding on `095fc3...`: this qid is non-visual-context dominant
+
+First qid-level audit with the original helper showed:
+
+- `non_visual_only`
+  - strong
+  - gold page rank `7`
+- `balance_only`
+  - borderline
+  - gold page rank `70`
+- `visual_only`
+  - weak
+  - gold page rank `134`
+- `grounded_non_visual_only`
+  - weak
+  - gold page rank `136`
+- `confirmed_visual_only`
+  - weak
+  - gold page rank `124`
+
+Interpretation:
+
+- the explicit visual cue itself is not the dominant useful signal here
+- page-wide non-visual context is much stronger than the visual-anchor family
+- exact MaxSim likely succeeds because it can use full-page interaction rather than a local visual-first prefilter
+
+### Explicit gold-vs-wrong-page inspection on `095fc3...`
+
+Gold page identified in the pool:
+
+- `c8d8e51c58e15c31cd0c91e1ca6e6cd5_page0`
+
+Top wrong pages under `non_visual_only` included:
+
+- `a039a7698902eef86a5a335a22eefab9_page0`
+- `a039a7698902eef86a5a335a22eefab9_page2`
+- `592b5e2035c06c16997dbc926b174cd7_page12`
+
+Inspection using:
+
+- `non_visual_only`
+- `balance_only`
+- `grounded_non_visual_only`
+- `confirmed_visual_only`
+- `balance_score_mode=visual_x_nonvisual_avg`
+
+gave:
+
+- `non_visual_only`
+  - `best_gold_rank = 7`
+  - `best_wrong_rank = 1`
+  - gold loses to wrong pages
+- `balance_only`
+  - `best_gold_rank = 35`
+  - `best_wrong_rank = 186`
+  - gold beats the chosen wrong pages
+- `grounded_non_visual_only`
+  - `best_gold_rank = 136`
+  - `best_wrong_rank = 50`
+  - gold loses
+- `confirmed_visual_only`
+  - `best_gold_rank = 124`
+  - `best_wrong_rank = 341`
+  - gold beats the chosen wrong pages, but rank is still poor
+
+The inspected page scores explain the behavior:
+
+- gold page
+  - `visual = 0.4502`
+  - `confirmed_visual = 0.1514`
+  - `non_visual = 25.0403`
+  - `balance = 0.2399`
+- wrong `a039...page0`
+  - `visual = 0.2546`
+  - `confirmed_visual = 0.0677`
+  - `non_visual = 28.8160`
+  - `balance = 0.1561`
+- wrong `a039...page2`
+  - `visual = 0`
+  - `confirmed_visual = 0`
+  - `non_visual = 25.9607`
+  - `balance = 0`
+- wrong `592b...page12`
+  - `visual = 0`
+  - `confirmed_visual = 0`
+  - `non_visual = 25.6034`
+  - `balance = 0`
+
+Interpretation:
+
+- `non_visual_only` finds the gold page early, but also promotes textually strong distractors
+- `balance_only` using `visual_x_nonvisual_avg` successfully suppresses visually unsupported distractors
+- but multiplicative balance is still too harsh on the gold page itself, because its visual score is only moderate compared with many false positives
+
+This means the right idea on this qid is:
+
+- visual should be a gate
+- non-visual should do the ranking
+
+not:
+
+- visual and non-visual should contribute symmetrically through a product-like balance score
+
+### New prefilter mode: `non_visual_with_confirmed_visual_gate`
+
+To reflect the `095fc3...` diagnosis, a new prefilter mode was added in:
+
+- `eec483e` Add confirmed-visual-gated non-visual prefilter mode
+
+New mode:
+
+- `non_visual_with_confirmed_visual_gate`
+
+New flag:
+
+- `--confirmed-visual-gate-threshold`
+
+Behavior:
+
+- if `confirmed_visual_page_score < threshold`, the page is demoted behind all gated-in pages
+- among gated-in pages, sort by `non_visual_page_score`
+
+This is intended to:
+
+- keep the strong page-wide semantic ranking of `non_visual_only`
+- while removing pages that have no meaningful local visual confirmation
+
+The recommended first sweep on `095fc3...` is:
+
+- `threshold = 0.05`
+- `threshold = 0.10`
+- `threshold = 0.15`
+
+Current working hypothesis:
+
+- this asymmetric gate-then-rank design is more promising than additional balance formulas
+- especially for qids where the gold page has strong non-visual evidence but only moderate visual confidence
+
+## 2026-05-12 Addendum
+
+### Current all-141 top-level ranking
+
+On the `141` `ImageListQ` qids, the current ranking is:
+
+1. best final top-4 result seen so far:
+   - `plain_top224`
+   - `81 / 141`
+2. best current `top256` family results:
+   - `plain_top256 mean_uniform`
+   - `plain_top256 coverage_topk`
+   - both `79 / 141`
+3. the recent visual-prefilter families did not beat the best non-visual / plain top-k baselines on the main final metric.
+
+So the strongest final answer-bearing method remains:
+
+- tighter plain pruning at `K=224`
+
+not any of the newer visual-gated or multi-run-union ideas.
+
+### `coverage_topk` vs plain `query_mean`
+
+The `coverage_topk` selector was tested as a more interpretable `top256` variant:
+
+- keep a global chunk of high-scoring page tokens
+- reserve part of the `256` budget to cover more distinct informative query tokens
+
+Result on all `141` qids:
+
+- `mean_uniform`
+  - `79 / 141`
+  - doc-rank median `3`
+  - page-rank median `5`
+  - mean exact-score loss `1.1239`
+  - mean shifted-score preservation `0.9567`
+  - mean argmax retention `0.8529`
+- `coverage_topk`
+  - `79 / 141`
+  - doc-rank median `3`
+  - page-rank median `5`
+  - mean exact-score loss `0.6933`
+  - mean shifted-score preservation `0.9730`
+  - mean argmax retention `0.9618`
+
+Interpretation:
+
+- `coverage_topk` is clearly a better approximation to exact MaxSim under the same `top256` budget
+- but this did not translate into a better final top-4 gold-doc count on the `141`
+
+So `coverage_topk` is currently best viewed as:
+
+- the strongest paper-oriented selector inside the `top256` family
+- but not yet a better final reranker than plain `query_mean`
+
+### Multi-gold union idea: negative at matched budget
+
+The idea of unioning multiple top-4 lists from different fixed global variants was tested on the `14` qids where:
+
+- the reference `plain_top256` run had at least one gold doc in top-4
+- but not all gold docs in top-4
+
+Matched-budget comparison:
+
+- single `top8` from one run:
+  - `6 / 14` full multi-gold coverage
+- best union of `2 x top4`:
+  - `1 / 14`
+- union-only recoveries over single `top8`:
+  - `0`
+
+Earlier broader tests already showed:
+
+- single `top12` shortlist was also stronger than union-of-`3 x top4`
+
+Interpretation:
+
+- the union-of-top4 idea should be dropped
+- if a longer shortlist is allowed, using one stronger single run is better than unioning several short lists
+
+### Nonspatial prefix/suffix token ablation
+
+The plain `top256` path now supports:
+
+- `--approx-base-page-token-nonspatial-policy keep`
+- `--approx-base-page-token-nonspatial-policy drop_all`
+- `--approx-base-page-token-nonspatial-policy force_include_all`
+
+on the `global_topk` selector.
+
+All three tied on the main final metric:
+
+- `keep`
+  - `79 / 141`
+- `drop_all`
+  - `79 / 141`
+- `force_include_all`
+  - `79 / 141`
+
+But their approximation diagnostics differed a lot:
+
+- `drop_all`
+  - mean exact-score loss `1.2278`
+  - mean shifted-score preservation `0.9523`
+  - mean argmax retention `0.8461`
+- `keep`
+  - mean exact-score loss `1.1239`
+  - mean shifted-score preservation `0.9567`
+  - mean argmax retention `0.8529`
+- `force_include_all`
+  - mean exact-score loss `0.1726`
+  - mean shifted-score preservation `0.9936`
+  - mean argmax retention `0.9004`
+
+Interpretation:
+
+- nonspatial prefix/suffix tokens are not useless noise
+- dropping them hurts approximation quality
+- forcing them in makes `top256` much closer to exact MaxSim scoring
+- but even that stronger fidelity still did not improve the final `79 / 141` top-4 result
+
+This suggests that part of why `plain_top256` works is:
+
+- nonspatial tokens carry useful exact-score signal
+- but final top-4 success is still governed by a small set of near-boundary qids rather than raw score-preservation alone
+
+### Current recommendation
+
+If the goal is the strongest current final result:
+
+- use `plain_top224`
+
+If the goal is the cleanest current `top256` selector for a paper-style explanation:
+
+- use `coverage_topk` as the best principled selector
+- mention that it improves exact-MaxSim preservation diagnostics
+- but note honestly that it did not improve the final `79 / 141` top-4 count on this slice
+
+If the goal is understanding the role of nonspatial tokens:
+
+- the evidence currently says they should not be discarded
+- `force_include_all` is the strongest approximation variant among the tested nonspatial policies
+
+## 2026-05-14 Addendum
+
+### Exact-budget sweep completed
+
+The `ImageListQ` exact-budget sweep launched through:
+
+- `c5859db` Add ImageListQ exact-budget sweep SLURM job
+- `slurm/imagelistq_exact_budget_sweep.sh`
+
+is now complete on all `141` `ImageListQ` qids.
+
+Final `reranked_top4_doc_count` values:
+
+- baseline exact rerank
+  - top5: `61 / 141`
+  - top10: `69 / 141`
+  - top20: `73 / 141`
+  - top50: `77 / 141`
+- `nonvisual` prefilter exact rerank
+  - top5: `76 / 141`
+  - top10: `76 / 141`
+  - top20: `76 / 141`
+  - top50: `78 / 141`
+- `gate005` prefilter exact rerank
+  - top5: `77 / 141`
+  - top10: `77 / 141`
+  - top20: `75 / 141`
+  - top50: `74 / 141`
+
+Interpretation:
+
+- `gate005` is the strongest tiny-budget exact rerank variant
+  - best at top5
+  - tied-best at top10
+- `nonvisual` is the most stable prefilter family result
+  - flat through top20
+  - best prefilter result at top50
+- none of these beat `plain_top224`
+
+Current overall ranking on the `141` `ImageListQ` qids:
+
+1. `plain_top224`
+   - `81 / 141`
+2. `plain_top256_learned_exact_winner`
+   - `80 / 141`
+3. exact full-page MaxSim
+   - `78 / 141`
+4. best prefilter exact rerank
+   - `nonvisual exact top50`
+   - `78 / 141`
+5. best tiny-budget prefilter exact rerank
+   - `gate005 exact top5/top10`
+   - `77 / 141`
+
+So the main headline did not change:
+
+- the strongest proven overall method is still `plain_top224`
+
+### Patch-guided cue-token verifier
+
+Several new helpers were added on `codex/mmdocir-hpc-workflow`:
+
+- `17870be` Add patch-guided crop audit mode
+- `d3b0ca4` Add cue-token crop audit scoring
+- `6e6da3e` Add batched cue-token crop verifier driver
+- `3471524` Add cue-verifier subset builder
+
+The key new idea is:
+
+1. shortlist pages or docs with the existing retriever
+2. restrict crop search to visual-patch regions
+3. score only cue-specific query tokens such as `dolphin`, `arrow`, or `torch`
+
+This is not a new global reranker yet. It is a routed local verifier for recoverable cases.
+
+#### Clean single-qid results
+
+Distinctive-cue cases behaved well:
+
+- `ef3b89e2bd5909fb1fc7ed65652aea5b`
+  - cue: `dolphin`
+  - gold page cue-only best crop: `0.8077`
+  - strong false positive cue-only best crop: `0.4523`
+  - verdict: success
+- `9bb02423d6e36d42259f76b72091fce4`
+  - cue: `arrow`
+  - gold page cue-only best crop: `0.8094`
+  - chosen wrong page cue-only best crop: `0.2441`
+  - verdict: success
+- `39d1230b9456528d49ced799393985d3`
+  - cue: `torch`
+  - gold page cue-only best crop: `0.5380`
+  - chosen wrong page cue-only best crop: `0.2664`
+  - verdict: success
+
+Generic-cue cases remained weak:
+
+- `d784b7d93b4bf4d947e512769bbbde25`
+  - cue: `soccer + ball`
+  - a false positive page with a sports-photo arm patch containing a ball-like badge still scored highly
+  - verdict: cue too generic for this verifier form
+
+Interpretation:
+
+- the verifier works best when the cue is distinctive and localized
+- it is much less reliable when the cue is generic or requires relation-level reasoning such as:
+  - ball inside a team logo
+  - not merely any ball-like sports mark on the page
+
+### Reviewed cue-verifier subset
+
+For the `ImageListQ` failure slice with:
+
+- `baseline_first_gold_doc_rank > 4`
+- `baseline_first_gold_doc_rank <= 20`
+
+the first reviewed verifier subset was:
+
+- `454a726486b3c8f44571833938ca7cf1`
+  - cue `beard`
+- `d4d6487894e25da9ba73d0ffb39385b1`
+  - cue `orange stripe`
+- `2d72990e471477b01f909752e70127ab`
+  - cue `stethoscope`
+- `e9047078de74d8240ce689bdc504aea7`
+  - cue `golden sphere`
+- `ee00f4699ce90964a3115771b3e3ba73`
+  - cue `motorcycle`
+- `9bb02423d6e36d42259f76b72091fce4`
+  - cue `arrow`
+- `ef3b89e2bd5909fb1fc7ed65652aea5b`
+  - cue `dolphin`
+- `72d36fc3a4996a9969dc0348167414f1`
+  - cue `weasel`
+- `29a94164b22263351cc79f515a5b8e8b`
+  - cue `lighthouse`
+
+Excluded or deprioritized:
+
+- `beed14e1f1e7d95b34a03d2d152d7424`
+  - cue missing from the gold doc during manual audit
+- `d784b7d93b4bf4d947e512769bbbde25`
+  - cue too generic
+- several low-specificity appearance / counting cases
+
+### Current recommendation
+
+If the goal is the strongest overall result:
+
+- use `plain_top224`
+
+If the goal is efficient exact reranking under tiny exact budgets:
+
+- use `gate005` for top5 / top10 budgets
+- use `nonvisual` if larger exact budgets are allowed
+
+If the goal is a new routed recovery direction:
+
+- use the cue-token patch-guided verifier only on a manually or heuristically routed subset
+- prioritize distinctive cues such as:
+  - `dolphin`
+  - `arrow`
+  - `torch`
+  - `weasel`
+  - `stethoscope`
+  - `motorcycle`
+
+Do not yet claim this verifier as a better global reranker than `plain_top224`.
+
+### Outstanding batch item
+
+The train retrieval-only top-1000 generation job launched through:
+
+- `slurm/m3docrag_dev_pipeline.sh`
+
+failed once because `LOCAL_DATA_DIR` still pointed at the wrong repo tree:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/data/m3-docvqa`
+
+A resubmission with:
+
+- `LOCAL_DATA_DIR=${REPO_ROOT}/data`
+
+was queued afterward. This job is needed before running the train-to-dev learned-selector experiment cleanly.
+
+## 2026-05-21 Addendum
+
+### Retrieval-improver branch
+
+The work since the earlier visual-reranker experiments moved in a different direction:
+
+- keep dense ColPali retrieval
+- add a sparse lexical branch with SPLADE
+- fuse the two branches at the document level
+
+This work lives on:
+
+- branch `codex/mmdocir-hpc-workflow`
+
+Key commits:
+
+- `83c42dd` Add M3DocVQA page-text export script
+- `ff4c055` Add SPLADE page retrieval experiments
+- `e1a9e4a` Add routed dense-sparse shortlist evaluator
+- `b124d50` Fix routed shortlist metric caps
+- `cd88cc3` Add doc-level RRF fusion mode
+
+Relevant scripts:
+
+- `scripts/export_m3docvqa_page_text.py`
+- `scripts/build_splade_page_index.py`
+- `scripts/run_splade_page_retrieval.py`
+- `scripts/fuse_page_retrieval_predictions.py`
+- `scripts/route_page_retrieval_predictions.py`
+- `mmdocir/analyze_retrieval_by_question_type.py`
+
+### Important methodological split
+
+There are now three different dense+sparse combination ideas in the repo:
+
+1. static dense+sparse tail-union
+   - example: `dense7 + splade8 -> top15`
+2. heuristic routed shortlist selection
+   - `scripts/route_page_retrieval_predictions.py`
+   - currently only built-in route mode: `imagelistq_v1`
+3. non-heuristic doc-level RRF fusion
+   - `scripts/fuse_page_retrieval_predictions.py --fusion-mode doc_rrf`
+
+Current recommendation:
+
+- for a general retrieval improver, use the non-heuristic doc-level RRF fusion
+- treat the heuristic router as an `ImageListQ`-specific analysis result, not the main portable method
+
+### MMQA dev page-text and SPLADE index status
+
+Full M3DocVQA/MMQA dev page-text export succeeded with:
+
+- docs: `3366`
+- pages: `44294`
+- empty-text pages: `78`
+- mean char count: `2380.38`
+- mean token count: `394.70`
+
+The corresponding SPLADE index build succeeded with:
+
+- page count: `44294`
+- stored posting count: `5640379`
+- mean terms per page: `127.34`
+- zero-term pages: `0`
+
+The full-dev SPLADE retrieval run succeeded with:
+
+- qids: `2441`
+- `reranked_top4_doc_count: 2329`
+- `reranked_top20_doc_count: 2391`
+
+Important cache setup on HPC:
+
+```bash
+export HF_HOME=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/hf_cache
+export HUGGINGFACE_HUB_CACHE=${HF_HOME}/hub
+export TRANSFORMERS_CACHE=${HF_HOME}/transformers
+export HF_DATASETS_CACHE=${HF_HOME}/datasets
+```
+
+### ImageListQ-only findings
+
+Corrected `doc@20` on all `141` `ImageListQ` qids:
+
+- `dense_top20`
+  - `101 / 141`
+- `splade_top20`
+  - `105 / 141`
+- static hybrid `dense7_splade8_top15`
+  - `109 / 141`
+- dense+sparse top20 oracle union
+  - `116 / 141`
+
+Interpretation:
+
+- the best static non-heuristic tail-union hybrid recovered `11` of the `15` dense+sparse oracle qids
+- net gain over dense was `+8`
+- there was still a `7`-qid gap to the dense+sparse union oracle
+
+#### Heuristic routed ImageListQ result
+
+Using:
+
+- `scripts/route_page_retrieval_predictions.py`
+- `--route-mode imagelistq_v1`
+- profile caps:
+  - dense `20`
+  - sparse `20`
+  - hybrid `15`
+
+Result on `ImageListQ`:
+
+- baseline dense top20:
+  - `101 / 141`
+- routed result:
+  - `116 / 141`
+- recovered vs dense:
+  - `15`
+- lost vs dense:
+  - `0`
+
+Interpretation:
+
+- the heuristic router reaches the current dense+sparse `ImageListQ` doc-level oracle
+- but it does so with handwritten substring rules
+- this is useful evidence that routing works
+- it is not the preferred portable method for other datasets
+
+### Full MMQA dev retrieval results
+
+Corrected overall full-dev document hit counts:
+
+- `dense_top20`
+  - `doc@4 = 2277 / 2441`
+  - `doc@20 = 2368 / 2441`
+- `splade_top20`
+  - `doc@4 = 2329 / 2441`
+  - `doc@20 = 2391 / 2441`
+- static hybrid `dense7_splade8_top15`
+  - `doc@4 = 2277 / 2441`
+  - `doc@20 = 2397 / 2441`
+- `rrf_eq_k10_top20`
+  - `doc@4 = 2346 / 2441`
+  - `doc@20 = 2401 / 2441`
+- `rrf_sparseheavy_k10_top20`
+  - `doc@4 = 2350 / 2441`
+  - `doc@20 = 2400 / 2441`
+- `rrf_eq_k5_top20`
+  - `doc@4 = 2347 / 2441`
+  - `doc@20 = 2401 / 2441`
+
+Main interpretation:
+
+- `splade_top20` already beats dense at both `doc@4` and `doc@20`
+- the static `dense7+sparse8` hybrid is only a shortlist/coverage improver
+  - it helps `doc@20`
+  - it does not improve `doc@4`
+- doc-level RRF is the first non-heuristic method here that improves both:
+  - early ranking
+  - shortlist coverage
+
+### Best current non-heuristic retrieval settings
+
+If early ranking is the main objective:
+
+- use `rrf_sparseheavy_k10_top20`
+
+Parameters:
+
+- `--fusion-mode doc_rrf`
+- `--dense-top-docs 20`
+- `--sparse-top-docs 20`
+- `--final-top-docs 20`
+- `--rrf-k 10`
+- `--dense-weight 0.75`
+- `--sparse-weight 1.25`
+
+Why:
+
+- strongest overall `doc@4`
+- still only `1` qid behind the best `doc@20` setting
+
+If shortlist coverage is the only objective:
+
+- use either:
+  - `rrf_eq_k10_top20`
+  - `rrf_eq_k5_top20`
+
+because both reached:
+
+- `2401 / 2441` at `doc@20`
+
+But the current best single default is:
+
+- `rrf_sparseheavy_k10_top20`
+
+### Image-related qtype findings on full MMQA dev
+
+#### Static hybrid at `doc@20`
+
+The static hybrid was still useful as a recall improver on image-related qtypes:
+
+- `ImageListQ`
+  - `0.7163 -> 0.7730`
+- `Compose(TextQ,ImageListQ)`
+  - `0.7826 -> 0.8261`
+- `Compose(ImageQ,TableQ)`
+  - `0.9577 -> 0.9930`
+- `Compare(Compose(TableQ,ImageQ),TableQ)`
+  - `0.9904 -> 1.0000`
+
+But at `doc@4`, the same static hybrid was effectively just the dense head:
+
+- `hybrid_minus_dense = 0` on the checked qtypes
+
+So it should be treated as:
+
+- a shortlist recall improver
+- not an early-ranking improver
+
+#### RRF at `doc@4`
+
+The RRF runs improved image-related early ranking:
+
+- `ImageListQ`
+  - dense `81 / 141`
+  - SPLADE `76 / 141`
+  - best RRF `85 / 141`
+    - `rrf_eq_k10_top20`
+- `ImageQ`
+  - dense and SPLADE `227 / 230`
+  - best RRF `229 / 230`
+- `Compose(TextQ,ImageListQ)`
+  - dense `29 / 46`
+  - SPLADE `31 / 46`
+  - best RRF `36 / 46`
+    - `rrf_eq_k10_top20`
+- `Compose(TableQ,ImageListQ)`
+  - dense `179 / 195`
+  - SPLADE `192 / 195`
+  - best RRF `193 / 195`
+    - `rrf_sparseheavy_k10_top20`
+- `Compose(ImageQ,TableQ)`
+  - dense `127 / 142`
+  - SPLADE `139 / 142`
+  - best RRF `141 / 142`
+    - `rrf_sparseheavy_k10_top20`
+- `Compose(ImageQ,TextQ)`
+  - RRF tied dense at `19 / 20`
+- `Compare(Compose(TableQ,ImageQ),Compose(TableQ,TextQ))`
+  - dense `9 / 15`
+  - SPLADE `14 / 15`
+  - best RRF tied SPLADE at `14 / 15`
+
+Interpretation:
+
+- the earlier statement that SPLADE is weak at `ImageListQ` top-4 remains true
+- but RRF fixes that weakness while keeping or improving SPLADE's gains elsewhere
+
+### Important evaluation caveat
+
+For full MMQA dev:
+
+- automatic page-level evaluation is not meaningful
+- the dataset does not provide reliable gold page labels for the whole split
+
+So for full-dev comparisons:
+
+- trust `doc@4`
+- trust `doc@20`
+- ignore the `page@k` fields unless the qids were manually reviewed and annotated
+
+### Exact reproduction commands used for the best full-dev RRF run
+
+Dense baseline prediction:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json`
+
+SPLADE prediction:
+
+- `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json`
+
+Best default RRF command:
+
+```bash
+REPO=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+OUTDIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev
+
+cd "${REPO}"
+python scripts/fuse_page_retrieval_predictions.py \
+  --dense-prediction-json /mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json \
+  --sparse-prediction-json "${OUTDIR}/mmqa_dev_splade.prediction.json" \
+  --gold "${REPO}/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl" \
+  --fusion-mode doc_rrf \
+  --dense-top-docs 20 \
+  --sparse-top-docs 20 \
+  --final-top-docs 20 \
+  --rrf-k 10 \
+  --dense-weight 0.75 \
+  --sparse-weight 1.25 \
+  --output-prediction-json "${OUTDIR}/mmqa_dev_rrf_sparseheavy_k10_top20.prediction.json" \
+  --output-summary-json "${OUTDIR}/mmqa_dev_rrf_sparseheavy_k10_top20.summary.json"
+```
+
+### Recommended next step on other datasets
+
+This is the direction to continue in a fresh chat.
+
+Recommended order:
+
+1. pick a target dataset
+2. check whether its page corpus is already covered by an existing SPLADE page-text export and index
+3. if not, rerun:
+   - `scripts/export_m3docvqa_page_text.py`
+   - `scripts/build_splade_page_index.py`
+4. generate:
+   - dense retrieval prediction
+   - SPLADE retrieval prediction
+5. fuse with:
+   - `--fusion-mode doc_rrf`
+   - `--rrf-k 10`
+   - `--dense-weight 0.75`
+   - `--sparse-weight 1.25`
+6. evaluate:
+   - overall `doc@4`
+   - overall `doc@20`
+   - qtype or subset breakdown if the dataset has mixed question types
+
+Questions to answer on the next dataset:
+
+- does RRF still beat both dense and SPLADE at `doc@4`?
+- does it keep a `doc@20` gain too?
+- is there an `ImageListQ`-like subtype where dense alone is still special?
+- does the sparse-heavy weighting remain best, or should the balance be retuned?
+
+### Current recommended narrative
+
+The strongest current narrative is no longer:
+
+- visual-aware reranking beats the main retriever
+
+The strongest current narrative is:
+
+- a non-heuristic dense+sparse document-level fusion improves retrieval quality
+- static dense+sparse tail-union helps recall but not early ranking
+- doc-level RRF improves both early ranking and shortlist coverage
+- heuristic routing is interesting on `ImageListQ`, but RRF is the cleaner portable method to carry to other datasets
+
+## 2026-05-21 Graph PPR transfer handoff
+
+### Why this section exists
+
+The next goal is to verify whether the graph-PPR dense+sparse reranker generalizes beyond M3DocVQA/MMQA dev.
+
+This is the method to carry into another chat or another dataset. The important point is that the method is not a visual-reranker-specific trick:
+
+- it needs one dense page retriever prediction file
+- it needs one sparse/SPLADE page retriever prediction file
+- it builds a small query-local graph over candidate pages and their owning docs
+- it runs PPR on that graph
+- it emits a doc-shortlist-style prediction by keeping one page per doc
+
+The current best setting improved full MMQA dev from:
+
+- dense `doc@4 = 2277 / 2441`, `doc@20 = 2368 / 2441`
+- SPLADE `doc@4 = 2329 / 2441`, `doc@20 = 2391 / 2441`
+- page/doc RRF baseline `doc@4 = 2348 / 2441`, `doc@20 = 2402 / 2441`
+
+to:
+
+- graph PPR `doc@4 = 2363 / 2441`, `doc@20 = 2406 / 2441`
+
+### Code and branch
+
+Use branch:
+
+- `codex/mmdocir-hpc-workflow`
+
+Key scripts:
+
+- `scripts/graph_rerank_page_retrieval_predictions.py`
+- `scripts/run_m3docvqa_graph_ppr_experiments.sh`
+- `scripts/summarize_graph_ppr_summaries.py`
+
+Most relevant commits:
+
+- `9000dd0` Add graph PPR retrieval reranker
+- `22c91af` Add SPLADE expansion path for graph PPR reranking
+- `97aba7c` Add graph PPR source ablations
+- `d6e2bb8` Add graph PPR ablation sweeps
+- `9554e60` Add graph PPR budget comparison ablations
+- `d0242ec` Add graph PPR final reporting helpers
+
+### Required input schema for another dataset
+
+The graph script expects two prediction JSONs keyed by qid:
+
+```json
+{
+  "qid-1": {
+    "question": "...",
+    "page_retrieval_results": [
+      ["doc_id_a", 0, 12.34],
+      ["doc_id_b", 2, 11.98]
+    ]
+  }
+}
+```
+
+Requirements:
+
+- dense and sparse prediction files must share qids
+- page rows must be `[doc_id, page_idx, score]`
+- `page_idx` should be zero-based and stable across dense, sparse, and gold
+- doc IDs must match gold `supporting_context[].doc_id`
+- scores can be arbitrary because the default seed is rank/RRF-based
+- for doc-level evaluation, gold JSONL should contain `qid` and `supporting_context` entries with `doc_id`
+- for qtype filtering, gold JSONL should contain `metadata.type`
+- page-level metrics are optional and require either `metadata.gold_page_uids` or `supporting_context[].page_idx`
+
+For datasets without reliable page labels, still run the method and trust:
+
+- `reranked_top4_doc_count`
+- `reranked_top20_doc_count`
+- `candidate_gold_doc_count`
+- `candidate_gold_doc_miss_count`
+
+### Graph method details
+
+For each qid:
+
+1. take top dense pages and top sparse pages
+2. union them into a candidate page pool
+3. add one node per candidate page
+4. add one node per candidate document
+5. seed page nodes with dense/sparse RRF source scores
+6. optionally seed doc nodes, but the best config uses no doc seed
+7. connect each page to its owning doc
+8. optionally connect adjacent candidate pages from the same doc
+9. run PPR
+10. score pages with:
+    - normalized source page seed
+    - normalized page PPR
+    - owning-doc PPR
+11. output top pages, usually with `--per-doc-page-limit 1` for doc ranking
+
+Important finding:
+
+- page-doc edges are the useful graph structure
+- adjacent-page edges had almost no effect
+- doc seed hurt or was unnecessary; best configs use `--doc-seed-weight 0.0`
+
+### Best default config for transfer
+
+Use this as the main result config on a new dataset:
+
+```bash
+python scripts/graph_rerank_page_retrieval_predictions.py \
+  --dense-prediction-json "${DENSE_PRED}" \
+  --sparse-prediction-json "${SPLADE_PRED}" \
+  --gold "${GOLD_JSONL}" \
+  --question-type "${QUESTION_TYPE}" \
+  --dense-top-pages 1000 \
+  --sparse-top-pages 1000 \
+  --final-top-pages 20 \
+  --per-doc-page-limit 1 \
+  --rrf-k 10 \
+  --dense-weight 1.0 \
+  --sparse-weight 1.0 \
+  --doc-seed-weight 0.0 \
+  --restart-prob 0.15 \
+  --ppr-iters 30 \
+  --page-doc-edge-weight 1.0 \
+  --same-doc-window 1 \
+  --adjacent-page-edge-weight 0.25 \
+  --final-page-seed-weight 1.0 \
+  --final-ppr-page-weight 1.5 \
+  --final-ppr-doc-weight 0.75 \
+  --output-prediction-json "${OUTDIR}/graph_ppr_best_top20.prediction.json" \
+  --output-summary-json "${OUTDIR}/graph_ppr_best_top20.summary.json"
+```
+
+Best config name used in the M3DocVQA/MMQA experiments:
+
+- `fulldev_graph_ppr_budget1000_top20_nodocseed_restart0p15_pagew1p5_docw0p75`
+- equivalent final-report label:
+  - `fulldev_graph_ppr_final_graph1000_top20_nodocseed_restart0p15_pagew1p5_docw0p75`
+
+Best full-dev result:
+
+- `doc@4 = 2363 / 2441`
+- `doc@20 = 2406 / 2441`
+- candidate gold docs: `2439 / 2441`
+- candidate misses: `2`
+- mean candidate pages: `1774.862`
+- mean candidate docs: `814.881`
+
+### Efficient config to try first when runtime matters
+
+Use this when a dataset is large and the full 1000/1000 candidate graph is too expensive:
+
+```bash
+python scripts/graph_rerank_page_retrieval_predictions.py \
+  --dense-prediction-json "${DENSE_PRED}" \
+  --sparse-prediction-json "${SPLADE_PRED}" \
+  --gold "${GOLD_JSONL}" \
+  --question-type "${QUESTION_TYPE}" \
+  --dense-top-pages 100 \
+  --sparse-top-pages 100 \
+  --final-top-pages 20 \
+  --per-doc-page-limit 1 \
+  --rrf-k 10 \
+  --dense-weight 1.0 \
+  --sparse-weight 1.0 \
+  --doc-seed-weight 0.0 \
+  --restart-prob 0.15 \
+  --ppr-iters 30 \
+  --page-doc-edge-weight 1.0 \
+  --same-doc-window 1 \
+  --adjacent-page-edge-weight 0.25 \
+  --final-page-seed-weight 1.0 \
+  --final-ppr-page-weight 1.5 \
+  --final-ppr-doc-weight 0.75 \
+  --output-prediction-json "${OUTDIR}/graph_ppr_budget100_top20.prediction.json" \
+  --output-summary-json "${OUTDIR}/graph_ppr_budget100_top20.summary.json"
+```
+
+Full-dev efficient result:
+
+- `doc@4 = 2354 / 2441`
+- `doc@20 = 2404 / 2441`
+- candidate gold docs: `2428 / 2441`
+- candidate misses: `13`
+- mean candidate pages: `174.605`
+- mean candidate docs: `103.816`
+
+Interpretation:
+
+- this is only `-9 doc@4` and `-2 doc@20` behind the full 1000/1000 graph
+- it uses roughly one tenth of the candidate pages
+- it still beats full-budget page RRF at `doc@4`
+
+### Best asymmetric budget configs
+
+If only one branch can be large, keep SPLADE large and reduce dense first:
+
+| config | doc@4 | doc@20 | mean pages | mean docs |
+| --- | ---: | ---: | ---: | ---: |
+| dense20/sparse1000 | 2352 | 2402 | 1005.133 | 457.731 |
+| dense50/sparse1000 | 2358 | 2404 | 1018.959 | 463.796 |
+| dense100/sparse1000 | 2359 | 2405 | 1047.010 | 475.991 |
+| dense200/sparse1000 | 2360 | 2405 | 1111.655 | 503.881 |
+| dense500/sparse1000 | 2359 | 2406 | 1337.298 | 601.735 |
+| dense1000/sparse1000 | 2363 | 2406 | 1774.862 | 814.881 |
+
+The reverse direction was also useful but a little weaker at top-4:
+
+| config | doc@4 | doc@20 | mean pages | mean docs |
+| --- | ---: | ---: | ---: | ---: |
+| dense1000/sparse20 | 2353 | 2401 | 1004.853 | 580.223 |
+| dense1000/sparse50 | 2355 | 2403 | 1018.753 | 584.937 |
+| dense1000/sparse100 | 2355 | 2405 | 1048.066 | 594.683 |
+| dense1000/sparse200 | 2358 | 2405 | 1116.354 | 617.388 |
+| dense1000/sparse500 | 2360 | 2406 | 1349.511 | 691.604 |
+| dense1000/sparse1000 | 2363 | 2406 | 1774.862 | 814.881 |
+
+Recommendation:
+
+- for best accuracy: `1000/1000`
+- for efficient strong accuracy: `100/100`
+- for a middle ground: `dense100/sparse1000` or `dense200/sparse1000`
+
+### Baselines and controls to rerun on a new dataset
+
+Run these on every new dataset:
+
+1. dense only
+2. SPLADE only
+3. page/doc RRF baseline, no graph propagation
+4. graph PPR efficient `100/100`
+5. graph PPR full `1000/1000`
+6. graph PPR with no page-doc edges
+7. seed-only / page-RRF component control
+8. page-PPR-only and doc-PPR-only component controls if time permits
+
+The RRF baseline command uses the same graph script but disables graph propagation:
+
+```bash
+python scripts/graph_rerank_page_retrieval_predictions.py \
+  --dense-prediction-json "${DENSE_PRED}" \
+  --sparse-prediction-json "${SPLADE_PRED}" \
+  --gold "${GOLD_JSONL}" \
+  --question-type "${QUESTION_TYPE}" \
+  --dense-top-pages 1000 \
+  --sparse-top-pages 1000 \
+  --final-top-pages 20 \
+  --per-doc-page-limit 1 \
+  --doc-seed-weight 0.0 \
+  --ppr-iters 0 \
+  --page-doc-edge-weight 0.0 \
+  --same-doc-window 0 \
+  --adjacent-page-edge-weight 0.0 \
+  --final-page-seed-weight 1.0 \
+  --final-ppr-page-weight 0.0 \
+  --final-ppr-doc-weight 0.0 \
+  --output-prediction-json "${OUTDIR}/page_rrf1000_top20.prediction.json" \
+  --output-summary-json "${OUTDIR}/page_rrf1000_top20.summary.json"
+```
+
+### Source ablation results on full MMQA dev
+
+These show why the final method should use the plain top224 dense branch plus SPLADE.
+
+| source setup | dense source doc@4 | sparse source doc@4 | reranked doc@4 | reranked doc@20 | mean pages | mean docs |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| plain top224 dense only, no SPLADE | 2277 | 0 | 2280 | 2368 | 1000.000 | 578.636 |
+| raw dense only | 2193 | 0 | 2213 | 2345 | 1000.000 | 578.636 |
+| raw dense + SPLADE | 2193 | 2329 | 2348 | 2401 | 1774.862 | 814.881 |
+| SPLADE only | 0 | 2329 | 2334 | 2391 | 1000.000 | 455.549 |
+| plain top224 dense + SPLADE, best graph | 2277 | 2329 | 2363 | 2406 | 1774.862 | 814.881 |
+
+Interpretation:
+
+- SPLADE alone is strong
+- raw dense is weaker than the plain top224 dense branch
+- plain top224 dense + SPLADE is the best source combination
+- graph propagation adds value beyond simply replacing dense with SPLADE
+
+### Symmetric budget ablation results
+
+| dense pages | sparse pages | graph doc@4 | graph doc@20 | page-RRF doc@4 | page-RRF doc@20 | candidate gold docs | mean pages | mean docs |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 20 | 20 | 2355 | 2399 | 2349 | 2399 | 2403 | 32.916 | 18.801 |
+| 50 | 50 | 2352 | 2401 | 2348 | 2402 | 2414 | 85.524 | 51.401 |
+| 100 | 100 | 2354 | 2404 | 2350 | 2404 | 2428 | 174.605 | 103.816 |
+| 200 | 200 | 2353 | 2404 | 2349 | 2402 | 2429 | 353.315 | 200.142 |
+| 500 | 500 | 2359 | 2405 | 2348 | 2402 | 2436 | 884.465 | 446.957 |
+| 1000 | 1000 | 2363 | 2406 | 2348 | 2402 | 2439 | 1774.862 | 814.881 |
+
+Interpretation:
+
+- graph PPR is consistently better than matched-budget page RRF at `doc@4`
+- the full budget is best overall
+- the 100/100 budget is the best efficiency point
+- candidate recall saturates quickly but top-4 promotion still benefits from more candidates
+
+### Graph structure ablations
+
+| structure | doc@4 | doc@20 | recover vs dense@4 | lose vs dense@4 |
+| --- | ---: | ---: | ---: | ---: |
+| full graph | 2363 | 2406 | 93 | 7 |
+| no adjacent-page edges | 2362 | 2406 | 93 | 8 |
+| no page-doc edges | 2343 | 2404 | 84 | 18 |
+| no edges / seed only | 2348 | 2402 | 84 | 13 |
+
+Interpretation:
+
+- page-doc edges are the important graph signal
+- adjacent-page edges are not important for this dataset
+- removing all edges collapses to the page-RRF baseline
+
+For transfer:
+
+- keep `--page-doc-edge-weight 1.0`
+- keep adjacent edges for the default run, but do not over-claim them
+- rerun `no_page_doc` as the most important graph-structure ablation
+
+### Score component ablations
+
+| scoring mode | doc@4 | doc@20 | recover vs dense@4 | lose vs dense@4 |
+| --- | ---: | ---: | ---: | ---: |
+| full: seed + page PPR + doc PPR | 2363 | 2406 | 93 | 7 |
+| PPR without final seed | 2361 | 2406 | 93 | 9 |
+| page-PPR only | 2354 | 2402 | 88 | 11 |
+| seed only / page RRF | 2348 | 2402 | 84 | 13 |
+| doc-PPR only | 2328 | 2407 | 91 | 40 |
+
+Interpretation:
+
+- full scoring is best for `doc@4`
+- final source seed is helpful but not the main driver
+- page PPR alone helps over seed-only
+- doc PPR alone can improve `doc@20` but hurts early ranking badly
+- the best score is the combination, not a single component
+
+### Final reporting commands on M3DocVQA/MMQA dev
+
+Use these to regenerate clean final summaries with consistent oracle fields:
+
+```bash
+git pull --rebase --autostash origin codex/mmdocir-hpc-workflow
+
+QUESTION_TYPE= LABEL_PREFIX=fulldev \
+RUN_DOC_TOP20=0 RUN_PAGE_TOP500=0 RUN_FINAL_REPORT_CONFIGS=1 \
+BEST_RESTART_PROB=0.15 BEST_PAGE_PPR_WEIGHT=1.5 BEST_DOC_PPR_WEIGHT=0.75 \
+scripts/run_m3docvqa_graph_ppr_experiments.sh
+
+QUESTION_TYPE= LABEL_PREFIX=fulldev \
+RUN_DOC_TOP20=0 RUN_PAGE_TOP500=0 RUN_FINAL_QTYPE_SWEEP=1 \
+BEST_RESTART_PROB=0.15 BEST_PAGE_PPR_WEIGHT=1.5 BEST_DOC_PPR_WEIGHT=0.75 \
+scripts/run_m3docvqa_graph_ppr_experiments.sh
+```
+
+Summarize:
+
+```bash
+OUTDIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev
+
+python scripts/summarize_graph_ppr_summaries.py --format markdown \
+  "$OUTDIR"/fulldev_graph_ppr_final_*.summary.json
+
+python scripts/summarize_graph_ppr_summaries.py --format markdown \
+  "$OUTDIR"/fulldev_graph_ppr_qtype_*.summary.json
+```
+
+Paired comparison against page RRF:
+
+```bash
+python scripts/summarize_graph_ppr_summaries.py \
+  --compare "$OUTDIR"/fulldev_graph_ppr_final_page_rrf1000_top20.summary.json \
+            "$OUTDIR"/fulldev_graph_ppr_final_graph1000_top20_nodocseed_restart0p15_pagew1p5_docw0p75.summary.json
+```
+
+Efficient graph comparison:
+
+```bash
+python scripts/summarize_graph_ppr_summaries.py \
+  --compare "$OUTDIR"/fulldev_graph_ppr_final_page_rrf1000_top20.summary.json \
+            "$OUTDIR"/fulldev_graph_ppr_final_graph100_top20_nodocseed_restart0p15_pagew1p5_docw0p75.summary.json
+```
+
+### Minimal transfer experiment plan for another dataset
+
+Run this exact sequence in the next dataset:
+
+1. dense baseline
+   - record `doc@4`, `doc@20`
+2. SPLADE baseline
+   - record `doc@4`, `doc@20`
+3. page-RRF baseline at `1000/1000`
+   - confirms dense+sparse fusion without graph propagation
+4. graph PPR at `100/100`
+   - efficient transfer test
+5. graph PPR at `1000/1000`
+   - best-accuracy transfer test
+6. no-page-doc graph ablation
+   - tests whether document nodes matter on the new dataset
+7. seed-only / page-RRF component control
+   - should match or nearly match the no-edge result
+
+Only run the larger sweeps if the main transfer test is positive:
+
+- budget sweep: `20 50 100 200 500 1000`
+- asymmetric budgets: dense-small/sparse1000 and dense1000/sparse-small
+- component sweep: full, seed-only, page-PPR-only, doc-PPR-only, PPR-no-final-seed
+- restart sweep: `0.05 0.10 0.15 0.20 0.25 0.35`
+
+### What to verify on other datasets
+
+Main questions:
+
+- does graph PPR beat dense alone at `doc@4`?
+- does graph PPR beat SPLADE alone at `doc@4`?
+- does graph PPR beat page/doc RRF at `doc@4`?
+- does the gain persist at `doc@20`?
+- is `100/100` still close to `1000/1000`?
+- are page-doc edges still the critical graph structure?
+- is the best restart still near `0.15`?
+- does doc-PPR-only still hurt early ranking?
+
+Failure modes to watch:
+
+- candidate recall is too low, shown by low `candidate_gold_doc_count`
+- sparse branch dominates and dense adds little
+- dense branch dominates and sparse adds little
+- graph improves `doc@20` but hurts `doc@4`
+- page-level gold is unreliable, causing confusing page metrics
+
+### Current claim to make cautiously
+
+The safe claim after M3DocVQA/MMQA dev is:
+
+- dense + SPLADE page candidates are complementary
+- rank-only page RRF is a strong baseline
+- adding query-local page-doc graph propagation improves early document ranking
+- the improvement comes mainly from page-doc propagation and the combined seed/page-PPR/doc-PPR score
+- the method is portable enough to test on other document VQA datasets because it only needs dense and sparse page retrieval outputs
+
+Do not yet claim:
+
+- the method is universally better than all dense+sparse fusion methods
+- adjacent-page edges are important
+- page-level metrics are meaningful on full MMQA dev
+- the same weights are guaranteed optimal on another dataset
