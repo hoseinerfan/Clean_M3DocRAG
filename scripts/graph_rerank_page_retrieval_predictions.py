@@ -17,8 +17,10 @@ class PageRecord:
     page_idx: int
     dense_rank: int | None = None
     sparse_rank: int | None = None
+    expansion_rank: int | None = None
     dense_score: float | None = None
     sparse_score: float | None = None
+    expansion_score: float | None = None
 
     @property
     def page_uid(self) -> str:
@@ -60,6 +62,56 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rrf-k", type=float, default=10.0)
     parser.add_argument("--dense-weight", type=float, default=1.0)
     parser.add_argument("--sparse-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--splade-index-pt",
+        default="",
+        help=(
+            "Optional full SPLADE page index .pt. When set with --expansion-top-pages, "
+            "the script performs pseudo-relevance-feedback page expansion before graph/PPR."
+        ),
+    )
+    parser.add_argument(
+        "--expansion-top-pages",
+        type=int,
+        default=0,
+        help="Number of corpus pages to add from SPLADE sparse page-page expansion. Default: disabled.",
+    )
+    parser.add_argument(
+        "--expand-from-top-dense-pages",
+        type=int,
+        default=50,
+        help="Dense seed pages used to build the expansion sparse vector.",
+    )
+    parser.add_argument(
+        "--expand-from-top-sparse-pages",
+        type=int,
+        default=50,
+        help="SPLADE seed pages used to build the expansion sparse vector.",
+    )
+    parser.add_argument(
+        "--expansion-weight",
+        type=float,
+        default=1.0,
+        help="RRF-style source weight assigned to expansion pages.",
+    )
+    parser.add_argument(
+        "--expansion-source-term-topk",
+        type=int,
+        default=32,
+        help="Per-seed page SPLADE terms used for expansion query construction.",
+    )
+    parser.add_argument(
+        "--expansion-query-topk-terms",
+        type=int,
+        default=256,
+        help="Global top terms retained in the combined expansion sparse query.",
+    )
+    parser.add_argument(
+        "--expansion-min-score",
+        type=float,
+        default=0.0,
+        help="Drop expansion retrieved pages whose sparse score is <= this value.",
+    )
     parser.add_argument(
         "--score-seed-weight",
         type=float,
@@ -113,6 +165,88 @@ def load_prediction(path: Path) -> dict[str, dict]:
     if not isinstance(payload, dict):
         raise TypeError(f"Prediction JSON must be an object keyed by qid: {path}")
     return {str(qid): row for qid, row in payload.items()}
+
+
+class SparsePageIndex:
+    def __init__(self, path: Path) -> None:
+        import torch
+
+        payload = torch.load(path, map_location="cpu")
+        self.path = path
+        self.page_uids: list[str] = [str(value) for value in payload["page_uids"]]
+        self.doc_ids: list[str] = [str(value) for value in payload["doc_ids"]]
+        self.page_indices = payload["page_indices"].to(torch.int64)
+        self.offsets = payload["offsets"].to(torch.int64)
+        self.term_ids = payload["term_ids"].to(torch.int64)
+        self.term_weights = payload["term_weights"].to(torch.float32)
+        self.page_uid_to_idx = {page_uid: idx for idx, page_uid in enumerate(self.page_uids)}
+        self.postings: dict[int, tuple[object, object]] = {}
+        posting_pages: dict[int, list[int]] = defaultdict(list)
+        posting_weights: dict[int, list[float]] = defaultdict(list)
+        for page_idx in range(len(self.page_uids)):
+            start = int(self.offsets[page_idx].item())
+            end = int(self.offsets[page_idx + 1].item())
+            for term_id, weight in zip(
+                self.term_ids[start:end].tolist(),
+                self.term_weights[start:end].tolist(),
+            ):
+                posting_pages[int(term_id)].append(page_idx)
+                posting_weights[int(term_id)].append(float(weight))
+        for term_id, page_ids in posting_pages.items():
+            self.postings[int(term_id)] = (
+                torch.tensor(page_ids, dtype=torch.int64),
+                torch.tensor(posting_weights[int(term_id)], dtype=torch.float32),
+            )
+
+    def top_terms_for_page(self, page_uid_value: str, topk: int) -> list[tuple[int, float]]:
+        page_idx = self.page_uid_to_idx.get(page_uid_value)
+        if page_idx is None:
+            return []
+        start = int(self.offsets[page_idx].item())
+        end = int(self.offsets[page_idx + 1].item())
+        term_ids = self.term_ids[start:end].tolist()
+        term_weights = self.term_weights[start:end].tolist()
+        pairs = [(int(term_id), float(weight)) for term_id, weight in zip(term_ids, term_weights)]
+        if topk > 0:
+            pairs = pairs[:topk]
+        return pairs
+
+    def retrieve_sparse_query(
+        self,
+        query_terms: dict[int, float],
+        *,
+        top_pages: int,
+        min_score: float,
+    ) -> list[tuple[str, int, float, int]]:
+        import torch
+
+        if not query_terms or top_pages <= 0:
+            return []
+        scores = torch.zeros(len(self.page_uids), dtype=torch.float32)
+        for term_id, query_weight in query_terms.items():
+            posting = self.postings.get(int(term_id))
+            if posting is None:
+                continue
+            posting_page_ids, posting_doc_weights = posting
+            scores.index_add_(0, posting_page_ids, posting_doc_weights * float(query_weight))
+        positive_page_ids = torch.nonzero(scores > float(min_score), as_tuple=False).squeeze(-1)
+        if positive_page_ids.numel() <= 0:
+            return []
+        top_count = min(int(top_pages), int(positive_page_ids.numel()))
+        top_scores, top_pos = torch.topk(scores[positive_page_ids], k=top_count)
+        ranked_page_ids = positive_page_ids[top_pos]
+        return [
+            (
+                str(self.doc_ids[int(page_id)]),
+                int(self.page_indices[int(page_id)].item()),
+                float(score),
+                rank,
+            )
+            for rank, (page_id, score) in enumerate(
+                zip(ranked_page_ids.tolist(), top_scores.tolist()),
+                start=1,
+            )
+        ]
 
 
 def load_gold_rows(path: Path, question_type: str = "") -> dict[str, dict]:
@@ -195,6 +329,38 @@ def minmax_by_uid(rows: list[tuple[str, int, float, int]]) -> dict[str, float]:
         page_uid(doc_id, page_idx): (float(score) - lo) / (hi - lo)
         for doc_id, page_idx, score, _rank in rows
     }
+
+
+def build_expansion_query_terms(
+    *,
+    sparse_index: SparsePageIndex,
+    dense_pages: list[tuple[str, int, float, int]],
+    sparse_pages: list[tuple[str, int, float, int]],
+    args: argparse.Namespace,
+) -> dict[int, float]:
+    term_scores: dict[int, float] = defaultdict(float)
+    seed_weights: dict[str, float] = defaultdict(float)
+    for doc_id, page_idx, _score, rank in dense_pages[: max(0, int(args.expand_from_top_dense_pages))]:
+        seed_weights[page_uid(doc_id, page_idx)] += float(args.dense_weight) / (float(args.rrf_k) + float(rank))
+    for doc_id, page_idx, _score, rank in sparse_pages[: max(0, int(args.expand_from_top_sparse_pages))]:
+        seed_weights[page_uid(doc_id, page_idx)] += float(args.sparse_weight) / (float(args.rrf_k) + float(rank))
+
+    for seed_page_uid, seed_weight in seed_weights.items():
+        for term_id, term_weight in sparse_index.top_terms_for_page(
+            seed_page_uid,
+            int(args.expansion_source_term_topk),
+        ):
+            term_scores[int(term_id)] += float(seed_weight) * float(term_weight)
+
+    query_topk = int(args.expansion_query_topk_terms)
+    if query_topk > 0 and len(term_scores) > query_topk:
+        return dict(
+            sorted(
+                term_scores.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:query_topk]
+        )
+    return dict(term_scores)
 
 
 def add_undirected_edge(
@@ -343,6 +509,7 @@ def build_qid_graph_ranking(
     dense_row: dict,
     sparse_row: dict,
     args: argparse.Namespace,
+    sparse_index: SparsePageIndex | None = None,
 ) -> tuple[list[list[object]], dict]:
     dense_pages = ranked_unique_pages(
         dense_row.get("page_retrieval_results", []),
@@ -352,8 +519,22 @@ def build_qid_graph_ranking(
         sparse_row.get("page_retrieval_results", []),
         int(args.sparse_top_pages),
     )
+    expansion_pages: list[tuple[str, int, float, int]] = []
+    if sparse_index is not None and int(args.expansion_top_pages) > 0:
+        expansion_query_terms = build_expansion_query_terms(
+            sparse_index=sparse_index,
+            dense_pages=dense_pages,
+            sparse_pages=sparse_pages,
+            args=args,
+        )
+        expansion_pages = sparse_index.retrieve_sparse_query(
+            expansion_query_terms,
+            top_pages=int(args.expansion_top_pages),
+            min_score=float(args.expansion_min_score),
+        )
     dense_score_norm = minmax_by_uid(dense_pages)
     sparse_score_norm = minmax_by_uid(sparse_pages)
+    expansion_score_norm = minmax_by_uid(expansion_pages)
     dense_doc_ranks = first_doc_rank_map(dense_pages)
     sparse_doc_ranks = first_doc_rank_map(sparse_pages)
 
@@ -364,6 +545,7 @@ def build_qid_graph_ranking(
     for source_name, source_weight, source_pages, source_score_norm in [
         ("dense", float(args.dense_weight), dense_pages, dense_score_norm),
         ("sparse", float(args.sparse_weight), sparse_pages, sparse_score_norm),
+        ("expansion", float(args.expansion_weight), expansion_pages, expansion_score_norm),
     ]:
         for doc_id, page_idx, score, rank in source_pages:
             uid = page_uid(doc_id, page_idx)
@@ -374,9 +556,12 @@ def build_qid_graph_ranking(
             if source_name == "dense":
                 record.dense_rank = rank
                 record.dense_score = score
-            else:
+            elif source_name == "sparse":
                 record.sparse_rank = rank
                 record.sparse_score = score
+            else:
+                record.expansion_rank = rank
+                record.expansion_score = score
             page_seed[uid] += source_weight / (float(args.rrf_k) + float(rank))
             page_seed[uid] += source_weight * float(args.score_seed_weight) * source_score_norm.get(uid, 0.0)
 
@@ -475,6 +660,7 @@ def build_qid_graph_ranking(
             "doc_ppr_norm": doc_ppr_component,
             "dense_rank": record.dense_rank,
             "sparse_rank": record.sparse_rank,
+            "expansion_rank": record.expansion_rank,
         }
         for record, final_score, seed_component, page_ppr_component, doc_ppr_component in ranked_records[:20]
     ]
@@ -484,6 +670,7 @@ def build_qid_graph_ranking(
         "candidate_doc_count": len(pages_by_doc),
         "dense_candidate_page_count": len(dense_pages),
         "sparse_candidate_page_count": len(sparse_pages),
+        "expansion_candidate_page_count": len(expansion_pages),
         "output_page_count": len(final_rows),
         "graph_node_count": len(graph),
         "graph_edge_count_undirected": sum(len(neighbors) for neighbors in graph.values()) // 2,
@@ -522,6 +709,9 @@ def main() -> None:
 
     dense_pred = load_prediction(Path(args.dense_prediction_json))
     sparse_pred = load_prediction(Path(args.sparse_prediction_json))
+    sparse_index = None
+    if args.splade_index_pt and int(args.expansion_top_pages) > 0:
+        sparse_index = SparsePageIndex(Path(args.splade_index_pt))
     common_qids = sorted(set(dense_pred) & set(sparse_pred))
     if not common_qids:
         raise ValueError("Dense and sparse predictions have no qids in common.")
@@ -542,6 +732,7 @@ def main() -> None:
             dense_row=dense_pred[qid],
             sparse_row=sparse_pred[qid],
             args=args,
+            sparse_index=sparse_index,
         )
         question = dense_pred[qid].get("question") or sparse_pred[qid].get("question", "")
         gold_row = gold_rows.get(qid)
@@ -589,6 +780,14 @@ def main() -> None:
                 "rrf_k": float(args.rrf_k),
                 "dense_weight": float(args.dense_weight),
                 "sparse_weight": float(args.sparse_weight),
+                "splade_index_pt": args.splade_index_pt,
+                "expansion_top_pages": int(args.expansion_top_pages),
+                "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
+                "expand_from_top_sparse_pages": int(args.expand_from_top_sparse_pages),
+                "expansion_weight": float(args.expansion_weight),
+                "expansion_source_term_topk": int(args.expansion_source_term_topk),
+                "expansion_query_topk_terms": int(args.expansion_query_topk_terms),
+                "expansion_min_score": float(args.expansion_min_score),
                 "score_seed_weight": float(args.score_seed_weight),
                 "doc_seed_weight": float(args.doc_seed_weight),
                 "restart_prob": float(args.restart_prob),
@@ -617,6 +816,14 @@ def main() -> None:
         "rrf_k": float(args.rrf_k),
         "dense_weight": float(args.dense_weight),
         "sparse_weight": float(args.sparse_weight),
+        "splade_index_pt": args.splade_index_pt,
+        "expansion_top_pages": int(args.expansion_top_pages),
+        "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
+        "expand_from_top_sparse_pages": int(args.expand_from_top_sparse_pages),
+        "expansion_weight": float(args.expansion_weight),
+        "expansion_source_term_topk": int(args.expansion_source_term_topk),
+        "expansion_query_topk_terms": int(args.expansion_query_topk_terms),
+        "expansion_min_score": float(args.expansion_min_score),
         "score_seed_weight": float(args.score_seed_weight),
         "doc_seed_weight": float(args.doc_seed_weight),
         "restart_prob": float(args.restart_prob),
