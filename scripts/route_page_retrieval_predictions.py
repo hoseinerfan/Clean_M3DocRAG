@@ -21,6 +21,15 @@ def parse_args() -> argparse.Namespace:
         required=True,
         help="Named prediction JSON in the form name=/path/to/prediction.json. Pass multiple times.",
     )
+    parser.add_argument(
+        "--profile-doc-limit",
+        action="append",
+        default=[],
+        help=(
+            "Optional shortlist cap in the form name=k. Use for profiles whose prediction JSON "
+            "contains more rows than the intended shortlist budget, e.g. dense=20."
+        ),
+    )
     parser.add_argument("--gold", required=True, help="Path to MMQA_<split>.jsonl.")
     parser.add_argument(
         "--question-type",
@@ -69,6 +78,19 @@ def parse_named_paths(values: list[str]) -> dict[str, Path]:
     return result
 
 
+def parse_named_ints(values: list[str]) -> dict[str, int]:
+    result: dict[str, int] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"Expected name=k form, got: {value}")
+        name, raw_limit = value.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise ValueError(f"Missing profile name in: {value}")
+        result[name] = int(raw_limit)
+    return result
+
+
 def load_prediction(path: Path) -> dict[str, dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
@@ -95,7 +117,7 @@ def load_gold_rows(path: Path, question_type: str) -> dict[str, dict]:
     return rows
 
 
-def deduped_docs(pred_row: dict) -> list[str]:
+def deduped_docs(pred_row: dict, limit: int = 0) -> list[str]:
     docs: list[str] = []
     seen: set[str] = set()
     for item in pred_row.get("page_retrieval_results", []):
@@ -106,11 +128,13 @@ def deduped_docs(pred_row: dict) -> list[str]:
             continue
         seen.add(doc_id)
         docs.append(doc_id)
+        if limit > 0 and len(docs) >= limit:
+            break
     return docs
 
 
-def first_gold_doc_rank(pred_row: dict, gold_doc_ids: set[str]) -> int | None:
-    for idx, doc_id in enumerate(deduped_docs(pred_row), start=1):
+def first_gold_doc_rank(pred_row: dict, gold_doc_ids: set[str], limit: int = 0) -> int | None:
+    for idx, doc_id in enumerate(deduped_docs(pred_row, limit=limit), start=1):
         if doc_id in gold_doc_ids:
             return idx
     return None
@@ -170,6 +194,7 @@ def choose_profile(question: str, route_config: dict) -> tuple[str, str]:
 def main() -> None:
     args = parse_args()
     prediction_paths = parse_named_paths(args.prediction)
+    profile_doc_limits = parse_named_ints(args.profile_doc_limit)
     predictions = {name: load_prediction(path) for name, path in prediction_paths.items()}
     gold_rows = load_gold_rows(Path(args.gold), args.question_type)
     if not gold_rows:
@@ -184,6 +209,9 @@ def main() -> None:
         raise KeyError(f"Missing required prediction profiles for route mode: {missing_profiles}")
     if args.baseline_profile not in predictions:
         raise KeyError(f"Missing baseline profile: {args.baseline_profile}")
+    unknown_limit_profiles = sorted(set(profile_doc_limits) - set(predictions))
+    if unknown_limit_profiles:
+        raise KeyError(f"Unknown profiles in --profile-doc-limit: {unknown_limit_profiles}")
 
     qids = set(gold_rows)
     for name, payload in predictions.items():
@@ -210,9 +238,11 @@ def main() -> None:
         profile_name, route_reason = choose_profile(question, route_config)
         selected_row = predictions[profile_name][qid]
         baseline_row = predictions[str(args.baseline_profile)][qid]
+        selected_limit = int(profile_doc_limits.get(profile_name, 0))
+        baseline_limit = int(profile_doc_limits.get(str(args.baseline_profile), 0))
 
-        baseline_rank = first_gold_doc_rank(baseline_row, gold_doc_ids)
-        routed_rank = first_gold_doc_rank(selected_row, gold_doc_ids)
+        baseline_rank = first_gold_doc_rank(baseline_row, gold_doc_ids, limit=baseline_limit)
+        routed_rank = first_gold_doc_rank(selected_row, gold_doc_ids, limit=selected_limit)
         if baseline_rank is not None:
             baseline_hit_qids.add(qid)
         if routed_rank is not None:
@@ -225,6 +255,7 @@ def main() -> None:
                 "route_mode": args.route_mode,
                 "selected_profile": profile_name,
                 "route_reason": route_reason,
+                "selected_profile_doc_limit": selected_limit,
             },
         }
         route_counts[profile_name] += 1
@@ -236,6 +267,8 @@ def main() -> None:
                 "selected_profile": profile_name,
                 "route_reason": route_reason,
                 "baseline_profile": str(args.baseline_profile),
+                "baseline_profile_doc_limit": baseline_limit,
+                "selected_profile_doc_limit": selected_limit,
                 "baseline_first_gold_doc_rank": baseline_rank,
                 "routed_first_gold_doc_rank": routed_rank,
             }
@@ -253,6 +286,7 @@ def main() -> None:
         "qid_count": len(gold_rows),
         "question_type": str(args.question_type),
         "baseline_profile": str(args.baseline_profile),
+        "profile_doc_limits": profile_doc_limits,
         "route_counts": dict(route_counts),
         "route_reason_counts": dict(route_reason_counts),
         "baseline_gold_doc_hit_count": len(baseline_hit_qids),
