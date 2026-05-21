@@ -70,6 +70,62 @@ if [[ "${RUN_EXPAND_TOP500:-0}" == "1" ]]; then
     --expansion-query-topk-terms "${EXPANSION_QUERY_TOPK_TERMS:-256}"
 fi
 
+if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
+  run_graph "imagelistq_graph_ppr_eq_k10_top20_seedonly" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --final-page-seed-weight 1.0 \
+    --final-ppr-page-weight 0.0 \
+    --final-ppr-doc-weight 0.0
+
+  run_graph "imagelistq_graph_ppr_eq_k10_top20_pageppr_only" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --final-page-seed-weight 0.0 \
+    --final-ppr-page-weight 1.0 \
+    --final-ppr-doc-weight 0.0
+
+  run_graph "imagelistq_graph_ppr_eq_k10_top20_docppr_only" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --final-page-seed-weight 0.0 \
+    --final-ppr-page-weight 0.0 \
+    --final-ppr-doc-weight 1.0
+
+  run_graph "imagelistq_graph_ppr_eq_k10_top20_no_adjacent" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --same-doc-window 0 \
+    --adjacent-page-edge-weight 0.0
+
+  run_graph "imagelistq_graph_ppr_eq_k10_top20_no_doc_seed" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0
+
+  DENSE_WEIGHT=0.75 SPARSE_WEIGHT=1.25 run_graph "imagelistq_graph_ppr_sparseheavy_k10_top20" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1
+
+  DENSE_WEIGHT=1.25 SPARSE_WEIGHT=0.75 run_graph "imagelistq_graph_ppr_denseheavy_k10_top20" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1
+fi
+
 for summary in "$OUTDIR"/imagelistq_graph_ppr_*summary.json; do
   [[ -f "$summary" ]] || continue
   "$PYTHON_BIN" - "$summary" <<'PY'
