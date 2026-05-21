@@ -237,6 +237,30 @@ Compare the RRF output against the exact dense baseline with the same evaluator:
 
 For this verification, treat `doc@4` and `doc@20` as the primary numbers. The fused prediction keeps one representative page row per fused document, so page-level numbers are diagnostic but not a full page-ranking replacement.
 
+Observed doc-RRF results so far:
+
+| Dataset | Method | qids | doc@4 | doc@20 | page@4 note |
+|---|---:|---:|---:|---:|---|
+| MMDocIR | SPLADE only | 1658 | 1196 / 1658 = 0.7214 | 1362 / 1658 = 0.8215 | sparse page ranking |
+| MMDocIR | exact dense + SPLADE doc-RRF | 1658 | 1257 / 1658 = 0.7581 | 1440 / 1658 = 0.8685 | page@4 = 0.4444; doc-fused representative page only |
+| ViDoRe V3 | SPLADE only | 14514 | 9408 / 14514 = 0.6482 | 11658 / 14514 = 0.8032 | sparse page ranking |
+| ViDoRe V3 | exact dense + SPLADE doc-RRF | 14514 | 10868 / 14514 = 0.7488 | 13825 / 14514 = 0.9525 | page@4 = 0.1699; doc-fused representative page only |
+
+Interpretation:
+
+- doc-RRF improves substantially over SPLADE alone on both datasets.
+- It does not beat the existing dense/compact retrieval runs on these external datasets.
+- On ViDoRe V3, exact dense baseline is still much stronger at doc rank:
+  - exact dense doc@4: `12833 / 14514 = 0.8700`
+  - exact dense doc@20: `0.9729`
+  - doc-RRF doc@4: `10868 / 14514 = 0.7488`
+  - doc-RRF doc@20: `0.9472`
+- On MMDocIR, doc-RRF is below the recorded `plain_top224` compact run at doc@4:
+  - `plain_top224` doc@4: `1336 / 1658 = 0.8058`
+  - doc-RRF doc@4: `1257 / 1658 = 0.7581`
+
+The current takeaway is that the M3DocVQA RRF method is not a direct out-of-the-box win here. ViDoRe is mostly a hard page-within-correct-document problem, while MMDocIR metadata failures need document/page-structure signals that sparse text alone does not capture.
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |
