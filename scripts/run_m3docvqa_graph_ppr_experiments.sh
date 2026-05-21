@@ -116,6 +116,134 @@ if [[ "${RUN_CUSTOM_BEST_TOP20:-0}" == "1" ]]; then
     --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
 fi
 
+if [[ "${RUN_FINAL_REPORT_CONFIGS:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_final_graph100_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 100 \
+    --sparse-top-pages 100 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_final_graph1000_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_final_page_rrf100_top20" \
+    --dense-top-pages 100 \
+    --sparse-top-pages 100 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --ppr-iters 0 \
+    --page-doc-edge-weight 0.0 \
+    --same-doc-window 0 \
+    --adjacent-page-edge-weight 0.0 \
+    --final-page-seed-weight 1.0 \
+    --final-ppr-page-weight 0.0 \
+    --final-ppr-doc-weight 0.0
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_final_page_rrf1000_top20" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --ppr-iters 0 \
+    --page-doc-edge-weight 0.0 \
+    --same-doc-window 0 \
+    --adjacent-page-edge-weight 0.0 \
+    --final-page-seed-weight 1.0 \
+    --final-ppr-page-weight 0.0 \
+    --final-ppr-doc-weight 0.0
+fi
+
+if [[ "${RUN_FINAL_QTYPE_SWEEP:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  original_question_type="$QUESTION_TYPE"
+  if [[ -n "${QTYPE_VALUES:-}" ]]; then
+    qtype_values="$QTYPE_VALUES"
+  else
+    qtype_values="$("$PYTHON_BIN" - "$GOLD" <<'PY'
+import json
+import sys
+
+types = set()
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        qtype = str(row.get("metadata", {}).get("type", "")).strip()
+        if qtype:
+            types.add(qtype)
+print(" ".join(sorted(types)))
+PY
+)"
+  fi
+
+  for qtype in $qtype_values; do
+    qtype_label="$("$PYTHON_BIN" - "$qtype" <<'PY'
+import re
+import sys
+
+label = re.sub(r"[^0-9A-Za-z]+", "_", sys.argv[1]).strip("_").lower()
+print(label or "unknown")
+PY
+)"
+    QUESTION_TYPE="$qtype"
+
+    run_graph "${LABEL_PREFIX}_graph_ppr_qtype_${qtype_label}_final_graph100_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+      --dense-top-pages 100 \
+      --sparse-top-pages 100 \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --restart-prob "$BEST_RESTART_PROB" \
+      --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+      --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+    run_graph "${LABEL_PREFIX}_graph_ppr_qtype_${qtype_label}_final_graph1000_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+      --dense-top-pages 1000 \
+      --sparse-top-pages 1000 \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --restart-prob "$BEST_RESTART_PROB" \
+      --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+      --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+    run_graph "${LABEL_PREFIX}_graph_ppr_qtype_${qtype_label}_final_page_rrf1000_top20" \
+      --dense-top-pages 1000 \
+      --sparse-top-pages 1000 \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --ppr-iters 0 \
+      --page-doc-edge-weight 0.0 \
+      --same-doc-window 0 \
+      --adjacent-page-edge-weight 0.0 \
+      --final-page-seed-weight 1.0 \
+      --final-ppr-page-weight 0.0 \
+      --final-ppr-doc-weight 0.0
+  done
+  QUESTION_TYPE="$original_question_type"
+fi
+
 if [[ "${RUN_SOURCE_ABLATIONS:-0}" == "1" ]]; then
   run_graph "${LABEL_PREFIX}_graph_ppr_sourceablate_no_splade" \
     --dense-top-pages 1000 \
