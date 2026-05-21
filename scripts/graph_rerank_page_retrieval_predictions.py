@@ -42,8 +42,18 @@ def parse_args() -> argparse.Namespace:
         default="",
         help="Optional metadata.type filter applied when --gold is provided, e.g. ImageListQ.",
     )
-    parser.add_argument("--dense-top-pages", type=int, default=1000)
-    parser.add_argument("--sparse-top-pages", type=int, default=1000)
+    parser.add_argument(
+        "--dense-top-pages",
+        type=int,
+        default=1000,
+        help="Dense source candidate pages. Use 0 to disable the dense source.",
+    )
+    parser.add_argument(
+        "--sparse-top-pages",
+        type=int,
+        default=1000,
+        help="Sparse/SPLADE source candidate pages. Use 0 to disable the sparse source.",
+    )
     parser.add_argument(
         "--final-top-pages",
         type=int,
@@ -292,6 +302,8 @@ def parse_page_row(row: list[object]) -> tuple[str, int, float] | None:
 
 
 def ranked_unique_pages(rows: list[list[object]], top_pages: int) -> list[tuple[str, int, float, int]]:
+    if top_pages <= 0:
+        return []
     ranked: list[tuple[str, int, float, int]] = []
     seen: set[str] = set()
     for row in rows:
@@ -304,7 +316,7 @@ def ranked_unique_pages(rows: list[list[object]], top_pages: int) -> list[tuple[
             continue
         seen.add(uid)
         ranked.append((doc_id, page_idx, score, len(ranked) + 1))
-        if top_pages > 0 and len(ranked) >= top_pages:
+        if len(ranked) >= top_pages:
             break
     return ranked
 

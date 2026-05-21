@@ -116,6 +116,53 @@ if [[ "${RUN_CUSTOM_BEST_TOP20:-0}" == "1" ]]; then
     --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
 fi
 
+if [[ "${RUN_SOURCE_ABLATIONS:-0}" == "1" ]]; then
+  run_graph "${LABEL_PREFIX}_graph_ppr_sourceablate_no_splade" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 0 \
+    --sparse-weight 0.0 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_sourceablate_splade_only" \
+    --dense-top-pages 0 \
+    --sparse-top-pages 1000 \
+    --dense-weight 0.0 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_sourceablate_rawdense_plus_splade" \
+    --dense-prediction-json "$RAW_DENSE_PRED" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+
+  run_graph "${LABEL_PREFIX}_graph_ppr_sourceablate_rawdense_only" \
+    --dense-prediction-json "$RAW_DENSE_PRED" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 0 \
+    --sparse-weight 0.0 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+fi
+
 if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
   run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_seedonly" \
     --dense-top-pages 1000 \
