@@ -245,6 +245,8 @@ Observed doc-RRF results so far. The `doc hit@k` columns use the pipeline summar
 | MMDocIR | exact dense + SPLADE doc-RRF, sparse-heavy `0.75/1.25` | 1658 | 1257 / 1658 = 0.7581 | 1440 / 1658 = 0.8685 | page@4 = 0.4444; doc-fused representative page only |
 | MMDocIR | exact dense + SPLADE doc-RRF, dense-heavy `1.25/0.75` | 1658 | 1304 / 1658 = 0.7865 | 1469 / 1658 = 0.8860 | page@4 = 0.4566; doc-fused representative page only |
 | MMDocIR | plain_top224 + SPLADE doc-RRF, dense-heavy `1.25/0.75` | 1658 | 1322 / 1658 = 0.7973 | 1481 / 1658 = 0.8932 | page@4 = 0.4649; doc-fused representative page only |
+| SciEGQA-Bench | SPLADE only | 1623 | 1421 / 1623 = 0.8755 | 1557 / 1623 = 0.9593 | sparse page ranking |
+| SciEGQA-Bench | plain_top224 + SPLADE doc-RRF, dense-heavy `1.25/0.75` | 1623 | 1492 / 1623 = 0.9193 | 1598 / 1623 = 0.9846 | page@4 = 0.5601; doc-fused representative page only |
 | ViDoRe V3 | SPLADE only | 14514 | 9408 / 14514 = 0.6482 | 11658 / 14514 = 0.8032 | sparse page ranking |
 | ViDoRe V3 | exact dense + SPLADE doc-RRF, sparse-heavy `0.75/1.25` | 14514 | 10868 / 14514 = 0.7488 | 13825 / 14514 = 0.9525 | page@4 = 0.1699; doc-fused representative page only |
 | ViDoRe V3 | exact dense + SPLADE doc-RRF, dense-heavy `1.25/0.75` | 14514 | 12477 / 14514 = 0.8597 | 14162 / 14514 = 0.9757 | page@4 = 0.1963; doc-fused representative page only |
@@ -255,6 +257,11 @@ Interpretation:
 - doc-RRF improves substantially over SPLADE alone on both datasets.
 - Dense-heavy RRF is much stronger than sparse-heavy RRF on both datasets, especially ViDoRe V3.
 - It still does not beat the existing dense/compact retrieval runs at early rank on these external datasets.
+- On SciEGQA-Bench, `plain_top224 + SPLADE` improves document recall over plain_top224 but destroys page recall:
+  - plain_top224 doc recall@4: `0.9070`
+  - plain_top224 + SPLADE doc recall@4: `0.9193`
+  - plain_top224 page recall@4: `0.7394`
+  - plain_top224 + SPLADE page recall@4: `0.5601`
 - On MMDocIR, `plain_top224 + SPLADE` improves doc-hit@20 over plain_top224 alone but remains below plain_top224 at doc-hit@4:
   - plain_top224 doc-hit@4: `1336 / 1658 = 0.8058`
   - plain_top224 + SPLADE doc-hit@4: `1322 / 1658 = 0.7973`
@@ -266,7 +273,7 @@ Interpretation:
   - plain_top224 doc recall@20: `0.9809`
   - plain_top224 + SPLADE doc recall@20: `0.9791`
 
-The current takeaway is that the M3DocVQA RRF method is not a direct out-of-the-box win here. ViDoRe is mostly a hard page-within-correct-document problem, while MMDocIR metadata failures need document/page-structure signals that sparse text alone does not capture.
+The current takeaway is that the M3DocVQA RRF method is not a direct out-of-the-box final page-ranker here. It can help document discovery, as SciEGQA shows, but the fused output needs a within-document page reranker. ViDoRe is mostly a hard page-within-correct-document problem, while MMDocIR metadata failures need document/page-structure signals that sparse text alone does not capture.
 
 ## Dataset Summary
 
