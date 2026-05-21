@@ -900,7 +900,33 @@ Then evaluate:
   --gold "$LOCAL_DATA_DIR/opendocvqa/MMQA_dev.jsonl"
 ```
 
-OpenDocVQA full `plain_top224` metrics are pending the sharded rerank merge/evaluation.
+Observed full `plain_top224` after merging 64 shards:
+
+```text
+n_qids 41017
+page_recall@1 0.3516
+page_recall@4 0.5122
+page_recall@20 0.6599
+page_recall@100 0.7932
+page_recall@1000 0.9130
+doc_recall@1 0.3624
+doc_recall@4 0.5307
+doc_recall@20 0.6955
+doc_recall@100 0.8563
+doc_recall@1000 0.9668
+page_hit@4 22604/41017
+doc_hit@4 23404/41017
+```
+
+Compared with full baseline, `plain_top224` underperforms at early ranks on OpenDocVQA:
+
+```text
+page_recall@1 0.4251 -> 0.3516
+page_recall@4 0.5803 -> 0.5122
+page_recall@20 0.6968 -> 0.6599
+page_recall@100 0.7949 -> 0.7932
+page_recall@1000 0.9130 -> 0.9130
+```
 
 ## Common Sanity Check
 
