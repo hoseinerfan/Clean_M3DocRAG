@@ -23,6 +23,21 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
+if [[ -z "${SSL_CERT_FILE:-}" ]]; then
+  SSL_CERT_FILE_CANDIDATE="$("$PYTHON_BIN" - <<'PY' || true
+try:
+    import certifi
+except ImportError:
+    raise SystemExit(0)
+print(certifi.where())
+PY
+)"
+  if [[ -n "$SSL_CERT_FILE_CANDIDATE" && -f "$SSL_CERT_FILE_CANDIDATE" ]]; then
+    export SSL_CERT_FILE="$SSL_CERT_FILE_CANDIDATE"
+    export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$SSL_CERT_FILE_CANDIDATE}"
+  fi
+fi
+
 OCR_ENGINE="${OCR_ENGINE:-tesseract}"
 OCR_BIN="${OCR_BIN:-tesseract}"
 if [[ "$OCR_ENGINE" == "tesseract" ]]; then
@@ -53,6 +68,8 @@ fi
 OCR_PSM="${OCR_PSM:-}"
 OCR_TIMEOUT="${OCR_TIMEOUT:-120}"
 EASYOCR_GPU="${EASYOCR_GPU:-0}"
+EASYOCR_MODEL_DIR="${EASYOCR_MODEL_DIR:-$LOCAL_OUTPUT_DIR/opendocvqa/easyocr_models}"
+EASYOCR_DOWNLOAD="${EASYOCR_DOWNLOAD:-1}"
 MAX_PAGES="${MAX_PAGES:-0}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-250}"
 
@@ -62,8 +79,14 @@ OUTPUT_JSONL="$OUT_DIR/shard_${SHARD_INDEX}_of_${NUM_SHARDS}.jsonl"
 OUTPUT_SUMMARY="$OUT_DIR/shard_${SHARD_INDEX}_of_${NUM_SHARDS}_summary.json"
 
 mkdir -p "$OUT_DIR"
+if [[ "$OCR_ENGINE" == "easyocr" ]]; then
+  mkdir -p "$EASYOCR_MODEL_DIR"
+fi
 
 echo "ocr_shard index=$SHARD_INDEX num_shards=$NUM_SHARDS data_root=$DATA_ROOT output_jsonl=$OUTPUT_JSONL"
+if [[ "$OCR_ENGINE" == "easyocr" ]]; then
+  echo "easyocr_model_dir=$EASYOCR_MODEL_DIR easyocr_download=$EASYOCR_DOWNLOAD ssl_cert_file=${SSL_CERT_FILE:-}"
+fi
 
 OCR_ARGS=(
   --doc-pages-jsonl "$DATA_ROOT/doc_pages_dev.jsonl"
@@ -86,6 +109,12 @@ if [[ -n "$OCR_PSM" ]]; then
 fi
 if [[ "$OCR_ENGINE" == "easyocr" && "$EASYOCR_GPU" != "0" ]]; then
   OCR_ARGS+=(--easyocr-gpu)
+fi
+if [[ "$OCR_ENGINE" == "easyocr" ]]; then
+  OCR_ARGS+=(--easyocr-model-dir "$EASYOCR_MODEL_DIR")
+  if [[ "$EASYOCR_DOWNLOAD" == "0" ]]; then
+    OCR_ARGS+=(--no-easyocr-download)
+  fi
 fi
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/export_converted_page_text.py" "${OCR_ARGS[@]}"

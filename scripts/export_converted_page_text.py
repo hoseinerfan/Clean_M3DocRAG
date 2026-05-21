@@ -74,6 +74,22 @@ def parse_args() -> argparse.Namespace:
         help="Use GPU for EasyOCR. Only applies when --ocr-engine=easyocr.",
     )
     parser.add_argument(
+        "--easyocr-model-dir",
+        default="",
+        help=(
+            "Optional EasyOCR model cache directory. Useful on clusters where compute "
+            "jobs should reuse pre-downloaded detector/recognizer weights."
+        ),
+    )
+    parser.add_argument(
+        "--no-easyocr-download",
+        action="store_true",
+        help=(
+            "Disable EasyOCR model downloads and fail if required weights are missing. "
+            "Only applies when --ocr-engine=easyocr."
+        ),
+    )
+    parser.add_argument(
         "--ocr-continue-on-error",
         action="store_true",
         help="Keep exporting if OCR fails for a page; failed pages get empty text.",
@@ -143,7 +159,12 @@ def easyocr_lang_list(raw_lang: str) -> list[str]:
     return [mapping.get(value.lower(), value.lower()) for value in values]
 
 
-def build_easyocr_reader(raw_lang: str, gpu: bool) -> object:
+def build_easyocr_reader(
+    raw_lang: str,
+    gpu: bool,
+    model_storage_directory: str,
+    download_enabled: bool,
+) -> object:
     try:
         import easyocr  # type: ignore[import-not-found]
     except ImportError as exc:
@@ -151,7 +172,13 @@ def build_easyocr_reader(raw_lang: str, gpu: bool) -> object:
             "EasyOCR is not installed in this Python environment. "
             "Install easyocr or use --ocr-engine=tesseract."
         ) from exc
-    return easyocr.Reader(easyocr_lang_list(raw_lang), gpu=bool(gpu))
+    kwargs: dict[str, object] = {
+        "gpu": bool(gpu),
+        "download_enabled": bool(download_enabled),
+    }
+    if model_storage_directory:
+        kwargs["model_storage_directory"] = str(model_storage_directory)
+    return easyocr.Reader(easyocr_lang_list(raw_lang), **kwargs)
 
 
 def lexical_token_count(text: str) -> int:
@@ -395,7 +422,12 @@ def main() -> None:
     image_root = Path(args.image_root) if args.image_root else None
     easyocr_reader = None
     if args.ocr_image and args.ocr_engine == "easyocr":
-        easyocr_reader = build_easyocr_reader(args.ocr_lang, bool(args.easyocr_gpu))
+        easyocr_reader = build_easyocr_reader(
+            args.ocr_lang,
+            bool(args.easyocr_gpu),
+            str(args.easyocr_model_dir or ""),
+            not bool(args.no_easyocr_download),
+        )
 
     rows = read_jsonl(
         Path(args.doc_pages_jsonl),
@@ -489,6 +521,8 @@ def main() -> None:
         "ocr_lang": args.ocr_lang,
         "ocr_psm": args.ocr_psm,
         "easyocr_gpu": bool(args.easyocr_gpu),
+        "easyocr_model_dir": args.easyocr_model_dir,
+        "easyocr_download_enabled": not bool(args.no_easyocr_download),
         "num_shards": int(args.num_shards),
         "shard_index": int(args.shard_index),
         "page_count": page_count,

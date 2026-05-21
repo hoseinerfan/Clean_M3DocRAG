@@ -240,10 +240,16 @@ source opendocvqa/env_hpc.sh
 
 "$REPO_ROOT/env/bin/python" -c "import easyocr; print(easyocr.__version__)"
 
+export SSL_CERT_FILE="$("$REPO_ROOT/env/bin/python" -c "import certifi; print(certifi.where())")"
+export REQUESTS_CA_BUNDLE="$SSL_CERT_FILE"
+export EASYOCR_MODEL_DIR="$LOCAL_OUTPUT_DIR/opendocvqa/easyocr_models"
+mkdir -p "$EASYOCR_MODEL_DIR"
+"$REPO_ROOT/env/bin/python" -c "import easyocr, os; easyocr.Reader(['en'], gpu=False, model_storage_directory=os.environ['EASYOCR_MODEL_DIR'])"
+
 export EASY_OCR_OUT="$LOCAL_OUTPUT_DIR/opendocvqa/easyocr_page_text_shards"
 sbatch \
   --gres=gpu:1 \
-  --export=ALL,NUM_SHARDS=64,OCR_ENGINE=easyocr,OCR_LANG=en,EASYOCR_GPU=1,OUT_DIR="$EASY_OCR_OUT" \
+  --export=ALL,NUM_SHARDS=64,OCR_ENGINE=easyocr,OCR_LANG=en,EASYOCR_GPU=1,EASYOCR_MODEL_DIR="$EASYOCR_MODEL_DIR",EASYOCR_DOWNLOAD=0,OUT_DIR="$EASY_OCR_OUT" \
   opendocvqa/sbatch_ocr_page_text_opendocvqa_array.sh
 ```
 
