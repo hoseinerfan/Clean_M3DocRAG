@@ -21,6 +21,9 @@ LABEL_PREFIX="${LABEL_PREFIX:-imagelistq}"
 RRF_K="${RRF_K:-10}"
 DENSE_WEIGHT="${DENSE_WEIGHT:-1.0}"
 SPARSE_WEIGHT="${SPARSE_WEIGHT:-1.0}"
+BEST_RESTART_PROB="${BEST_RESTART_PROB:-0.20}"
+BEST_PAGE_PPR_WEIGHT="${BEST_PAGE_PPR_WEIGHT:-1.5}"
+BEST_DOC_PPR_WEIGHT="${BEST_DOC_PPR_WEIGHT:-0.5}"
 
 mkdir -p "$OUTDIR"
 
@@ -96,6 +99,21 @@ if [[ "${RUN_BEST_TOP20:-0}" == "1" ]]; then
     --per-doc-page-limit 1 \
     --doc-seed-weight 0.0 \
     --final-ppr-page-weight 1.5
+fi
+
+if [[ "${RUN_CUSTOM_BEST_TOP20:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --restart-prob "$BEST_RESTART_PROB" \
+    --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+    --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
 fi
 
 if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
