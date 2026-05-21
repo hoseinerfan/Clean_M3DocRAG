@@ -444,3 +444,63 @@ $LOCAL_OUTPUT_DIR/sciegqa/graph_ppr_plain_top224_splade/sciegqa_pagepreserve_swe
 ```
 
 Use page recall@4 as the primary selection metric, with page recall@1, @10, @20 and doc recall@4 as secondary checks.
+
+The generic runner for other datasets is:
+
+```bash
+bash scripts/run_external_page_preserving_graph_ppr_sweep.sh
+```
+
+Set `DATA_NAME`, `DATA_ROOT`, `DENSE_PRED`, `SPARSE_PRED`, `OUT_DIR`, and `LABEL_PREFIX` before calling it.
+
+### MMDocIR Sweep
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+git pull --rebase
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source mmdocir/env_hpc.sh
+
+DATA_NAME=mmdocir \
+DATA_ROOT="$LOCAL_DATA_DIR/mm-docir" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/mmdocir/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/mmdocir/doc_rrf_exact_dense_splade/mmdocir_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/mmdocir/graph_ppr_plain_top224_splade" \
+LABEL_PREFIX="mmdocir_pagepreserve_sweep" \
+bash scripts/run_external_page_preserving_graph_ppr_sweep.sh
+```
+
+### ViDoRe V3 Sweep
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+git pull --rebase
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source vidore/env_hpc.sh
+
+DATA_NAME=vidore-v3 \
+DATA_ROOT="$LOCAL_DATA_DIR/vidore-v3" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/vidore-v3/doc_rrf_exact_dense_splade/vidore-v3_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/vidore-v3/graph_ppr_plain_top224_splade" \
+LABEL_PREFIX="vidore-v3_pagepreserve_sweep" \
+bash scripts/run_external_page_preserving_graph_ppr_sweep.sh
+```
+
+### ViDoSeek Sweep
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+git pull --rebase
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source vidoseek/env_hpc.sh
+
+DATA_NAME=vidoseek \
+DATA_ROOT="$LOCAL_DATA_DIR/vidoseek" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/vidoseek/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/vidoseek/doc_rrf_plain_top224_splade/vidoseek_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/vidoseek/graph_ppr_plain_top224_splade" \
+LABEL_PREFIX="vidoseek_pagepreserve_sweep" \
+bash scripts/run_external_page_preserving_graph_ppr_sweep.sh
+```
