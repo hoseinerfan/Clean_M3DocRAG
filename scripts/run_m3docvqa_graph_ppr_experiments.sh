@@ -163,7 +163,7 @@ if [[ "${RUN_SOURCE_ABLATIONS:-0}" == "1" ]]; then
     --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
 fi
 
-if [[ "${RUN_BUDGET_SWEEP:-0}" == "1" ]]; then
+if [[ "${RUN_BUDGET_SWEEP:-0}" == "1" || "${RUN_BUDGET_VS_RRF_SWEEP:-0}" == "1" ]]; then
   label_restart="${BEST_RESTART_PROB/./p}"
   label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
   label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
@@ -171,6 +171,55 @@ if [[ "${RUN_BUDGET_SWEEP:-0}" == "1" ]]; then
     run_graph "${LABEL_PREFIX}_graph_ppr_budget${budget}_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
       --dense-top-pages "$budget" \
       --sparse-top-pages "$budget" \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --restart-prob "$BEST_RESTART_PROB" \
+      --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+      --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+  done
+fi
+
+if [[ "${RUN_PAGE_RRF_BUDGET_SWEEP:-0}" == "1" || "${RUN_BUDGET_VS_RRF_SWEEP:-0}" == "1" ]]; then
+  for budget in ${BUDGET_VALUES:-20 50 100 200 500 1000}; do
+    run_graph "${LABEL_PREFIX}_graph_ppr_page_rrf_budget${budget}_top20" \
+      --dense-top-pages "$budget" \
+      --sparse-top-pages "$budget" \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --ppr-iters 0 \
+      --page-doc-edge-weight 0.0 \
+      --same-doc-window 0 \
+      --adjacent-page-edge-weight 0.0 \
+      --final-page-seed-weight 1.0 \
+      --final-ppr-page-weight 0.0 \
+      --final-ppr-doc-weight 0.0
+  done
+fi
+
+if [[ "${RUN_ASYMMETRIC_BUDGET_SWEEP:-0}" == "1" ]]; then
+  label_restart="${BEST_RESTART_PROB/./p}"
+  label_page_weight="${BEST_PAGE_PPR_WEIGHT/./p}"
+  label_doc_weight="${BEST_DOC_PPR_WEIGHT/./p}"
+  fixed_top_pages="${ASYM_FIXED_TOP_PAGES:-1000}"
+
+  for dense_budget in ${BUDGET_VALUES:-20 50 100 200 500 1000}; do
+    run_graph "${LABEL_PREFIX}_graph_ppr_asym_dense${dense_budget}_sparse${fixed_top_pages}_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+      --dense-top-pages "$dense_budget" \
+      --sparse-top-pages "$fixed_top_pages" \
+      --final-top-pages 20 \
+      --per-doc-page-limit 1 \
+      --doc-seed-weight 0.0 \
+      --restart-prob "$BEST_RESTART_PROB" \
+      --final-ppr-page-weight "$BEST_PAGE_PPR_WEIGHT" \
+      --final-ppr-doc-weight "$BEST_DOC_PPR_WEIGHT"
+  done
+
+  for sparse_budget in ${BUDGET_VALUES:-20 50 100 200 500 1000}; do
+    run_graph "${LABEL_PREFIX}_graph_ppr_asym_dense${fixed_top_pages}_sparse${sparse_budget}_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}_docw${label_doc_weight}" \
+      --dense-top-pages "$fixed_top_pages" \
+      --sparse-top-pages "$sparse_budget" \
       --final-top-pages 20 \
       --per-doc-page-limit 1 \
       --doc-seed-weight 0.0 \
@@ -517,6 +566,12 @@ for key in [
     "candidate_gold_doc_miss_count",
     "dense_candidate_gold_doc_count",
     "sparse_candidate_gold_doc_count",
+    "source_gold_doc_both_count",
+    "source_gold_doc_dense_only_count",
+    "source_gold_doc_sparse_only_count",
+    "source_gold_doc_neither_count",
+    "candidate_gold_doc_ranker_miss_top20_count",
+    "candidate_gold_doc_promotion_miss_top4_count",
     "graph_recovers_top4_doc_vs_dense_count",
     "graph_loses_top4_doc_vs_dense_count",
     "mean_candidate_page_count",

@@ -933,6 +933,38 @@ def main() -> None:
         summary["sparse_candidate_gold_doc_count"] = sum(1 for hit in sparse_doc_hits if hit is True)
         summary["dense_candidate_gold_page_count"] = sum(1 for hit in dense_page_hits if hit is True)
         summary["sparse_candidate_gold_page_count"] = sum(1 for hit in sparse_page_hits if hit is True)
+        summary["source_gold_doc_both_count"] = sum(
+            1
+            for dense_hit, sparse_hit in zip(dense_doc_hits, sparse_doc_hits)
+            if dense_hit is True and sparse_hit is True
+        )
+        summary["source_gold_doc_dense_only_count"] = sum(
+            1
+            for dense_hit, sparse_hit in zip(dense_doc_hits, sparse_doc_hits)
+            if dense_hit is True and sparse_hit is not True
+        )
+        summary["source_gold_doc_sparse_only_count"] = sum(
+            1
+            for dense_hit, sparse_hit in zip(dense_doc_hits, sparse_doc_hits)
+            if dense_hit is not True and sparse_hit is True
+        )
+        summary["source_gold_doc_neither_count"] = sum(
+            1
+            for dense_hit, sparse_hit in zip(dense_doc_hits, sparse_doc_hits)
+            if dense_hit is not True and sparse_hit is not True
+        )
+        summary["candidate_gold_doc_top4_count"] = summary["reranked_top4_doc_count"]
+        summary["candidate_gold_doc_top20_count"] = summary["reranked_top20_doc_count"]
+        summary["candidate_gold_doc_ranker_miss_top20_count"] = sum(
+            1
+            for candidate_hit, graph_rank in zip(candidate_doc_hits, doc_ranks)
+            if candidate_hit is True and not (graph_rank is not None and int(graph_rank) <= 20)
+        )
+        summary["candidate_gold_doc_promotion_miss_top4_count"] = sum(
+            1
+            for graph_rank in doc_ranks
+            if graph_rank is not None and 4 < int(graph_rank) <= 20
+        )
         summary["graph_recovers_top4_doc_vs_dense_count"] = sum(
             1
             for dense_rank, graph_rank in zip(dense_doc_ranks, doc_ranks)
