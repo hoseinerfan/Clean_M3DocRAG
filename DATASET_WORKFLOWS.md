@@ -247,6 +247,8 @@ Observed doc-RRF results so far. The `doc hit@k` columns use the pipeline summar
 | MMDocIR | plain_top224 + SPLADE doc-RRF, dense-heavy `1.25/0.75` | 1658 | 1322 / 1658 = 0.7973 | 1481 / 1658 = 0.8932 | page@4 = 0.4649; doc-fused representative page only |
 | SciEGQA-Bench | SPLADE only | 1623 | 1421 / 1623 = 0.8755 | 1557 / 1623 = 0.9593 | sparse page ranking |
 | SciEGQA-Bench | plain_top224 + SPLADE doc-RRF, dense-heavy `1.25/0.75` | 1623 | 1492 / 1623 = 0.9193 | 1598 / 1623 = 0.9846 | page@4 = 0.5601; doc-fused representative page only |
+| ViDoSeek | SPLADE only | 1142 | 1126 / 1142 = 0.9860 | 1135 / 1142 = 0.9939 | sparse page ranking |
+| ViDoSeek | plain_top224 + SPLADE doc-RRF, dense-heavy `1.25/0.75` | 1142 | 1141 / 1142 = 0.9991 | 1142 / 1142 = 1.0000 | page@4 = 0.6874; doc-fused representative page only |
 | ViDoRe V3 | SPLADE only | 14514 | 9408 / 14514 = 0.6482 | 11658 / 14514 = 0.8032 | sparse page ranking |
 | ViDoRe V3 | exact dense + SPLADE doc-RRF, sparse-heavy `0.75/1.25` | 14514 | 10868 / 14514 = 0.7488 | 13825 / 14514 = 0.9525 | page@4 = 0.1699; doc-fused representative page only |
 | ViDoRe V3 | exact dense + SPLADE doc-RRF, dense-heavy `1.25/0.75` | 14514 | 12477 / 14514 = 0.8597 | 14162 / 14514 = 0.9757 | page@4 = 0.1963; doc-fused representative page only |
@@ -262,6 +264,11 @@ Interpretation:
   - plain_top224 + SPLADE doc recall@4: `0.9193`
   - plain_top224 page recall@4: `0.7394`
   - plain_top224 + SPLADE page recall@4: `0.5601`
+- On ViDoSeek, document recall was already saturated, so doc-RRF gains only one top-4 document hit while losing a lot of page recall:
+  - plain_top224 doc hit@4: `1140 / 1142 = 0.9982`
+  - plain_top224 + SPLADE doc hit@4: `1141 / 1142 = 0.9991`
+  - plain_top224 page recall@4: `0.8958`
+  - plain_top224 + SPLADE page recall@4: `0.6874`
 - On MMDocIR, `plain_top224 + SPLADE` improves doc-hit@20 over plain_top224 alone but remains below plain_top224 at doc-hit@4:
   - plain_top224 doc-hit@4: `1336 / 1658 = 0.8058`
   - plain_top224 + SPLADE doc-hit@4: `1322 / 1658 = 0.7973`
