@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
+import subprocess
 import sys
 from pathlib import Path
 from statistics import mean
@@ -79,6 +81,46 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=20,
         help="How many deduped docs to expand from the source prediction. Default: 20.",
+    )
+    parser.add_argument(
+        "--post-rerank-top-docs",
+        type=int,
+        default=0,
+        help=(
+            "Optional final doc cap after shortlist reranking. Use 0 to keep --top-docs. "
+            "Example: dense top20 -> BM25 rerank -> keep top10."
+        ),
+    )
+    parser.add_argument(
+        "--shortlist-rerank-mode",
+        default="none",
+        choices=["none", "bm25_only", "bm25_rrf"],
+        help=(
+            "Optional lexical reranker over the dense top-doc shortlist before crop verification. "
+            "'bm25_only' sorts by max page BM25 score; 'bm25_rrf' fuses dense and BM25 doc ranks."
+        ),
+    )
+    parser.add_argument(
+        "--bm25-query-source",
+        default="cue_tokens",
+        choices=["cue_tokens", "full_question", "both"],
+        help="Which query text to use for shortlist BM25 reranking. Default: cue_tokens.",
+    )
+    parser.add_argument(
+        "--bm25-rrf-k",
+        type=float,
+        default=60.0,
+        help="RRF k used when --shortlist-rerank-mode=bm25_rrf. Default: 60.",
+    )
+    parser.add_argument(
+        "--pdftotext-bin",
+        default="pdftotext",
+        help="Path to pdftotext used for per-page text extraction. Default: pdftotext",
+    )
+    parser.add_argument(
+        "--pdfinfo-bin",
+        default="pdfinfo",
+        help="Path to pdfinfo used to count PDF pages when needed. Default: pdfinfo",
     )
     parser.add_argument(
         "--max-pages-per-doc",
@@ -205,6 +247,219 @@ def dedupe_top_doc_ids(page_rows: list[list[object]], top_docs: int) -> list[str
         if len(doc_ids) >= top_docs:
             break
     return doc_ids
+
+
+def tokenize_lexical_text(text: str) -> list[str]:
+    return [token for token in re.findall(r"[A-Za-z0-9]+", str(text).lower()) if token]
+
+
+def build_bm25_query_terms(
+    *,
+    question: str,
+    cue_token_substrings: list[str],
+    query_source: str,
+) -> list[str]:
+    terms: list[str] = []
+    if query_source in {"cue_tokens", "both"}:
+        for value in cue_token_substrings:
+            terms.extend(tokenize_lexical_text(value))
+    if query_source in {"full_question", "both"}:
+        terms.extend(tokenize_lexical_text(question))
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        if term in seen:
+            continue
+        seen.add(term)
+        deduped.append(term)
+    return deduped
+
+
+def get_pdf_page_count(*, pdfinfo_bin: str, pdf_path: Path) -> int:
+    result = subprocess.run(
+        [pdfinfo_bin, str(pdf_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    for line in result.stdout.splitlines():
+        if line.startswith("Pages:"):
+            value = line.split(":", 1)[1].strip()
+            return int(value)
+    raise ValueError(f"Could not parse page count from pdfinfo output for {pdf_path}")
+
+
+def extract_pdf_page_text(
+    *,
+    pdftotext_bin: str,
+    pdf_path: Path,
+    page_idx: int,
+) -> str:
+    page_num = int(page_idx) + 1
+    result = subprocess.run(
+        [
+            pdftotext_bin,
+            "-f",
+            str(page_num),
+            "-l",
+            str(page_num),
+            str(pdf_path),
+            "-",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
+
+
+def score_pages_with_bm25(
+    *,
+    page_texts: dict[str, str],
+    query_terms: list[str],
+    k1: float = 1.2,
+    b: float = 0.75,
+) -> dict[str, float]:
+    if not page_texts:
+        return {}
+    tokenized_pages = {page_uid: tokenize_lexical_text(text) for page_uid, text in page_texts.items()}
+    doc_count = len(tokenized_pages)
+    avgdl = sum(len(tokens) for tokens in tokenized_pages.values()) / max(1, doc_count)
+    dfs: dict[str, int] = {}
+    for tokens in tokenized_pages.values():
+        for term in set(tokens):
+            dfs[term] = dfs.get(term, 0) + 1
+
+    scores: dict[str, float] = {}
+    for page_uid, tokens in tokenized_pages.items():
+        if not tokens or not query_terms:
+            scores[page_uid] = 0.0
+            continue
+        freqs: dict[str, int] = {}
+        for token in tokens:
+            freqs[token] = freqs.get(token, 0) + 1
+        dl = len(tokens)
+        score = 0.0
+        for term in query_terms:
+            tf = freqs.get(term, 0)
+            if tf <= 0:
+                continue
+            df = dfs.get(term, 0)
+            idf = math.log(1.0 + ((doc_count - df + 0.5) / (df + 0.5)))
+            denom = tf + k1 * (1.0 - b + b * (dl / max(avgdl, 1e-6)))
+            score += idf * ((tf * (k1 + 1.0)) / max(denom, 1e-6))
+        scores[page_uid] = float(score)
+    return scores
+
+
+def rerank_docs_with_shortlist_bm25(
+    *,
+    args: argparse.Namespace,
+    dataset: M3DocVQADataset,
+    top_doc_ids: list[str],
+    question: str,
+    cue_token_substrings: list[str],
+    page_text_cache: dict[str, str],
+    doc_page_count_cache: dict[str, int],
+) -> tuple[list[str], dict]:
+    if args.shortlist_rerank_mode == "none":
+        return top_doc_ids, {
+            "mode": "none",
+            "query_terms": [],
+            "candidate_page_count": 0,
+            "top_page_uid_by_bm25": None,
+            "top_doc_id_by_bm25": None,
+            "doc_rank_by_bm25": {},
+            "doc_scores_by_bm25": {},
+            "page_scores_by_bm25_top10": [],
+        }
+
+    query_terms = build_bm25_query_terms(
+        question=question,
+        cue_token_substrings=cue_token_substrings,
+        query_source=args.bm25_query_source,
+    )
+    if not query_terms:
+        return top_doc_ids, {
+            "mode": "none_no_query_terms",
+            "query_terms": [],
+            "candidate_page_count": 0,
+            "top_page_uid_by_bm25": None,
+            "top_doc_id_by_bm25": None,
+            "doc_rank_by_bm25": {},
+            "doc_scores_by_bm25": {},
+            "page_scores_by_bm25_top10": [],
+        }
+
+    candidate_page_texts: dict[str, str] = {}
+    for doc_id in top_doc_ids:
+        pdf_path = dataset.pdf_dir / f"{doc_id}.pdf"
+        if args.max_pages_per_doc > 0:
+            page_limit = int(args.max_pages_per_doc)
+        else:
+            if doc_id not in doc_page_count_cache:
+                doc_page_count_cache[doc_id] = get_pdf_page_count(
+                    pdfinfo_bin=args.pdfinfo_bin,
+                    pdf_path=pdf_path,
+                )
+            page_limit = int(doc_page_count_cache[doc_id])
+        for page_idx in range(page_limit):
+            page_uid = f"{doc_id}_page{page_idx}"
+            if page_uid not in page_text_cache:
+                page_text_cache[page_uid] = extract_pdf_page_text(
+                    pdftotext_bin=args.pdftotext_bin,
+                    pdf_path=pdf_path,
+                    page_idx=page_idx,
+                )
+            candidate_page_texts[page_uid] = page_text_cache[page_uid]
+
+    page_scores = score_pages_with_bm25(page_texts=candidate_page_texts, query_terms=query_terms)
+    page_ranked = sorted(
+        page_scores.items(),
+        key=lambda item: (-float(item[1]), item[0]),
+    )
+
+    doc_score_map: dict[str, float] = {}
+    doc_best_page_map: dict[str, str] = {}
+    for page_uid, score in page_ranked:
+        doc_id, _page_idx = parse_page_uid(page_uid)
+        if doc_id not in doc_score_map or float(score) > doc_score_map[doc_id]:
+            doc_score_map[doc_id] = float(score)
+            doc_best_page_map[doc_id] = page_uid
+
+    bm25_doc_ids = sorted(
+        top_doc_ids,
+        key=lambda doc_id: (-doc_score_map.get(doc_id, float("-inf")), doc_id),
+    )
+    bm25_doc_rank = {doc_id: rank for rank, doc_id in enumerate(bm25_doc_ids, start=1)}
+
+    if args.shortlist_rerank_mode == "bm25_only":
+        final_doc_ids = bm25_doc_ids
+    else:
+        dense_rank = {doc_id: rank for rank, doc_id in enumerate(top_doc_ids, start=1)}
+        fused_scores = {
+            doc_id: (
+                1.0 / (float(args.bm25_rrf_k) + dense_rank[doc_id])
+                + 1.0 / (float(args.bm25_rrf_k) + bm25_doc_rank[doc_id])
+            )
+            for doc_id in top_doc_ids
+        }
+        final_doc_ids = sorted(top_doc_ids, key=lambda doc_id: (-fused_scores[doc_id], doc_id))
+
+    return final_doc_ids, {
+        "mode": args.shortlist_rerank_mode,
+        "query_terms": query_terms,
+        "candidate_page_count": len(candidate_page_texts),
+        "top_page_uid_by_bm25": None if not page_ranked else page_ranked[0][0],
+        "top_doc_id_by_bm25": None if not bm25_doc_ids else bm25_doc_ids[0],
+        "doc_rank_by_bm25": bm25_doc_rank,
+        "doc_scores_by_bm25": {doc_id: float(doc_score_map.get(doc_id, 0.0)) for doc_id in top_doc_ids},
+        "page_scores_by_bm25_top10": [
+            {"page_uid": page_uid, "score": float(score)}
+            for page_uid, score in page_ranked[:10]
+        ],
+        "doc_best_page_by_bm25": doc_best_page_map,
+    }
 
 
 def prepare_query_package(
@@ -489,8 +744,14 @@ def rank_of_doc(doc_records: list[dict], doc_id: str) -> int | None:
 def summarize_runs(rows: list[dict]) -> dict[str, object]:
     qid_count = len(rows)
     positive_doc_in_top_docs = sum(bool(row["positive_doc_in_top_docs"]) for row in rows)
+    positive_doc_in_final_top_docs = sum(bool(row.get("positive_doc_in_final_top_docs")) for row in rows)
     positive_page_rank1 = sum(int(row["positive_page_rank_by_best_crop"] or 10**9) == 1 for row in rows)
     positive_doc_rank1 = sum(int(row["positive_doc_rank_by_best_crop"] or 10**9) == 1 for row in rows)
+    positive_doc_ranks_bm25 = [
+        int(row["positive_doc_rank_by_bm25"])
+        for row in rows
+        if row.get("positive_doc_rank_by_bm25") is not None
+    ]
     positive_page_ranks = [
         int(row["positive_page_rank_by_best_crop"])
         for row in rows
@@ -504,8 +765,12 @@ def summarize_runs(rows: list[dict]) -> dict[str, object]:
     return {
         "qid_count": qid_count,
         "positive_doc_in_top_docs_count": positive_doc_in_top_docs,
+        "positive_doc_in_final_top_docs_count": positive_doc_in_final_top_docs,
         "positive_page_rank1_count": positive_page_rank1,
         "positive_doc_rank1_count": positive_doc_rank1,
+        "mean_positive_doc_rank_by_bm25": (
+            float(mean(positive_doc_ranks_bm25)) if positive_doc_ranks_bm25 else None
+        ),
         "mean_positive_page_rank_by_best_crop": (
             float(mean(positive_page_ranks)) if positive_page_ranks else None
         ),
@@ -536,6 +801,8 @@ def main() -> None:
     output_summary_json.parent.mkdir(parents=True, exist_ok=True)
 
     doc_image_cache: dict[str, list] = {}
+    page_text_cache: dict[str, str] = {}
+    doc_page_count_cache: dict[str, int] = {}
     per_qid_rows: list[dict] = []
 
     with output_jsonl.open("w", encoding="utf-8") as handle:
@@ -552,14 +819,45 @@ def main() -> None:
             )
 
             prediction_rows = prediction_payload[qid].get("page_retrieval_results", [])
-            top_doc_ids = dedupe_top_doc_ids(prediction_rows, int(args.top_docs))
-            positive_doc_in_top_docs = positive_doc_id in set(top_doc_ids)
+            dense_top_doc_ids = dedupe_top_doc_ids(prediction_rows, int(args.top_docs))
+            positive_doc_in_top_docs = positive_doc_id in set(dense_top_doc_ids)
             query_package = prepare_query_package(
                 retrieval_model=retrieval_model,
                 question=gold_row["question"],
                 query_token_filter=args.query_token_filter,
                 cue_token_substrings=override["cue_token_substrings"],
             )
+            try:
+                reranked_top_doc_ids, shortlist_rerank_trace = rerank_docs_with_shortlist_bm25(
+                    args=args,
+                    dataset=dataset,
+                    top_doc_ids=dense_top_doc_ids,
+                    question=gold_row["question"],
+                    cue_token_substrings=query_package["cue_token_substrings_applied"],
+                    page_text_cache=page_text_cache,
+                    doc_page_count_cache=doc_page_count_cache,
+                )
+            except Exception as exc:  # noqa: BLE001
+                reranked_top_doc_ids = list(dense_top_doc_ids)
+                shortlist_rerank_trace = {
+                    "mode": "fallback_dense_after_error",
+                    "error": str(exc),
+                    "query_terms": [],
+                    "candidate_page_count": 0,
+                    "top_page_uid_by_bm25": None,
+                    "top_doc_id_by_bm25": None,
+                    "doc_rank_by_bm25": {},
+                    "doc_scores_by_bm25": {},
+                    "page_scores_by_bm25_top10": [],
+                    "doc_best_page_by_bm25": {},
+                }
+            final_top_docs = (
+                int(args.post_rerank_top_docs)
+                if int(args.post_rerank_top_docs) > 0
+                else int(args.top_docs)
+            )
+            top_doc_ids = reranked_top_doc_ids[:final_top_docs]
+            positive_doc_in_final_top_docs = positive_doc_id in set(top_doc_ids)
 
             candidate_page_uids: list[str] = []
             for doc_id in top_doc_ids:
@@ -602,12 +900,16 @@ def main() -> None:
                 "qid": qid,
                 "question": gold_row["question"],
                 "gold_doc_ids": gold_doc_ids,
+                "dense_top_doc_ids": dense_top_doc_ids,
                 "top_doc_ids": top_doc_ids,
                 "positive_page_uid": positive_page_uid,
                 "positive_doc_id": positive_doc_id,
                 "positive_doc_in_top_docs": positive_doc_in_top_docs,
+                "positive_doc_in_final_top_docs": positive_doc_in_final_top_docs,
                 "cue_token_substrings": override["cue_token_substrings"],
                 "excluded_doc_ids": excluded_doc_ids,
+                "shortlist_rerank_trace": shortlist_rerank_trace,
+                "positive_doc_rank_by_bm25": shortlist_rerank_trace["doc_rank_by_bm25"].get(positive_doc_id),
                 "candidate_page_count": len(candidate_page_uids),
                 "successful_page_count": sum(row.get("status") == "ok" for row in page_records),
                 "failed_page_count": sum(row.get("status") != "ok" for row in page_records),
@@ -623,6 +925,14 @@ def main() -> None:
 
     summary = {
         "top_docs": int(args.top_docs),
+        "post_rerank_top_docs": (
+            int(args.post_rerank_top_docs)
+            if int(args.post_rerank_top_docs) > 0
+            else int(args.top_docs)
+        ),
+        "shortlist_rerank_mode": args.shortlist_rerank_mode,
+        "bm25_query_source": args.bm25_query_source,
+        "bm25_rrf_k": float(args.bm25_rrf_k),
         "max_pages_per_doc": int(args.max_pages_per_doc),
         "query_token_filter": args.query_token_filter,
         "crop_region_source": args.crop_region_source,
@@ -636,6 +946,9 @@ def main() -> None:
     print(f"saved_jsonl: {output_jsonl}")
     print(f"saved_summary: {output_summary_json}")
     print(f"num_qids: {len(per_qid_rows)}")
+    print(f"positive_doc_in_top_docs_count: {summary['per_qid_summary']['positive_doc_in_top_docs_count']}")
+    print(f"positive_doc_in_final_top_docs_count: {summary['per_qid_summary']['positive_doc_in_final_top_docs_count']}")
+    print(f"mean_positive_doc_rank_by_bm25: {summary['per_qid_summary']['mean_positive_doc_rank_by_bm25']}")
     print(f"positive_doc_rank1_count: {summary['per_qid_summary']['positive_doc_rank1_count']}")
     print(f"positive_page_rank1_count: {summary['per_qid_summary']['positive_page_rank1_count']}")
 
