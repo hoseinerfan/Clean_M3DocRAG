@@ -127,6 +127,116 @@ ViDoRe finance/table-heavy failures:
   --output-md "$LOCAL_OUTPUT_DIR/vidore-v3/failed_gold_pages_finance_fr_table.md"
 ```
 
+## Exact Dense + SPLADE Doc-RRF Verification
+
+Use this to test whether the portable dense+sparse method also improves the external datasets. The dense side should be the full/exact MaxSim baseline prediction, not `plain_top224`, so the comparison asks whether document-level RRF can improve over exact dense retrieval.
+
+The reusable driver is:
+
+```bash
+scripts/run_external_doc_rrf_pipeline.sh
+```
+
+It runs:
+
+1. `scripts/export_converted_page_text.py`
+2. `scripts/build_splade_page_index.py`
+3. `scripts/run_splade_page_retrieval.py`
+4. `scripts/fuse_page_retrieval_predictions.py --fusion-mode doc_rrf`
+5. `mmdocir/evaluate_mmdocir_retrieval.py --recall-k 1 2 4 5 10 20`
+
+Default RRF settings match the best current non-heuristic M3DocVQA setup:
+
+```text
+dense_top_docs=20
+sparse_top_docs=20
+final_top_docs=20
+rrf_k=10
+dense_weight=0.75
+sparse_weight=1.25
+```
+
+MMDocIR:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source mmdocir/env_hpc.sh
+
+DATA_NAME=mmdocir \
+DATA_ROOT="$LOCAL_DATA_DIR/mm-docir" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/mmdocir/baseline_ret1000.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/mmdocir/doc_rrf_exact_dense_splade" \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
+```
+
+ViDoRe V3:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source vidore/env_hpc.sh
+
+DATA_NAME=vidore-v3 \
+DATA_ROOT="$LOCAL_DATA_DIR/vidore-v3" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/vidore-v3/doc_rrf_exact_dense_splade" \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
+```
+
+SciEGQA-Bench has rendered page images plus source PDFs under the prepared raw image tree. Pass `PDF_ROOT` so the page-text exporter can use `pdftotext`:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source sciegqa/env_hpc.sh
+
+DATA_NAME=sciegqa \
+DATA_ROOT="$LOCAL_DATA_DIR/sci-egqa-bench" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/sciegqa/baseline_ret1000.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/sciegqa/doc_rrf_exact_dense_splade" \
+PDF_ROOT="$LOCAL_DATA_DIR/sci-egqa-bench/images_raw" \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
+```
+
+ViDoSeek also needs `PDF_ROOT`:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source vidoseek/env_hpc.sh
+
+DATA_NAME=vidoseek \
+DATA_ROOT="$LOCAL_DATA_DIR/vidoseek" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/vidoseek/baseline_ret1000.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/vidoseek/doc_rrf_exact_dense_splade" \
+PDF_ROOT="$LOCAL_DATA_DIR/vidoseek/pdfs_raw" \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
+```
+
+OpenDocVQA is not ready for this exact SPLADE/RRF check yet because the converted `doc_pages_dev.jsonl` has image paths and source IDs but no OCR/markdown text. Running the driver will fail fast with `--require-nonempty`. Add OCR or VLM page text to the manifest first, then use the same driver with:
+
+```bash
+DATA_NAME=opendocvqa \
+DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/baseline_ret1000.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_exact_dense_splade" \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
+```
+
+Compare the RRF output against the exact dense baseline with the same evaluator:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$OUT_DIR/${DATA_NAME}_exact_dense_splade_doc_rrf.prediction.json" \
+  --gold "$DATA_ROOT/MMQA_dev.jsonl" \
+  --recall-k 1 2 4 5 10 20
+```
+
+For this verification, treat `doc@4` and `doc@20` as the primary numbers. The fused prediction keeps one representative page row per fused document, so page-level numbers are diagnostic but not a full page-ranking replacement.
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |
