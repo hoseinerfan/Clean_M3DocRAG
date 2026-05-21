@@ -17,6 +17,7 @@ SPLADE_PRED="${SPLADE_PRED:-$OUTDIR/mmqa_dev_splade.prediction.json}"
 SPLADE_INDEX_PT="${SPLADE_INDEX_PT:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt}"
 
 QUESTION_TYPE="${QUESTION_TYPE:-ImageListQ}"
+LABEL_PREFIX="${LABEL_PREFIX:-imagelistq}"
 RRF_K="${RRF_K:-10}"
 DENSE_WEIGHT="${DENSE_WEIGHT:-1.0}"
 SPARSE_WEIGHT="${SPARSE_WEIGHT:-1.0}"
@@ -40,7 +41,7 @@ run_graph() {
 }
 
 if [[ "${RUN_DOC_TOP20:-1}" == "1" ]]; then
-  run_graph "imagelistq_graph_ppr_eq_k10_top20" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 20 \
@@ -48,7 +49,7 @@ if [[ "${RUN_DOC_TOP20:-1}" == "1" ]]; then
 fi
 
 if [[ "${RUN_PAGE_TOP500:-1}" == "1" ]]; then
-  run_graph "imagelistq_graph_ppr_eq_k10_top500pages" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top500pages" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 500 \
@@ -56,7 +57,7 @@ if [[ "${RUN_PAGE_TOP500:-1}" == "1" ]]; then
 fi
 
 if [[ "${RUN_EXPAND_TOP500:-0}" == "1" ]]; then
-  run_graph "imagelistq_graph_ppr_sparse_expand_top500pages" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_sparse_expand_top500pages" \
     --dense-prediction-json "$EXPAND_DENSE_PRED" \
     --dense-top-pages 200 \
     --sparse-top-pages 200 \
@@ -72,7 +73,7 @@ if [[ "${RUN_EXPAND_TOP500:-0}" == "1" ]]; then
 fi
 
 if [[ "${RUN_RAW_EXPAND_TOP500:-0}" == "1" ]]; then
-  run_graph "imagelistq_graph_ppr_rawdense_sparse_expand_top500pages" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_rawdense_sparse_expand_top500pages" \
     --dense-prediction-json "$RAW_DENSE_PRED" \
     --dense-top-pages 200 \
     --sparse-top-pages 200 \
@@ -87,8 +88,18 @@ if [[ "${RUN_RAW_EXPAND_TOP500:-0}" == "1" ]]; then
     --expansion-query-topk-terms "${EXPANSION_QUERY_TOPK_TERMS:-256}"
 fi
 
+if [[ "${RUN_BEST_TOP20:-0}" == "1" ]]; then
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_nodocseed_pagew1p5" \
+    --dense-top-pages 1000 \
+    --sparse-top-pages 1000 \
+    --final-top-pages 20 \
+    --per-doc-page-limit 1 \
+    --doc-seed-weight 0.0 \
+    --final-ppr-page-weight 1.5
+fi
+
 if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
-  run_graph "imagelistq_graph_ppr_eq_k10_top20_seedonly" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_seedonly" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 20 \
@@ -97,7 +108,7 @@ if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
     --final-ppr-page-weight 0.0 \
     --final-ppr-doc-weight 0.0
 
-  run_graph "imagelistq_graph_ppr_eq_k10_top20_pageppr_only" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_pageppr_only" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 20 \
@@ -106,7 +117,7 @@ if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
     --final-ppr-page-weight 1.0 \
     --final-ppr-doc-weight 0.0
 
-  run_graph "imagelistq_graph_ppr_eq_k10_top20_docppr_only" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_docppr_only" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 20 \
@@ -115,7 +126,7 @@ if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
     --final-ppr-page-weight 0.0 \
     --final-ppr-doc-weight 1.0
 
-  run_graph "imagelistq_graph_ppr_eq_k10_top20_no_adjacent" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_no_adjacent" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 20 \
@@ -123,20 +134,20 @@ if [[ "${RUN_ABLATIONS:-0}" == "1" ]]; then
     --same-doc-window 0 \
     --adjacent-page-edge-weight 0.0
 
-  run_graph "imagelistq_graph_ppr_eq_k10_top20_no_doc_seed" \
+  run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_no_doc_seed" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 20 \
     --per-doc-page-limit 1 \
     --doc-seed-weight 0.0
 
-  DENSE_WEIGHT=0.75 SPARSE_WEIGHT=1.25 run_graph "imagelistq_graph_ppr_sparseheavy_k10_top20" \
+  DENSE_WEIGHT=0.75 SPARSE_WEIGHT=1.25 run_graph "${LABEL_PREFIX}_graph_ppr_sparseheavy_k10_top20" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 20 \
     --per-doc-page-limit 1
 
-  DENSE_WEIGHT=1.25 SPARSE_WEIGHT=0.75 run_graph "imagelistq_graph_ppr_denseheavy_k10_top20" \
+  DENSE_WEIGHT=1.25 SPARSE_WEIGHT=0.75 run_graph "${LABEL_PREFIX}_graph_ppr_denseheavy_k10_top20" \
     --dense-top-pages 1000 \
     --sparse-top-pages 1000 \
     --final-top-pages 20 \
@@ -146,7 +157,7 @@ fi
 if [[ "${RUN_NO_DOC_SEED_SWEEP:-0}" == "1" ]]; then
   for doc_ppr_weight in 0.0 0.25 0.5 0.75 1.0 1.5; do
     label_doc_weight="${doc_ppr_weight/./p}"
-    run_graph "imagelistq_graph_ppr_eq_k10_top20_nodocseed_docw${label_doc_weight}" \
+    run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_nodocseed_docw${label_doc_weight}" \
       --dense-top-pages 1000 \
       --sparse-top-pages 1000 \
       --final-top-pages 20 \
@@ -157,7 +168,7 @@ if [[ "${RUN_NO_DOC_SEED_SWEEP:-0}" == "1" ]]; then
 
   for page_ppr_weight in 0.25 0.5 1.0 1.5 2.0; do
     label_page_weight="${page_ppr_weight/./p}"
-    run_graph "imagelistq_graph_ppr_eq_k10_top20_nodocseed_pagew${label_page_weight}" \
+    run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_nodocseed_pagew${label_page_weight}" \
       --dense-top-pages 1000 \
       --sparse-top-pages 1000 \
       --final-top-pages 20 \
@@ -168,7 +179,7 @@ if [[ "${RUN_NO_DOC_SEED_SWEEP:-0}" == "1" ]]; then
 
   for restart_prob in 0.10 0.15 0.20 0.25 0.35; do
     label_restart="${restart_prob/./p}"
-    run_graph "imagelistq_graph_ppr_eq_k10_top20_nodocseed_restart${label_restart}" \
+    run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_nodocseed_restart${label_restart}" \
       --dense-top-pages 1000 \
       --sparse-top-pages 1000 \
       --final-top-pages 20 \
@@ -178,7 +189,40 @@ if [[ "${RUN_NO_DOC_SEED_SWEEP:-0}" == "1" ]]; then
   done
 fi
 
-for summary in "$OUTDIR"/imagelistq_graph_ppr_*summary.json; do
+if [[ "${RUN_BEST_COMBO_SWEEP:-0}" == "1" ]]; then
+  for restart_prob in 0.08 0.10 0.12 0.15 0.18; do
+    for page_ppr_weight in 1.25 1.5 1.75; do
+      label_restart="${restart_prob/./p}"
+      label_page_weight="${page_ppr_weight/./p}"
+      run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_nodocseed_restart${label_restart}_pagew${label_page_weight}" \
+        --dense-top-pages 1000 \
+        --sparse-top-pages 1000 \
+        --final-top-pages 20 \
+        --per-doc-page-limit 1 \
+        --doc-seed-weight 0.0 \
+        --restart-prob "$restart_prob" \
+        --final-ppr-page-weight "$page_ppr_weight"
+    done
+  done
+
+  for restart_prob in 0.10 0.15; do
+    for doc_ppr_weight in 0.25 0.5 0.75; do
+      label_restart="${restart_prob/./p}"
+      label_doc_weight="${doc_ppr_weight/./p}"
+      run_graph "${LABEL_PREFIX}_graph_ppr_eq_k10_top20_nodocseed_restart${label_restart}_pagew1p5_docw${label_doc_weight}" \
+        --dense-top-pages 1000 \
+        --sparse-top-pages 1000 \
+        --final-top-pages 20 \
+        --per-doc-page-limit 1 \
+        --doc-seed-weight 0.0 \
+        --restart-prob "$restart_prob" \
+        --final-ppr-page-weight 1.5 \
+        --final-ppr-doc-weight "$doc_ppr_weight"
+    done
+  done
+fi
+
+for summary in "$OUTDIR"/"${LABEL_PREFIX}"_graph_ppr_*summary.json; do
   [[ -f "$summary" ]] || continue
   "$PYTHON_BIN" - "$summary" <<'PY'
 import json
