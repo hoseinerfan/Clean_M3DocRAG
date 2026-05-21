@@ -352,6 +352,96 @@ Interpretation:
 
 The current takeaway is that the M3DocVQA RRF method is not a direct out-of-the-box final page-ranker here. It can help document discovery, as SciEGQA shows, but the fused output needs a within-document page reranker. ViDoRe is mostly a hard page-within-correct-document problem, while MMDocIR metadata failures need document/page-structure signals that sparse text alone does not capture.
 
+## Graph-PPR Verification
+
+Use `scripts/run_external_graph_ppr_pipeline.sh` to test the graph-PPR method on the same dense/SPLADE artifacts. The default configuration mirrors the current M3DocVQA graph-PPR setting for page ranking:
+
+- dense source: `plain_top224_ret1000_prediction.json`
+- sparse source: SPLADE `*_splade_ret1000.prediction.json`
+- graph budget: dense top 1000 + sparse top 1000
+- final output: top 1000 pages, no per-document cap
+- PPR: `DOC_SEED_WEIGHT=0.0`, `RESTART_PROB=0.20`, `FINAL_PPR_PAGE_WEIGHT=1.5`, `FINAL_PPR_DOC_WEIGHT=0.5`
+- source weights: equal by default; set `DENSE_WEIGHT=1.25 SPARSE_WEIGHT=0.75` for the dense-heavy variant
+
+Start with the smaller datasets first.
+
+SciEGQA-Bench:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source sciegqa/env_hpc.sh
+
+DATA_NAME=sciegqa \
+DATA_ROOT="$LOCAL_DATA_DIR/sci-egqa-bench" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/sciegqa/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/sciegqa/doc_rrf_plain_top224_splade/sciegqa_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/sciegqa/graph_ppr_plain_top224_splade" \
+GRAPH_LABEL="sciegqa_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+ViDoSeek:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source vidoseek/env_hpc.sh
+
+DATA_NAME=vidoseek \
+DATA_ROOT="$LOCAL_DATA_DIR/vidoseek" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/vidoseek/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/vidoseek/doc_rrf_plain_top224_splade/vidoseek_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/vidoseek/graph_ppr_plain_top224_splade" \
+GRAPH_LABEL="vidoseek_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+MMDocIR:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source mmdocir/env_hpc.sh
+
+DATA_NAME=mmdocir \
+DATA_ROOT="$LOCAL_DATA_DIR/mm-docir" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/mmdocir/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/mmdocir/doc_rrf_exact_dense_splade/mmdocir_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/mmdocir/graph_ppr_plain_top224_splade" \
+GRAPH_LABEL="mmdocir_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+ViDoRe V3:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source vidore/env_hpc.sh
+
+DATA_NAME=vidore-v3 \
+DATA_ROOT="$LOCAL_DATA_DIR/vidore-v3" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/vidore-v3/doc_rrf_exact_dense_splade/vidore-v3_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/vidore-v3/graph_ppr_plain_top224_splade" \
+GRAPH_LABEL="vidore-v3_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+OpenDocVQA needs the EasyOCR/Tesseract page-text shards to finish first. After SPLADE has been rebuilt from real OCR text, use the same graph-PPR runner with the OCR-backed SPLADE prediction:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source opendocvqa/env_hpc.sh
+
+DATA_NAME=opendocvqa \
+DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/opendocvqa/graph_ppr_plain_top224_splade" \
+GRAPH_LABEL="opendocvqa_plain_top224_splade_graph_ppr_page1000_nodocseed" \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |
