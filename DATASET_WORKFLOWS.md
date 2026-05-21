@@ -231,6 +231,22 @@ sbatch \
   opendocvqa/sbatch_ocr_page_text_opendocvqa_array.sh
 ```
 
+If the cluster has no Tesseract module, use the Python EasyOCR fallback. Request a GPU for this path:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source opendocvqa/env_hpc.sh
+
+"$REPO_ROOT/env/bin/python" -c "import easyocr; print(easyocr.__version__)"
+
+export EASY_OCR_OUT="$LOCAL_OUTPUT_DIR/opendocvqa/easyocr_page_text_shards"
+sbatch \
+  --gres=gpu:1 \
+  --export=ALL,NUM_SHARDS=64,OCR_ENGINE=easyocr,OCR_LANG=en,EASYOCR_GPU=1,OUT_DIR="$EASY_OCR_OUT" \
+  opendocvqa/sbatch_ocr_page_text_opendocvqa_array.sh
+```
+
 After all OCR shards complete, merge them into the page-text file consumed by SPLADE:
 
 ```bash
@@ -243,6 +259,12 @@ source opendocvqa/env_hpc.sh
   --output-jsonl "$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_page_text_dev.jsonl" \
   --output-summary-json "$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_page_text_dev_merge_summary.json" \
   --dedupe-key page_uid
+```
+
+For the EasyOCR path, change the merge `--input-glob` to:
+
+```bash
+--input-glob "$LOCAL_OUTPUT_DIR/opendocvqa/easyocr_page_text_shards/shard_*_of_64.jsonl"
 ```
 
 Then run the same plain_top224 + SPLADE dense-heavy doc-RRF check:

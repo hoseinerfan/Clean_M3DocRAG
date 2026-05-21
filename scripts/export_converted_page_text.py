@@ -58,10 +58,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Run OCR on page images when no manifest/PDF text is available.",
     )
+    parser.add_argument(
+        "--ocr-engine",
+        choices=["tesseract", "easyocr"],
+        default="tesseract",
+        help="Image OCR backend. Default: tesseract.",
+    )
     parser.add_argument("--ocr-bin", default="tesseract")
     parser.add_argument("--ocr-lang", default="eng")
     parser.add_argument("--ocr-psm", default="")
     parser.add_argument("--ocr-timeout", type=int, default=120)
+    parser.add_argument(
+        "--easyocr-gpu",
+        action="store_true",
+        help="Use GPU for EasyOCR. Only applies when --ocr-engine=easyocr.",
+    )
     parser.add_argument(
         "--ocr-continue-on-error",
         action="store_true",
@@ -113,6 +124,34 @@ def normalize_text(value: object) -> str:
         value = json.dumps(value, ensure_ascii=False, sort_keys=True)
     text = str(value).replace("\x0c", " ").replace("\u0000", " ")
     return re.sub(r"\s+", " ", text).strip()
+
+
+def easyocr_lang_list(raw_lang: str) -> list[str]:
+    mapping = {
+        "eng": "en",
+        "fra": "fr",
+        "fre": "fr",
+        "deu": "de",
+        "ger": "de",
+        "spa": "es",
+        "ita": "it",
+        "por": "pt",
+    }
+    values = [part.strip() for part in re.split(r"[,+ ]+", raw_lang) if part.strip()]
+    if not values:
+        return ["en"]
+    return [mapping.get(value.lower(), value.lower()) for value in values]
+
+
+def build_easyocr_reader(raw_lang: str, gpu: bool) -> object:
+    try:
+        import easyocr  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError(
+            "EasyOCR is not installed in this Python environment. "
+            "Install easyocr or use --ocr-engine=tesseract."
+        ) from exc
+    return easyocr.Reader(easyocr_lang_list(raw_lang), gpu=bool(gpu))
 
 
 def lexical_token_count(text: str) -> int:
@@ -249,12 +288,20 @@ def extract_pdf_page_text(*, pdftotext_bin: str, pdf_path: Path, page_idx: int) 
 
 def extract_image_ocr_text(
     *,
+    ocr_engine: str,
     ocr_bin: str,
     image_path: Path,
     ocr_lang: str,
     ocr_psm: str,
     ocr_timeout: int,
+    easyocr_reader: object | None,
 ) -> str:
+    if ocr_engine == "easyocr":
+        if easyocr_reader is None:
+            raise ValueError("easyocr_reader is required when --ocr-engine=easyocr")
+        results = easyocr_reader.readtext(str(image_path), detail=0, paragraph=True)
+        return normalize_text(" ".join(str(item) for item in results))
+
     command = [ocr_bin, str(image_path), "stdout"]
     if ocr_lang:
         command.extend(["-l", ocr_lang])
@@ -280,11 +327,13 @@ def build_page_text(
     pdf_cache: dict[str, Path | None],
     image_root: Path | None,
     ocr_image: bool,
+    ocr_engine: str,
     ocr_bin: str,
     ocr_lang: str,
     ocr_psm: str,
     ocr_timeout: int,
     ocr_continue_on_error: bool,
+    easyocr_reader: object | None,
 ) -> tuple[str, str]:
     parts: list[str] = []
     seen_parts: set[str] = set()
@@ -313,11 +362,13 @@ def build_page_text(
         if image_path is not None:
             try:
                 text = extract_image_ocr_text(
+                    ocr_engine=ocr_engine,
                     ocr_bin=ocr_bin,
                     image_path=image_path,
                     ocr_lang=ocr_lang,
                     ocr_psm=ocr_psm,
                     ocr_timeout=ocr_timeout,
+                    easyocr_reader=easyocr_reader,
                 )
             except Exception as exc:
                 if not ocr_continue_on_error:
@@ -342,6 +393,9 @@ def main() -> None:
     extra_fields = args.extra_field or []
     pdf_root = Path(args.pdf_root) if args.pdf_root else None
     image_root = Path(args.image_root) if args.image_root else None
+    easyocr_reader = None
+    if args.ocr_image and args.ocr_engine == "easyocr":
+        easyocr_reader = build_easyocr_reader(args.ocr_lang, bool(args.easyocr_gpu))
 
     rows = read_jsonl(
         Path(args.doc_pages_jsonl),
@@ -376,11 +430,13 @@ def main() -> None:
                 pdf_cache=pdf_cache,
                 image_root=image_root,
                 ocr_image=bool(args.ocr_image),
+                ocr_engine=args.ocr_engine,
                 ocr_bin=args.ocr_bin,
                 ocr_lang=args.ocr_lang,
                 ocr_psm=args.ocr_psm,
                 ocr_timeout=int(args.ocr_timeout),
                 ocr_continue_on_error=bool(args.ocr_continue_on_error),
+                easyocr_reader=easyocr_reader,
             )
             if text:
                 nonempty_text_page_count += 1
@@ -428,9 +484,11 @@ def main() -> None:
         "pdf_root": args.pdf_root,
         "image_root": args.image_root,
         "ocr_image": bool(args.ocr_image),
+        "ocr_engine": args.ocr_engine,
         "ocr_bin": args.ocr_bin,
         "ocr_lang": args.ocr_lang,
         "ocr_psm": args.ocr_psm,
+        "easyocr_gpu": bool(args.easyocr_gpu),
         "num_shards": int(args.num_shards),
         "shard_index": int(args.shard_index),
         "page_count": page_count,

@@ -23,18 +23,36 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   exit 1
 fi
 
+OCR_ENGINE="${OCR_ENGINE:-tesseract}"
 OCR_BIN="${OCR_BIN:-tesseract}"
-if ! command -v "$OCR_BIN" >/dev/null 2>&1; then
-  echo "OCR binary not found: $OCR_BIN" >&2
-  echo "Load/install Tesseract, or set OCR_BIN to the OCR executable." >&2
+if [[ "$OCR_ENGINE" == "tesseract" ]]; then
+  if ! command -v "$OCR_BIN" >/dev/null 2>&1; then
+    echo "OCR binary not found: $OCR_BIN" >&2
+    echo "Load/install Tesseract, set OCR_BIN, or use OCR_ENGINE=easyocr." >&2
+    exit 1
+  fi
+elif [[ "$OCR_ENGINE" == "easyocr" ]]; then
+  "$PYTHON_BIN" - <<'PY'
+import easyocr
+print(f"easyocr={easyocr.__version__}")
+PY
+else
+  echo "Unsupported OCR_ENGINE=$OCR_ENGINE. Use tesseract or easyocr." >&2
   exit 1
 fi
 
 NUM_SHARDS="${NUM_SHARDS:-${SLURM_ARRAY_TASK_COUNT:-64}}"
 SHARD_INDEX="${SLURM_ARRAY_TASK_ID:-0}"
-OCR_LANG="${OCR_LANG:-eng}"
+if [[ -z "${OCR_LANG:-}" ]]; then
+  if [[ "$OCR_ENGINE" == "easyocr" ]]; then
+    OCR_LANG="en"
+  else
+    OCR_LANG="eng"
+  fi
+fi
 OCR_PSM="${OCR_PSM:-}"
 OCR_TIMEOUT="${OCR_TIMEOUT:-120}"
+EASYOCR_GPU="${EASYOCR_GPU:-0}"
 MAX_PAGES="${MAX_PAGES:-0}"
 PROGRESS_EVERY="${PROGRESS_EVERY:-250}"
 
@@ -51,6 +69,7 @@ OCR_ARGS=(
   --doc-pages-jsonl "$DATA_ROOT/doc_pages_dev.jsonl"
   --image-root "$DATA_ROOT"
   --ocr-image
+  --ocr-engine "$OCR_ENGINE"
   --ocr-bin "$OCR_BIN"
   --ocr-lang "$OCR_LANG"
   --ocr-timeout "$OCR_TIMEOUT"
@@ -64,6 +83,9 @@ OCR_ARGS=(
 )
 if [[ -n "$OCR_PSM" ]]; then
   OCR_ARGS+=(--ocr-psm "$OCR_PSM")
+fi
+if [[ "$OCR_ENGINE" == "easyocr" && "$EASYOCR_GPU" != "0" ]]; then
+  OCR_ARGS+=(--easyocr-gpu)
 fi
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/export_converted_page_text.py" "${OCR_ARGS[@]}"
