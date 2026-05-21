@@ -409,3 +409,38 @@ Priority configs:
    - ColPali / `plain_top224` page rerank inside those docs
 
 The main target is to keep Graph-PPR's document discovery gains without discarding or demoting the exact gold page.
+
+## SciEGQA Targeted Sweep Runner
+
+A ready-to-run SciEGQA sweep is available:
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+git pull --rebase
+bash scripts/run_sciegqa_page_preserving_graph_ppr_sweep.sh
+```
+
+It runs:
+
+- `plain_top224` baseline evaluation
+- 3 dense/SPLADE source weights:
+  - `1.0 / 1.0`
+  - `1.25 / 0.75`
+  - `1.5 / 0.5`
+- 6 page-preserving final-score settings:
+  - page-RRF, no PPR
+  - light page PPR only
+  - light doc PPR only
+  - light page+doc PPR
+  - medium page+doc PPR
+  - M3DocVQA-best weights in page-preserving mode
+- doc-shortlist control with `GRAPH_PROFILE=doc_shortlist_best`
+
+It saves recall tables:
+
+```text
+$LOCAL_OUTPUT_DIR/sciegqa/graph_ppr_plain_top224_splade/sciegqa_pagepreserve_sweep_recall_table.md
+$LOCAL_OUTPUT_DIR/sciegqa/graph_ppr_plain_top224_splade/sciegqa_pagepreserve_sweep_recall_table.csv
+```
+
+Use page recall@4 as the primary selection metric, with page recall@1, @10, @20 and doc recall@4 as secondary checks.

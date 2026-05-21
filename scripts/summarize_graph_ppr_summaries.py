@@ -30,6 +30,25 @@ TABLE_COLUMNS = [
     "graph_loses_top4_doc_vs_dense_count",
 ]
 
+RECALL_K_VALUES = [1, 2, 4, 5, 10, 20, 50, 100]
+RECALL_TABLE_COLUMNS = [
+    "label",
+    "qid_count",
+    "dense_weight",
+    "sparse_weight",
+    "final_top_pages",
+    "per_doc_page_limit",
+    "ppr_iters",
+    "final_page_seed_weight",
+    "final_ppr_page_weight",
+    "final_ppr_doc_weight",
+    "page_doc_edge_weight",
+    "same_doc_window",
+    "adjacent_page_edge_weight",
+    *[f"page@{k}" for k in RECALL_K_VALUES],
+    *[f"doc@{k}" for k in RECALL_K_VALUES],
+]
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -54,6 +73,11 @@ def parse_args() -> argparse.Namespace:
         nargs=2,
         metavar=("BASELINE_SUMMARY", "CANDIDATE_SUMMARY"),
         help="Print paired doc@4/doc@20 comparison for two summary JSON files.",
+    )
+    parser.add_argument(
+        "--recall-table",
+        action="store_true",
+        help="Print derived page/doc recall@k columns from per-qid gold ranks.",
     )
     return parser.parse_args()
 
@@ -93,22 +117,53 @@ def format_value(value: Any) -> str:
 
 
 def print_markdown(rows: list[dict[str, Any]]) -> None:
-    print("| " + " | ".join(TABLE_COLUMNS) + " |")
-    print("| " + " | ".join("---" for _ in TABLE_COLUMNS) + " |")
+    columns = RECALL_TABLE_COLUMNS if rows and "page@1" in rows[0] else TABLE_COLUMNS
+    print("| " + " | ".join(columns) + " |")
+    print("| " + " | ".join("---" for _ in columns) + " |")
     for row in rows:
-        print("| " + " | ".join(format_value(row.get(column)) for column in TABLE_COLUMNS) + " |")
+        print("| " + " | ".join(format_value(row.get(column)) for column in columns) + " |")
 
 
-def print_delimited(rows: list[dict[str, Any]], *, delimiter: str) -> None:
-    writer = csv.DictWriter(sys.stdout, fieldnames=TABLE_COLUMNS, delimiter=delimiter)
+def print_delimited(rows: list[dict[str, Any]], *, delimiter: str, recall_table: bool = False) -> None:
+    columns = RECALL_TABLE_COLUMNS if recall_table else TABLE_COLUMNS
+    writer = csv.DictWriter(sys.stdout, fieldnames=columns, delimiter=delimiter)
     writer.writeheader()
     for row in rows:
-        writer.writerow({column: row.get(column) for column in TABLE_COLUMNS})
+        writer.writerow({column: row.get(column) for column in columns})
 
 
 def row_from_summary(path: Path, summary: dict[str, Any]) -> dict[str, Any]:
     row = {column: summary.get(column) for column in TABLE_COLUMNS}
     row["label"] = compact_label(path)
+    return row
+
+
+def recall_at_k(ranks: list[int | None], k: int, denominator: int) -> float | None:
+    if denominator <= 0:
+        return None
+    return sum(1 for rank in ranks if rank is not None and int(rank) <= k) / denominator
+
+
+def recall_row_from_summary(path: Path, summary: dict[str, Any]) -> dict[str, Any]:
+    row = {column: summary.get(column) for column in RECALL_TABLE_COLUMNS}
+    row["label"] = compact_label(path)
+    denominator = int(summary.get("qid_count") or 0)
+    per_qid = summary.get("per_qid", [])
+    if not isinstance(per_qid, list):
+        per_qid = []
+    page_ranks = [
+        item.get("reranked_first_gold_page_rank")
+        for item in per_qid
+        if isinstance(item, dict)
+    ]
+    doc_ranks = [
+        item.get("reranked_first_gold_doc_rank")
+        for item in per_qid
+        if isinstance(item, dict)
+    ]
+    for k in RECALL_K_VALUES:
+        row[f"page@{k}"] = recall_at_k(page_ranks, k, denominator)
+        row[f"doc@{k}"] = recall_at_k(doc_ranks, k, denominator)
     return row
 
 
@@ -189,13 +244,18 @@ def main() -> None:
     paths = expand_paths(args.summary_jsons)
     if not paths:
         return
-    rows = [row_from_summary(path, load_summary(path)) for path in paths]
+    rows = [
+        recall_row_from_summary(path, load_summary(path))
+        if args.recall_table
+        else row_from_summary(path, load_summary(path))
+        for path in paths
+    ]
     if args.format == "markdown":
         print_markdown(rows)
     elif args.format == "tsv":
-        print_delimited(rows, delimiter="\t")
+        print_delimited(rows, delimiter="\t", recall_table=bool(args.recall_table))
     else:
-        print_delimited(rows, delimiter=",")
+        print_delimited(rows, delimiter=",", recall_table=bool(args.recall_table))
 
 
 if __name__ == "__main__":
