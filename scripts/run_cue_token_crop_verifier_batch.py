@@ -94,10 +94,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--shortlist-rerank-mode",
         default="none",
-        choices=["none", "bm25_only", "bm25_rrf"],
+        choices=["none", "bm25_only", "bm25_rrf", "dense_bm25_union"],
         help=(
             "Optional lexical reranker over the dense top-doc shortlist before crop verification. "
-            "'bm25_only' sorts by max page BM25 score; 'bm25_rrf' fuses dense and BM25 doc ranks."
+            "'bm25_only' sorts by max page BM25 score; 'bm25_rrf' fuses dense and BM25 doc ranks; "
+            "'dense_bm25_union' keeps a fixed dense head then adds top BM25 docs not already present."
         ),
     )
     parser.add_argument(
@@ -111,6 +112,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=60.0,
         help="RRF k used when --shortlist-rerank-mode=bm25_rrf. Default: 60.",
+    )
+    parser.add_argument(
+        "--dense-keep-docs",
+        type=int,
+        default=5,
+        help=(
+            "When --shortlist-rerank-mode=dense_bm25_union, keep this many docs from the original "
+            "dense shortlist head before adding BM25 docs. Default: 5."
+        ),
+    )
+    parser.add_argument(
+        "--bm25-add-docs",
+        type=int,
+        default=5,
+        help=(
+            "When --shortlist-rerank-mode=dense_bm25_union, add this many BM25 docs not already "
+            "present in the dense head. Default: 5."
+        ),
     )
     parser.add_argument(
         "--pdftotext-bin",
@@ -462,7 +481,7 @@ def rerank_docs_with_shortlist_bm25(
 
     if args.shortlist_rerank_mode == "bm25_only":
         final_doc_ids = bm25_doc_ids
-    else:
+    elif args.shortlist_rerank_mode == "bm25_rrf":
         dense_rank = {doc_id: rank for rank, doc_id in enumerate(top_doc_ids, start=1)}
         fused_scores = {
             doc_id: (
@@ -472,10 +491,37 @@ def rerank_docs_with_shortlist_bm25(
             for doc_id in top_doc_ids
         }
         final_doc_ids = sorted(top_doc_ids, key=lambda doc_id: (-fused_scores[doc_id], doc_id))
+    else:
+        dense_keep = max(0, int(args.dense_keep_docs))
+        bm25_add = max(0, int(args.bm25_add_docs))
+        selected: list[str] = []
+        seen_selected: set[str] = set()
+        for doc_id in top_doc_ids[:dense_keep]:
+            if doc_id in seen_selected:
+                continue
+            seen_selected.add(doc_id)
+            selected.append(doc_id)
+        for doc_id in bm25_doc_ids:
+            if len(selected) >= dense_keep + bm25_add:
+                break
+            if doc_id in seen_selected:
+                continue
+            seen_selected.add(doc_id)
+            selected.append(doc_id)
+        for doc_id in top_doc_ids:
+            if len(selected) >= len(top_doc_ids):
+                break
+            if doc_id in seen_selected:
+                continue
+            seen_selected.add(doc_id)
+            selected.append(doc_id)
+        final_doc_ids = selected
 
     return final_doc_ids, {
         "mode": args.shortlist_rerank_mode,
         "query_terms": query_terms,
+        "dense_keep_docs": int(args.dense_keep_docs),
+        "bm25_add_docs": int(args.bm25_add_docs),
         "candidate_page_count": len(candidate_page_texts),
         "top_page_uid_by_bm25": None if not page_ranked else page_ranked[0][0],
         "top_doc_id_by_bm25": None if not bm25_doc_ids else bm25_doc_ids[0],
@@ -997,6 +1043,8 @@ def main() -> None:
         "shortlist_rerank_mode": args.shortlist_rerank_mode,
         "bm25_query_source": args.bm25_query_source,
         "bm25_rrf_k": float(args.bm25_rrf_k),
+        "dense_keep_docs": int(args.dense_keep_docs),
+        "bm25_add_docs": int(args.bm25_add_docs),
         "max_pages_per_doc": int(args.max_pages_per_doc),
         "query_token_filter": args.query_token_filter,
         "crop_region_source": args.crop_region_source,
