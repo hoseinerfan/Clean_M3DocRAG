@@ -215,7 +215,55 @@ SPLADE_DEVICE=auto \
 bash scripts/run_external_doc_rrf_pipeline.sh
 ```
 
-OpenDocVQA is not ready for this exact SPLADE/RRF check yet because the converted `doc_pages_dev.jsonl` has image paths and source IDs but no OCR/markdown text. Running the exporter fails fast with `--require-nonempty`. If `SKIP_EXPORT=1` reuses the failed all-empty output, SPLADE will index blank page strings and the result is invalid; ignore that run even if it completes. The driver now passes `--require-nonempty-text` into the SPLADE index builder by default to prevent this failure mode. Add OCR or VLM page text to the manifest first, then use the same driver with:
+OpenDocVQA is not ready for this exact SPLADE/RRF check yet because the converted `doc_pages_dev.jsonl` has image paths and source IDs but no OCR/markdown text. Running the exporter fails fast with `--require-nonempty`. If `SKIP_EXPORT=1` reuses the failed all-empty output, SPLADE will index blank page strings and the result is invalid; ignore that run even if it completes. The driver now passes `--require-nonempty-text` into the SPLADE index builder by default to prevent this failure mode.
+
+Generate OCR page text first. This wrapper uses Tesseract over the prepared page images and shards the 206k-page workload:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source opendocvqa/env_hpc.sh
+
+command -v tesseract
+
+sbatch \
+  --export=ALL,NUM_SHARDS=64,OCR_LANG=eng \
+  opendocvqa/sbatch_ocr_page_text_opendocvqa_array.sh
+```
+
+After all OCR shards complete, merge them into the page-text file consumed by SPLADE:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source opendocvqa/env_hpc.sh
+
+"$REPO_ROOT/env/bin/python" scripts/merge_jsonl_shards.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/opendocvqa/ocr_page_text_shards/shard_*_of_64.jsonl" \
+  --output-jsonl "$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_page_text_dev.jsonl" \
+  --output-summary-json "$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_page_text_dev_merge_summary.json" \
+  --dedupe-key page_uid
+```
+
+Then run the same plain_top224 + SPLADE dense-heavy doc-RRF check:
+
+```bash
+DATA_NAME=opendocvqa \
+DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade" \
+PAGE_TEXT_JSONL="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_page_text_dev.jsonl" \
+SKIP_EXPORT=1 \
+DENSE_WEIGHT=1.25 \
+SPARSE_WEIGHT=0.75 \
+RRF_K=10 \
+RRF_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_plain_top224_splade_doc_rrf_denseheavy_k10.prediction.json" \
+RRF_SUMMARY="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_plain_top224_splade_doc_rrf_denseheavy_k10.summary.json" \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
+```
+
+If OCR or VLM text is added directly to the manifest instead, use the same driver with:
 
 ```bash
 DATA_NAME=opendocvqa \
