@@ -41,6 +41,11 @@ def parse_args() -> argparse.Namespace:
         default="auto",
         help="Device to run the model on. Default: auto",
     )
+    parser.add_argument(
+        "--require-nonempty-text",
+        action="store_true",
+        help="Fail before model loading if every page has empty text.",
+    )
     parser.add_argument("--max-pages", type=int, default=0)
     parser.add_argument("--output-index-pt", required=True)
     parser.add_argument("--output-summary-json", required=True)
@@ -109,6 +114,14 @@ def main() -> None:
     args = parse_args()
 
     page_rows = load_page_rows(Path(args.page_text_jsonl), int(args.max_pages))
+    texts = [str(row.get("text", "") or "") for row in page_rows]
+    nonempty_text_page_count = sum(1 for text in texts if text.strip())
+    if args.require_nonempty_text and nonempty_text_page_count == 0:
+        raise ValueError(
+            "No non-empty page text rows found in "
+            f"{args.page_text_jsonl}. Re-run text export with OCR/PDF text or "
+            "disable --require-nonempty-text only for an explicit empty-text ablation."
+        )
     device = resolve_device(args.device)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
@@ -125,8 +138,6 @@ def main() -> None:
     nnz_counts: list[int] = []
 
     special_token_ids = list(getattr(tokenizer, "all_special_ids", []) or [])
-    texts = [str(row.get("text", "") or "") for row in page_rows]
-
     with torch.inference_mode():
         for start in tqdm(range(0, len(page_rows), int(args.batch_size)), desc="encode_pages"):
             batch_rows = page_rows[start : start + int(args.batch_size)]
@@ -185,6 +196,8 @@ def main() -> None:
         "model_name_or_path": args.model_name_or_path,
         "page_text_jsonl": args.page_text_jsonl,
         "page_count": len(page_uids),
+        "nonempty_text_page_count": nonempty_text_page_count,
+        "empty_text_page_count": len(page_rows) - nonempty_text_page_count,
         "max_pages": int(args.max_pages),
         "batch_size": int(args.batch_size),
         "max_length": int(args.max_length),

@@ -215,7 +215,7 @@ SPLADE_DEVICE=auto \
 bash scripts/run_external_doc_rrf_pipeline.sh
 ```
 
-OpenDocVQA is not ready for this exact SPLADE/RRF check yet because the converted `doc_pages_dev.jsonl` has image paths and source IDs but no OCR/markdown text. Running the driver will fail fast with `--require-nonempty`. Add OCR or VLM page text to the manifest first, then use the same driver with:
+OpenDocVQA is not ready for this exact SPLADE/RRF check yet because the converted `doc_pages_dev.jsonl` has image paths and source IDs but no OCR/markdown text. Running the exporter fails fast with `--require-nonempty`. If `SKIP_EXPORT=1` reuses the failed all-empty output, SPLADE will index blank page strings and the result is invalid; ignore that run even if it completes. The driver now passes `--require-nonempty-text` into the SPLADE index builder by default to prevent this failure mode. Add OCR or VLM page text to the manifest first, then use the same driver with:
 
 ```bash
 DATA_NAME=opendocvqa \

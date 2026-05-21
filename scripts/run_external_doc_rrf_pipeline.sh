@@ -27,6 +27,7 @@ QUERY_MAX_LENGTH="${QUERY_MAX_LENGTH:-64}"
 PAGE_TOPK_TERMS="${PAGE_TOPK_TERMS:-128}"
 QUERY_TOPK_TERMS="${QUERY_TOPK_TERMS:-32}"
 TOP_PAGES="${TOP_PAGES:-1000}"
+REQUIRE_NONEMPTY_PAGE_TEXT="${REQUIRE_NONEMPTY_PAGE_TEXT:-1}"
 
 RRF_K="${RRF_K:-10}"
 DENSE_WEIGHT="${DENSE_WEIGHT:-0.75}"
@@ -72,7 +73,7 @@ if [[ "${SKIP_EXPORT:-0}" != "1" ]]; then
 fi
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-  "$PYTHON_BIN" "$REPO_ROOT/scripts/build_splade_page_index.py" \
+  BUILD_ARGS=(
     --page-text-jsonl "$PAGE_TEXT_JSONL" \
     --model-name-or-path "$SPLADE_MODEL" \
     --batch-size "$SPLADE_PAGE_BATCH_SIZE" \
@@ -81,6 +82,11 @@ if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
     --device "$SPLADE_DEVICE" \
     --output-index-pt "$SPLADE_INDEX_PT" \
     --output-summary-json "$SPLADE_INDEX_SUMMARY"
+  )
+  if [[ "$REQUIRE_NONEMPTY_PAGE_TEXT" != "0" ]]; then
+    BUILD_ARGS+=(--require-nonempty-text)
+  fi
+  "$PYTHON_BIN" "$REPO_ROOT/scripts/build_splade_page_index.py" "${BUILD_ARGS[@]}"
 fi
 
 if [[ "${SKIP_SPLADE_RETRIEVAL:-0}" != "1" ]]; then
