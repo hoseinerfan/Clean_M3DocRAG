@@ -466,6 +466,44 @@ Observed page-ranking-probe results from `GRAPH_PROFILE=page_rank_probe`:
 
 Do not mix these with the doc-shortlist-best results; they use different output caps and slightly different PPR weights.
 
+Observed `doc_shortlist_best` transfer results after verifying the saved summaries used the exact intended config:
+
+```text
+dense_top_pages = 1000
+sparse_top_pages = 1000
+final_top_pages = 20
+per_doc_page_limit = 1
+rrf_k = 10
+dense_weight = 1.0
+sparse_weight = 1.0
+doc_seed_weight = 0.0
+restart_prob = 0.15
+ppr_iters = 30
+page_doc_edge_weight = 1.0
+same_doc_window = 1
+adjacent_page_edge_weight = 0.25
+final_page_seed_weight = 1.0
+final_ppr_page_weight = 1.5
+final_ppr_doc_weight = 0.75
+```
+
+| Dataset | qids | doc@4 | doc@20 | page@4 | page@20 | output |
+|---|---:|---:|---:|---:|---:|---|
+| MMDocIR | 1658 | 0.8034 | 0.8884 | 0.4562 | 0.4998 | `mmdocir_plain_top224_splade_graph1000_top20_best` |
+| SciEGQA-Bench | 1623 | 0.9279 | 0.9846 | 0.5173 | 0.5474 | `sciegqa_plain_top224_splade_graph1000_top20_best` |
+| ViDoSeek | 1142 | 0.9991 | 1.0000 | 0.6743 | 0.6751 | `vidoseek_plain_top224_splade_graph1000_top20_best` |
+| ViDoRe V3 | 14514 | 0.8725 | 0.9703 | 0.2064 | 0.2285 | `vidore-v3_plain_top224_splade_graph1000_top20_best` |
+
+Conclusion from the external transfer check:
+
+- The M3DocVQA best Graph-PPR document-shortlist config was reproduced correctly on the external datasets, so the negative transfer is not a config mismatch.
+- `doc_shortlist_best` is not a strong final page retriever on these page-labeled datasets because it emits one representative page per document.
+- On MMDocIR and ViDoRe V3 it does not beat `plain_top224` at early document recall and is much worse at page recall.
+- On SciEGQA it improves document recall over `plain_top224`, but the page-ranking probe is substantially better for page recall.
+- On ViDoSeek document recall is already saturated, so the small doc gain is not worth the large page-recall loss.
+- For external datasets with reliable page labels, continue with a page-preserving Graph-PPR profile (`GRAPH_PROFILE=page_rank_probe` or a tuned page-preserving variant) rather than the one-page-per-doc M3DocVQA shortlist profile.
+- Keep `doc_shortlist_best` only for experiments where the downstream stage consumes a document shortlist or one representative page per document.
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |

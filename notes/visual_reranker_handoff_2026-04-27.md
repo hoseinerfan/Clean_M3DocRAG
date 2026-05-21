@@ -3563,9 +3563,51 @@ Observed page-ranking-probe results:
 | SciEGQA-Bench | 1623 | 0.7686 | 0.9091 | 0.9298 | 0.9852 |
 | ViDoSeek | 1142 | 0.8905 | 0.9982 | 0.9991 | 1.0000 |
 
-Next external sanity check should rerun those same datasets with `GRAPH_PROFILE=doc_shortlist_best`, then compare against:
+The same external datasets were then rerun with `GRAPH_PROFILE=doc_shortlist_best`. The saved summaries were checked and confirmed to use the exact intended config:
 
-- dense `plain_top224`
-- SPLADE only
-- matched seed-only/page-RRF control
-- `GRAPH_PROFILE=page_rank_probe` only as a separate page-ranking diagnostic
+```text
+dense_top_pages = 1000
+sparse_top_pages = 1000
+final_top_pages = 20
+per_doc_page_limit = 1
+rrf_k = 10
+dense_weight = 1.0
+sparse_weight = 1.0
+doc_seed_weight = 0.0
+restart_prob = 0.15
+ppr_iters = 30
+page_doc_edge_weight = 1.0
+same_doc_window = 1
+adjacent_page_edge_weight = 0.25
+final_page_seed_weight = 1.0
+final_ppr_page_weight = 1.5
+final_ppr_doc_weight = 0.75
+```
+
+Observed `doc_shortlist_best` transfer results:
+
+| dataset | qids | doc@4 | doc@20 | page@4 | page@20 |
+| --- | ---:| ---: | ---: | ---: | ---: |
+| MMDocIR | 1658 | 0.8034 | 0.8884 | 0.4562 | 0.4998 |
+| SciEGQA-Bench | 1623 | 0.9279 | 0.9846 | 0.5173 | 0.5474 |
+| ViDoSeek | 1142 | 0.9991 | 1.0000 | 0.6743 | 0.6751 |
+| ViDoRe V3 | 14514 | 0.8725 | 0.9703 | 0.2064 | 0.2285 |
+
+External-transfer conclusion:
+
+- The M3DocVQA best Graph-PPR document-shortlist config transferred correctly at the implementation/config level.
+- It did not transfer as the best retrieval method on the external datasets.
+- The likely reason is objective mismatch: `doc_shortlist_best` emits one representative page per document, while MMDocIR, SciEGQA, ViDoSeek, and ViDoRe V3 evaluate exact page retrieval heavily.
+- On MMDocIR and ViDoRe V3, the method trails `plain_top224` at early document recall and is much worse at page recall.
+- On SciEGQA-Bench, it improves document recall over `plain_top224`, but the page-ranking probe profile is far better for page recall.
+- On ViDoSeek, document recall is already saturated, so the small document gain is not useful enough to justify the page-recall loss.
+
+Current recommendation after transfer:
+
+- Use `doc_shortlist_best` only when the downstream stage needs a document shortlist or one representative page per document.
+- For external page-labeled datasets, use `GRAPH_PROFILE=page_rank_probe` or tune a page-preserving Graph-PPR variant.
+- The next useful external ablation is not another doc-shortlist run; it is a page-preserving sweep over:
+  - `RESTART_PROB`
+  - `FINAL_PPR_DOC_WEIGHT`
+  - `FINAL_PPR_PAGE_WEIGHT`
+  - optional `PER_DOC_PAGE_LIMIT=0` vs small per-doc caps greater than 1.
