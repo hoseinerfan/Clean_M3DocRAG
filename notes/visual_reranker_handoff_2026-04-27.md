@@ -3118,6 +3118,57 @@ Important finding:
 - adjacent-page edges had almost no effect
 - doc seed hurt or was unnecessary; best configs use `--doc-seed-weight 0.0`
 
+### Naming: Graph PPR, graph1000, and page-RRF1000
+
+Use these names precisely in future notes:
+
+| name | meaning | graph? | PPR? | candidate pool |
+| --- | --- | --- | --- | --- |
+| `Graph PPR` | the general algorithm family | yes | yes | configurable dense/sparse pages |
+| `graph1000` | best full Graph PPR config | yes | yes | dense top1000 + SPLADE top1000 |
+| `graph100` | efficient Graph PPR config | yes | yes | dense top100 + SPLADE top100 |
+| `page-RRF1000` | matched no-graph baseline | no | no | dense top1000 + SPLADE top1000 |
+| `page-RRF100` | matched efficient no-graph baseline | no | no | dense top100 + SPLADE top100 |
+
+The `1000` or `100` number is the input candidate budget per source, not the output size.
+
+For all final doc-shortlist comparisons here:
+
+- output is still `--final-top-pages 20`
+- output uses `--per-doc-page-limit 1`
+- so the result behaves like a top-20 document shortlist
+
+The key experimental control is:
+
+- `page-RRF1000` and `graph1000` use the same dense top1000 + SPLADE top1000 candidate pool
+- `page-RRF1000` scores pages only by rank-level RRF seed
+- `graph1000` adds page/doc graph propagation and final PPR-based scoring
+
+So the difference between `page-RRF1000` and `graph1000` isolates the value of the graph step beyond simple dense+sparse page fusion.
+
+The page-RRF seed is:
+
+```text
+seed(page) = dense_weight / (rrf_k + dense_rank)
+           + sparse_weight / (rrf_k + sparse_rank)
+```
+
+The best Graph PPR final score is:
+
+```text
+final_score(page) =
+  1.0  * normalized_page_seed
++ 1.5  * normalized_page_ppr
++ 0.75 * normalized_owning_doc_ppr
+```
+
+Intuition:
+
+- page-RRF treats pages mostly independently
+- Graph PPR lets evidence move from page nodes to doc nodes and back to pages
+- this lets a document accumulate support from several moderately ranked pages
+- the owning-doc PPR term can lift the best page from that document into the final one-page-per-doc shortlist
+
 ### Best default config for transfer
 
 Use this as the main result config on a new dataset:
@@ -3162,6 +3213,18 @@ Best full-dev result:
 - candidate misses: `2`
 - mean candidate pages: `1774.862`
 - mean candidate docs: `814.881`
+
+Matched paired comparison against `page-RRF1000`:
+
+| comparison | doc@4 | net doc@4 | candidate-only | baseline-only | sign-test p | doc@20 | net doc@20 | doc@20 p |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `graph1000` vs `page-RRF1000` | `2363` vs `2348` | `+15` | `18` | `3` | `0.00149` | `2406` vs `2402` | `+4` | `0.125` |
+
+Interpretation:
+
+- full Graph PPR significantly improves early document ranking over the matched page-RRF baseline
+- the `doc@20` effect is positive but not significant under the same paired sign test
+- this is the strongest evidence that the graph step matters beyond rank-only dense+sparse fusion
 
 ### Efficient config to try first when runtime matters
 
@@ -3450,7 +3513,7 @@ The safe claim after M3DocVQA/MMQA dev is:
 
 - dense + SPLADE page candidates are complementary
 - rank-only page RRF is a strong baseline
-- adding query-local page-doc graph propagation improves early document ranking
+- adding query-local page-doc graph propagation significantly improves early document ranking over matched page-RRF at full `1000/1000` budget
 - the improvement comes mainly from page-doc propagation and the combined seed/page-PPR/doc-PPR score
 - the method is portable enough to test on other document VQA datasets because it only needs dense and sparse page retrieval outputs
 
