@@ -67,6 +67,7 @@ Current claim:
 - Treat `denseheavy150_m3best_pagepreserve` as a ViDoSeek-specific best row, not the global default.
 - Do not collapse the result to one metric: the strongest and most stable gains are at page@4/page@20, and page@1 should still be reported separately.
 - Keep `doc_shortlist_best` separate for M3DocVQA/MMQA-style document-shortlist retrieval.
+- MMLongBench DocQA is now prepared as the next page-labeled stress test. It should use the same page-preserving default first, because `ans_page_list` provides exact zero-based page labels.
 
 ## Transfer Results That Motivated This
 
@@ -442,6 +443,27 @@ Priority configs:
    - ColPali / `plain_top224` page rerank inside those docs
 
 The main target is now to keep `denseheavy125_medium_both` as the frozen general page-labeled config, then test whether the two-stage design can improve rank-1 page precision.
+
+## MMLongBench DocQA Next Run
+
+MMLongBench support is scaffolded under `mmlongbench/`. The first target is the DocQA subset (`longdocurl`, `mmlongdoc`, `slidevqa`) because it exposes `ans_page_list` and can be evaluated with the same exact page metrics as MMDocIR, SciEGQA, ViDoRe V3, and ViDoSeek.
+
+Recommended first run:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source mmlongbench/env_hpc.sh
+
+"$REPO_ROOT/env/bin/python" mmlongbench/prepare_mmlongbench.py \
+  --download \
+  --snapshot-dir "$MMLONGBENCH_WORK_ROOT/hf_snapshot/MMLongBench" \
+  --output-root "$LOCAL_DATA_DIR/mmlongbench-docqa"
+
+sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
+  mmlongbench/sbatch_embed_mmlongbench_array.sh
+```
+
+After dense retrieval and `plain_top224`, use `denseheavy125_medium_both` as the first Graph-PPR config. Full commands are in `mmlongbench/README.md` and `DATASET_WORKFLOWS.md`.
 
 ## SciEGQA Targeted Sweep Runner
 
