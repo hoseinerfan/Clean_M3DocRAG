@@ -366,17 +366,22 @@ def metric_value(scores: dict[str, Any], metric: str) -> float:
     return float(value)
 
 
-def choose_oracle_label(row: dict[str, Any], labels: list[str], metric: str) -> str:
-    def key(label: str) -> tuple[float, float, float, str]:
-        scores = row["scores"][label]
-        return (
-            metric_value(scores, metric),
-            metric_value(scores, "doc_recall@4"),
-            metric_value(scores, "page_hit@4"),
-            label,
-        )
-
-    return max(labels, key=key)
+def choose_oracle_label(
+    row: dict[str, Any],
+    labels: list[str],
+    metric: str,
+    baseline_label: str,
+) -> tuple[str, str]:
+    values = {label: metric_value(row["scores"][label], metric) for label in labels}
+    best_value = max(values.values())
+    best_labels = [label for label in labels if math.isclose(values[label], best_value, abs_tol=1e-12)]
+    if len(best_labels) == 1:
+        return best_labels[0], best_labels[0]
+    if baseline_label and baseline_label in best_labels:
+        score_label = baseline_label
+    else:
+        score_label = best_labels[0]
+    return score_label, f"tie/{len(best_labels)}"
 
 
 def mean(values: list[float]) -> float:
@@ -421,7 +426,7 @@ def summarize_groups(
         for group, group_items in group_rows(rows, group_field).items():
             if len(group_items) < min_count:
                 continue
-            winner_counts = Counter(row["oracle_label"] for row in group_items)
+            winner_counts = Counter(row["oracle_report_label"] for row in group_items)
             mean_by_label = {
                 label: mean([metric_value(row["scores"][label], oracle_metric) for row in group_items])
                 for label in labels
@@ -525,7 +530,14 @@ def main() -> None:
             "features": features,
             "scores": scores,
         }
-        row["oracle_label"] = choose_oracle_label(row, labels, args.oracle_metric)
+        oracle_label, oracle_report_label = choose_oracle_label(
+            row,
+            labels,
+            args.oracle_metric,
+            args.baseline_label,
+        )
+        row["oracle_label"] = oracle_label
+        row["oracle_report_label"] = oracle_report_label
         rows.append(row)
 
     overall = summarize_label(rows, labels, args.recall_ks, args.hit_k)
@@ -562,13 +574,14 @@ def main() -> None:
         top_groups=int(args.top_groups),
     )
 
-    winner_counts = Counter(row["oracle_label"] for row in rows)
+    winner_counts = Counter(row["oracle_report_label"] for row in rows)
     feature_rows: list[dict[str, Any]] = []
     for row in rows:
         flat: dict[str, Any] = {
             "qid": row["qid"],
             "question": row["question"],
             "oracle_label": row["oracle_label"],
+            "oracle_report_label": row["oracle_report_label"],
         }
         metadata = row["gold"].get("metadata", {})
         for key in ["domain", "type", "source"]:
