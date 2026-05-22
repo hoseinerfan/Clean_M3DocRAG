@@ -2,24 +2,16 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/env/bin/python}"
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python}"
-fi
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/m3docvqa_internal_env.sh"
 
-DEFAULT_GRAPH_OUT_DIR="/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev"
+DEFAULT_GRAPH_OUT_DIR="$LOCAL_OUTPUT_DIR/m3docvqa_graph_pagepreserve_mmqa_${SPLIT}"
 GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$DEFAULT_GRAPH_OUT_DIR}"
-DATA_NAME="${DATA_NAME:-m3docvqa-mmqa}"
-DATA_ROOT="${DATA_ROOT:-$REPO_ROOT/data/m3-docvqa/multimodalqa}"
-SPLIT="${SPLIT:-dev}"
-GOLD="${GOLD:-$REPO_ROOT/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl}"
 
-DENSE_PRED="${DENSE_PRED:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json}"
-SPARSE_PRED="${SPARSE_PRED:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json}"
-QUESTION_TYPE_FILTER="${QUESTION_TYPE_FILTER:-}"
+DENSE_PRED="${DENSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_${SPLIT}/mmqa_${SPLIT}_plain_top224_nprobe${FAISS_NPROBE}_effdiag_all.prediction.json}"
+SPARSE_PRED="${SPARSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_${SPLIT}/mmqa_${SPLIT}_splade.prediction.json}"
 
-GRAPH_LABEL="${GRAPH_LABEL:-mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth}"
+GRAPH_LABEL="${GRAPH_LABEL:-mmqa_${SPLIT}_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth}"
 PRED_OUT="${PRED_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.prediction.json}"
 SUMMARY_OUT="${SUMMARY_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.summary.json}"
 ANALYSIS_OUT="${ANALYSIS_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.retrieval_analysis.json}"

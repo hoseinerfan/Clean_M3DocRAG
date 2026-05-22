@@ -2,36 +2,24 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
-PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/env/bin/python}"
-if [[ ! -x "$PYTHON_BIN" ]]; then
-  PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python}"
-fi
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/m3docvqa_internal_env.sh"
 
-GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev}"
-GRAPH_PRED="${GRAPH_PRED:-$GRAPH_OUT_DIR/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth.prediction.json}"
-GOLD="${GOLD:-$REPO_ROOT/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl}"
+GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$LOCAL_OUTPUT_DIR/m3docvqa_graph_pagepreserve_mmqa_${SPLIT}}"
+GRAPH_PRED="${GRAPH_PRED:-$GRAPH_OUT_DIR/mmqa_${SPLIT}_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth.prediction.json}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-Qwen2-VL-7B-Instruct}"
 BITS="${BITS:-16}"
 QA_TOP_PAGES="${QA_TOP_PAGES:-4}"
-QUESTION_TYPE_FILTER="${QUESTION_TYPE_FILTER:-}"
 QA_OUT_DIR="${QA_OUT_DIR:-$GRAPH_OUT_DIR}"
-OUTPUT_LABEL="${OUTPUT_LABEL:-mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth_qwen2vl_top${QA_TOP_PAGES}}"
+OUTPUT_LABEL="${OUTPUT_LABEL:-mmqa_${SPLIT}_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth_qwen2vl_top${QA_TOP_PAGES}}"
 OUTPUT_PRED="${OUTPUT_PRED:-$QA_OUT_DIR/${OUTPUT_LABEL}.prediction.json}"
 OUTPUT_EVAL="${OUTPUT_EVAL:-$QA_OUT_DIR/${OUTPUT_LABEL}.eval.json}"
 SAVE_EVERY="${SAVE_EVERY:-25}"
 DOC_IMAGE_CACHE_SIZE="${DOC_IMAGE_CACHE_SIZE:-16}"
 RUN_EVAL="${RUN_EVAL:-1}"
 RESUME="${RESUME:-1}"
-DEFAULT_M3DOCVQA_LOCAL_DATA_DIR="$REPO_ROOT/data"
-DEFAULT_M3DOCVQA_LOCAL_MODEL_DIR="$REPO_ROOT/model"
-M3DOCVQA_LOCAL_DATA_DIR="${M3DOCVQA_LOCAL_DATA_DIR:-$DEFAULT_M3DOCVQA_LOCAL_DATA_DIR}"
-M3DOCVQA_LOCAL_MODEL_DIR="${M3DOCVQA_LOCAL_MODEL_DIR:-$DEFAULT_M3DOCVQA_LOCAL_MODEL_DIR}"
 
 mkdir -p "$QA_OUT_DIR"
-
-export LOCAL_DATA_DIR="$M3DOCVQA_LOCAL_DATA_DIR"
-export LOCAL_MODEL_DIR="$M3DOCVQA_LOCAL_MODEL_DIR"
 
 echo "using_graph_pred=$GRAPH_PRED"
 echo "using_gold=$GOLD"
