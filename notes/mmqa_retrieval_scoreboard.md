@@ -21,7 +21,7 @@ Purpose: keep a short, updateable MMQA scoreboard with the exact tables, configs
 - `Graph Page Preserve / page-labeled`
   - page-preserving Graph-PPR for datasets with exact gold page labels
   - current single general profile: `denseheavy125_medium_both`
-  - ViDoSeek's best individual row is `denseheavy150_m3best_pagepreserve`, but keep `denseheavy125_medium_both` as the default single config unless optimizing ViDoSeek alone
+  - use this same frozen config in the tables; if a dataset has no recorded value for this config yet, write `N/A`
 
 ## Table A: Doc Hit@k
 
@@ -81,33 +81,33 @@ Use this section for datasets with exact page labels. These numbers are **averag
 | Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
 | --- | ---: | ---: | ---: | ---: |
 | MaxSim+ | `89.58%` | `98.42%` | `99.82%` | `100.00%` |
-| Graph Page Preserve (`denseheavy150_m3best_pagepreserve`) | `90.37%` | `99.82%` | `99.91%` | `100.00%` |
+| Graph Page Preserve (`denseheavy125_medium_both`) | `N/A` | `N/A` | `N/A` | `N/A` |
 
 ### OpenDocVQA
 
 | Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
 | --- | ---: | ---: | ---: | ---: |
 | MaxSim+ | `51.22%` | `65.99%` | `53.07%` | `69.55%` |
-| Graph Page Preserve | pending OCR-backed SPLADE | pending OCR-backed SPLADE | pending OCR-backed SPLADE | pending OCR-backed SPLADE |
+| Graph Page Preserve (`denseheavy125_medium_both`) | `N/A` | `N/A` | `N/A` | `N/A` |
 
 ### MMLongBench DocQA
 
 | Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
 | --- | ---: | ---: | ---: | ---: |
-| MaxSim+ | pending | pending | pending | pending |
-| Graph Page Preserve | pending | pending | pending | pending |
+| MaxSim+ | `N/A` | `N/A` | `N/A` | `N/A` |
+| Graph Page Preserve (`denseheavy125_medium_both`) | `N/A` | `N/A` | `N/A` | `N/A` |
 
 ### DUDE
 
 | Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
 | --- | ---: | ---: | ---: | ---: |
-| MaxSim+ | pending | pending | pending | pending |
-| Graph Page Preserve | pending | pending | pending | pending |
+| MaxSim+ | `N/A` | `N/A` | `N/A` | `N/A` |
+| Graph Page Preserve (`denseheavy125_medium_both`) | `N/A` | `N/A` | `N/A` | `N/A` |
 
 Interpretation:
 
-- MMDocIR, SciEGQA-Bench, and ViDoRe V3 support the current single page-labeled default: `denseheavy125_medium_both`.
-- ViDoSeek is almost saturated under `plain_top224`; the graph row still improves page@4/page@20 slightly, but the dataset-specific best uses heavier graph weights.
+- MMDocIR, SciEGQA-Bench, and ViDoRe V3 currently have recorded results for the single page-labeled default: `denseheavy125_medium_both`.
+- ViDoSeek is almost saturated under `plain_top224`; the previously recorded dataset-specific best used heavier graph weights, but this table intentionally leaves the uniform `denseheavy125_medium_both` row as `N/A` until that exact config is recorded.
 - OpenDocVQA should not use the earlier all-empty SPLADE run. Wait for real OCR-backed page text before reporting Graph-PPR.
 - MMLongBench DocQA now has a converted page-labeled split, but retrieval numbers are not available until embeddings, dense retrieval, `plain_top224`, SPLADE, and Graph-PPR finish.
 - DUDE is scaffolded as the MP-DocVQA replacement target. It should use the same page-labeled default first after prepare/embedding/retrieval.
