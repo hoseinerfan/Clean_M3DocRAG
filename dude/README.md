@@ -13,7 +13,7 @@ source dude/env_hpc.sh
 
 "$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
   --output-root "$LOCAL_DATA_DIR/dude" \
-  --hf-config Amazon_due \
+  --hf-config Amazon_original \
   --source-split val
 ```
 
@@ -25,7 +25,7 @@ If you already have the extracted `DUDE_train-val-test_binaries` directory:
 "$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
   --data-dir /path/to/DUDE_train-val-test_binaries \
   --output-root "$LOCAL_DATA_DIR/dude" \
-  --hf-config Amazon_due \
+  --hf-config Amazon_original \
   --source-split val
 ```
 
@@ -36,7 +36,7 @@ If you already downloaded the public annotations too:
   --data-dir /path/to/DUDE_train-val-test_binaries \
   --annotations-json /path/to/2023-03-23_DUDE_gt_test_PUBLIC.json \
   --output-root "$LOCAL_DATA_DIR/dude" \
-  --hf-config Amazon_due \
+  --hf-config Amazon_original \
   --source-split val
 ```
 
@@ -45,7 +45,7 @@ For a quick smoke test:
 ```bash
 "$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
   --output-root "$LOCAL_DATA_DIR/dude-smoke" \
-  --hf-config Amazon_due \
+  --hf-config Amazon_original \
   --source-split val \
   --max-docs 5
 ```
@@ -132,7 +132,7 @@ bash dude/run_plain_top224_dude.sh
 
 ## SPLADE + Graph-PPR
 
-The converter stores OCR text in the page manifest as `text` and `ocr_text`, so the SPLADE pipeline can use manifest text directly.
+Use `Amazon_original` for prepare because the current converter extracts text from Amazon Textract `Blocks`. The converter stores OCR text in the page manifest as `text` and `ocr_text`, so the SPLADE pipeline can use manifest text directly.
 
 ```bash
 DATA_NAME=dude \

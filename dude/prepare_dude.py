@@ -39,7 +39,7 @@ def parse_args() -> argparse.Namespace:
         )
     )
     parser.add_argument("--hf-repo", default="jordyvl/DUDE_loader")
-    parser.add_argument("--hf-config", default="Amazon_due")
+    parser.add_argument("--hf-config", default="Amazon_original")
     parser.add_argument(
         "--annotations-json",
         default="",
@@ -218,7 +218,7 @@ def parse_hf_config(config_name: str) -> tuple[str, str]:
     parts = config.split("_", 1)
     if len(parts) != 2:
         raise ValueError(
-            f"Unsupported DUDE hf-config {config_name!r}. Expected e.g. Amazon_due."
+            f"Unsupported DUDE hf-config {config_name!r}. Expected e.g. Amazon_original."
         )
     ocr_engine, ocr_format = parts
     if ocr_engine not in {"Azure", "Amazon", "Tesseract"}:
@@ -375,7 +375,7 @@ def rel_or_abs(path: Path, root: Path) -> str:
 def path_from_row(value: object, field_name: str) -> Path:
     if isinstance(value, (bytes, bytearray)):
         raise TypeError(
-            f"DUDE field {field_name} is binary. Use a non-binary loader config such as Amazon_due."
+            f"DUDE field {field_name} is binary. Use a non-binary loader config such as Amazon_original."
         )
     text = str(value or "").strip()
     if not text:
