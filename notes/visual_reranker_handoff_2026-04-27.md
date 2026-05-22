@@ -3611,3 +3611,37 @@ Current recommendation after transfer:
   - `FINAL_PPR_DOC_WEIGHT`
   - `FINAL_PPR_PAGE_WEIGHT`
   - optional `PER_DOC_PAGE_LIMIT=0` vs small per-doc caps greater than 1.
+
+Follow-up page-preserving results changed the external-dataset conclusion. The best frozen general page-labeled config observed so far is `denseheavy_lightboth`:
+
+```text
+GRAPH_PROFILE=page_rank_probe
+FINAL_TOP_PAGES=1000
+PER_DOC_PAGE_LIMIT=0
+DENSE_WEIGHT=1.25
+SPARSE_WEIGHT=0.75
+RESTART_PROB=0.15
+PPR_ITERS=30
+PAGE_DOC_EDGE_WEIGHT=1.0
+SAME_DOC_WINDOW=1
+ADJACENT_PAGE_EDGE_WEIGHT=0.25
+FINAL_PAGE_SEED_WEIGHT=1.0
+FINAL_PPR_PAGE_WEIGHT=0.25
+FINAL_PPR_DOC_WEIGHT=0.25
+```
+
+Observed `denseheavy_lightboth` versus `plain_top224`:
+
+| dataset | qids | page@1 | page@4 | page@20 | doc@4 | doc@20 | note |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| SciEGQA-Bench | 1623 | 0.4951 *(plain 0.5228)* | 0.7686 *(plain 0.7394)* | 0.9104 *(plain 0.8758)* | 0.9261 *(plain 0.9070)* | 0.9852 *(plain 0.9772)* | wins at page@4/@20; loses page@1 |
+| MMDocIR | 1658 | 0.4074 *(plain 0.4136)* | 0.6342 *(plain 0.6075)* | 0.7662 *(plain 0.7480)* | 0.8148 *(plain 0.8058)* | 0.8920 *(plain 0.8890)* | wins at page@4/@20; loses page@1 |
+| ViDoRe V3 | 14514 | 0.1689 *(plain 0.1730)* | 0.3475 *(plain 0.3312)* | 0.5706 *(plain 0.5431)* | 0.8959 *(plain 0.8854)* | 0.9751 *(plain 0.9809)* | wins page@4/@20; loses page@1/doc@20 |
+| ViDoSeek | 1142 | 0.6567 *(plain 0.6830)* | 0.8923 *(plain 0.8958)* | 0.9974 *(plain 0.9842)* | 1.0000 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; plain still slightly better at page@1/@4 |
+
+Updated recommendation:
+
+- For exact page-labeled datasets, the strongest general transfer is page-preserving dense-heavy light Graph-PPR, not the M3DocVQA document-shortlist profile.
+- The claim should be framed around practical context depths: page@4/page@10/page@20. Do not claim a universal rank-1 win.
+- ViDoSeek is the main exception for page@4: `plain_top224` is still slightly stronger there, while dense-heavy light Graph-PPR improves deeper recall.
+- Keep `doc_shortlist_best` for M3DocVQA/MMQA-style document shortlist retrieval, where exact gold page labels are not the main target.

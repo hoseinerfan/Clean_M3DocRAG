@@ -504,6 +504,35 @@ Conclusion from the external transfer check:
 - For external datasets with reliable page labels, continue with a page-preserving Graph-PPR profile (`GRAPH_PROFILE=page_rank_probe` or a tuned page-preserving variant) rather than the one-page-per-doc M3DocVQA shortlist profile.
 - Keep `doc_shortlist_best` only for experiments where the downstream stage consumes a document shortlist or one representative page per document.
 
+Follow-up page-preserving runs found a stronger general config for exact page-labeled datasets:
+
+```text
+GRAPH_PROFILE=page_rank_probe
+FINAL_TOP_PAGES=1000
+PER_DOC_PAGE_LIMIT=0
+DENSE_WEIGHT=1.25
+SPARSE_WEIGHT=0.75
+RESTART_PROB=0.15
+PPR_ITERS=30
+PAGE_DOC_EDGE_WEIGHT=1.0
+SAME_DOC_WINDOW=1
+ADJACENT_PAGE_EDGE_WEIGHT=0.25
+FINAL_PAGE_SEED_WEIGHT=1.0
+FINAL_PPR_PAGE_WEIGHT=0.25
+FINAL_PPR_DOC_WEIGHT=0.25
+```
+
+Short label: `denseheavy_lightboth`.
+
+| Dataset | qids | page@1 | page@4 | page@20 | doc@4 | doc@20 | note |
+|---|---:|---:|---:|---:|---:|---:|---|
+| SciEGQA-Bench | 1623 | 0.4951 *(plain 0.5228)* | 0.7686 *(plain 0.7394)* | 0.9104 *(plain 0.8758)* | 0.9261 *(plain 0.9070)* | 0.9852 *(plain 0.9772)* | better at page@4/@20; loses page@1 |
+| MMDocIR | 1658 | 0.4074 *(plain 0.4136)* | 0.6342 *(plain 0.6075)* | 0.7662 *(plain 0.7480)* | 0.8148 *(plain 0.8058)* | 0.8920 *(plain 0.8890)* | better at page@4/@20; loses page@1 |
+| ViDoRe V3 | 14514 | 0.1689 *(plain 0.1730)* | 0.3475 *(plain 0.3312)* | 0.5706 *(plain 0.5431)* | 0.8959 *(plain 0.8854)* | 0.9751 *(plain 0.9809)* | better at page@4/@20; loses page@1/doc@20 |
+| ViDoSeek | 1142 | 0.6567 *(plain 0.6830)* | 0.8923 *(plain 0.8958)* | 0.9974 *(plain 0.9842)* | 1.0000 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; plain slightly better at page@1/@4 |
+
+Use this as the current frozen page-labeled config unless the full sweep collector identifies a better single setting. The defensible claim is improvement at practical context depths, especially page@4/page@20 on SciEGQA, MMDocIR, and ViDoRe V3. Do not claim universal page@1 improvement or universal superiority over `plain_top224`.
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |
