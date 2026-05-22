@@ -68,6 +68,7 @@ Current claim:
 - Do not collapse the result to one metric: the strongest and most stable gains are at page@4/page@20, and page@1 should still be reported separately.
 - Keep `doc_shortlist_best` separate for M3DocVQA/MMQA-style document-shortlist retrieval.
 - MMLongBench DocQA is now prepared as the next page-labeled stress test. It should use the same page-preserving default first, because `ans_page_list` provides exact zero-based page labels.
+- DUDE is scaffolded as the MP-DocVQA replacement target. It should also use the page-preserving default first, after validating the converter's `answer_page_base` sanity summary.
 
 ## Transfer Results That Motivated This
 
@@ -464,6 +465,36 @@ sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
 ```
 
 After dense retrieval and `plain_top224`, use `denseheavy125_medium_both` as the first Graph-PPR config. Full commands are in `mmlongbench/README.md` and `DATASET_WORKFLOWS.md`.
+
+## DUDE Next Run
+
+DUDE support is scaffolded under `dude/`. Use it as the MP-DocVQA replacement path because it is multi-page DocQA, exposes PDFs/OCR, and has answer page bounding boxes that can be converted into exact page retrieval labels.
+
+Recommended first run:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source dude/env_hpc.sh
+
+"$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
+  --output-root "$LOCAL_DATA_DIR/dude" \
+  --hf-config Amazon_due \
+  --source-split val
+
+"$REPO_ROOT/env/bin/python" - <<'PY'
+import json, os
+p=os.environ["LOCAL_DATA_DIR"] + "/dude/prepare_dev_summary.json"
+s=json.load(open(p))
+for k in ["source_row_count","qa_count","doc_count","page_count","answer_page_base","answer_page_base_missing_counts","skipped_no_gold_page_count","missing_gold_page_count","answer_type_counts_kept"]:
+    print(k, s.get(k))
+PY
+
+sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
+  dude/sbatch_embed_dude_array.sh
+```
+
+After embeddings, run dense retrieval, `plain_top224`, SPLADE, then `denseheavy125_medium_both`. Full commands are in `dude/README.md` and `DATASET_WORKFLOWS.md`.
 
 ## SciEGQA Targeted Sweep Runner
 

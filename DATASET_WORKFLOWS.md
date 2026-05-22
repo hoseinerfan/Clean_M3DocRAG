@@ -543,6 +543,7 @@ Use `denseheavy125_medium_both` as the current frozen single page-labeled config
 | ViDoRe V3 | `vidore/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG` | `$LOCAL_DATA_DIR/vidore-v3` | `colpali-v1.2_vidore-v3_dev` | `$LOCAL_OUTPUT_DIR/vidore-v3` | 189 docs, 19252 pages, 14514 QAs, all languages |
 | OpenDocVQA | `opendocvqa/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/OpenDocVQA_M3DocRAG` | `$LOCAL_DATA_DIR/opendocvqa` | `colpali-v1.2_opendocvqa_dev` | `$LOCAL_OUTPUT_DIR/opendocvqa` | gated; 3223 packed docs, 206267 pages, 41017 QAs |
 | MMLongBench DocQA | `mmlongbench/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMLongBench_M3DocRAG` | `$LOCAL_DATA_DIR/mmlongbench-docqa` | `colpali-v1.2_mmlongbench-docqa_dev` | `$LOCAL_OUTPUT_DIR/mmlongbench-docqa` | DocQA subsets: `longdocurl`, `mmlongdoc`, `slidevqa`; counts written by prepare summary |
+| DUDE | `dude/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG` | `$LOCAL_DATA_DIR/dude` | `colpali-v1.2_dude_dev` | `$LOCAL_OUTPUT_DIR/dude` | multi-page DocQA; exact page labels from answer bbox pages; counts written by prepare summary |
 
 Notes:
 
@@ -550,6 +551,7 @@ Notes:
 - ViDoRe V3 uses input HF split `test` but writes local M3DocRAG split files named `*_dev.*`.
 - ViDoRe and OpenDocVQA env files force Hugging Face caches under their scratch work roots to avoid home quota failures.
 - MMLongBench DocQA uses `ans_page_list` as exact zero-based page labels. SlideVQA image filenames are one-based, so the converter maps them back to zero-based `page_idx`.
+- DUDE uses the official Hugging Face loader, renders source PDFs to page images, and defaults to skipping rows without answer page boxes because they have no exact page retrieval target.
 - All embedding sbatch files use `--resume`, so resubmitting after timeout is safe.
 - On compute nodes where plain `python` points to base and misses `torch`/`faiss`, use `"$REPO_ROOT/env/bin/python"` for direct commands. The dataset `run_plain_top224_*.sh` wrappers now default to that interpreter through `PYTHON_BIN`.
 
@@ -1464,6 +1466,132 @@ FINAL_PPR_DOC_WEIGHT=0.25 \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
+## DUDE
+
+DUDE is the replacement target for MP-DocVQA availability issues. It is a multi-page document QA benchmark with PDF/OCR assets and answer page bounding boxes. The converter writes the same local files as the other page-labeled datasets and, by default, excludes rows without exact answer page boxes.
+
+Source env:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source dude/env_hpc.sh
+```
+
+Prepare:
+
+```bash
+"$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
+  --output-root "$LOCAL_DATA_DIR/dude" \
+  --hf-config Amazon_due \
+  --source-split val
+```
+
+If the DUDE binaries were already extracted, pass them directly:
+
+```bash
+"$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
+  --data-dir /path/to/DUDE_train-val-test_binaries \
+  --output-root "$LOCAL_DATA_DIR/dude" \
+  --hf-config Amazon_due \
+  --source-split val
+```
+
+Sanity check:
+
+```bash
+"$REPO_ROOT/env/bin/python" - <<'PY'
+import json, os
+p=os.environ["LOCAL_DATA_DIR"] + "/dude/prepare_dev_summary.json"
+s=json.load(open(p))
+for k in ["source_row_count","qa_count","doc_count","page_count","answer_page_base","answer_page_base_missing_counts","skipped_no_gold_page_count","missing_gold_page_count","answer_type_counts_kept"]:
+    print(k, s.get(k))
+PY
+```
+
+Embedding:
+
+```bash
+sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
+  dude/sbatch_embed_dude_array.sh
+```
+
+Index:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/run_indexing_mmdocir.py \
+  --data-root "$LOCAL_DATA_DIR/dude" \
+  --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_dude_dev" \
+  --output-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_dude_dev_pageindex_ivfflat" \
+  --faiss-index-type ivfflat
+```
+
+Dense retrieval:
+
+```bash
+mkdir -p "$LOCAL_OUTPUT_DIR/dude"
+
+"$REPO_ROOT/env/bin/python" mmdocir/run_retrieval_mmdocir.py \
+  --data-root "$LOCAL_DATA_DIR/dude" \
+  --embedding-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_dude_dev" \
+  --index-dir "$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_dude_dev_pageindex_ivfflat" \
+  --output-json "$LOCAL_OUTPUT_DIR/dude/baseline_ret1000.json" \
+  --n-retrieval-pages 1000 \
+  --faiss-nprobe 4
+
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$LOCAL_OUTPUT_DIR/dude/baseline_ret1000.json" \
+  --gold "$LOCAL_DATA_DIR/dude/MMQA_dev.jsonl" \
+  --recall-k 1 2 4 5 10 20 50 100
+```
+
+Plain Top-224:
+
+```bash
+bash dude/run_plain_top224_dude.sh
+
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$LOCAL_OUTPUT_DIR/dude/plain_top224_ret1000_prediction.json" \
+  --gold "$LOCAL_DATA_DIR/dude/MMQA_dev.jsonl" \
+  --recall-k 1 2 4 5 10 20 50 100
+```
+
+SPLADE + page-preserving Graph-PPR:
+
+```bash
+DATA_NAME=dude \
+DATA_ROOT="$LOCAL_DATA_DIR/dude" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/dude/plain_top224_ret1000_prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/dude/doc_rrf_plain_top224_splade" \
+DENSE_WEIGHT=1.25 \
+SPARSE_WEIGHT=0.75 \
+RRF_K=10 \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
+
+DATA_NAME=dude \
+DATA_ROOT="$LOCAL_DATA_DIR/dude" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/dude/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/dude/doc_rrf_plain_top224_splade/dude_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/dude/graph_ppr_plain_top224_splade" \
+GRAPH_PROFILE=page_rank_probe \
+GRAPH_LABEL="dude_denseheavy125_medium_both" \
+FINAL_TOP_PAGES=1000 \
+PER_DOC_PAGE_LIMIT=0 \
+DENSE_WEIGHT=1.25 \
+SPARSE_WEIGHT=0.75 \
+RESTART_PROB=0.15 \
+PPR_ITERS=30 \
+PAGE_DOC_EDGE_WEIGHT=1.0 \
+SAME_DOC_WINDOW=1 \
+ADJACENT_PAGE_EDGE_WEIGHT=0.25 \
+FINAL_PAGE_SEED_WEIGHT=1.0 \
+FINAL_PPR_PAGE_WEIGHT=0.5 \
+FINAL_PPR_DOC_WEIGHT=0.25 \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+
 ## Common Sanity Check
 
 Use this after any prepare step, replacing `DATASET_DIR` with the local dataset folder name:
@@ -1544,3 +1672,4 @@ Per-dataset implementation details live in:
 - `vidore/README.md`
 - `opendocvqa/README.md`
 - `mmlongbench/README.md`
+- `dude/README.md`

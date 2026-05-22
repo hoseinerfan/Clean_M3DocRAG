@@ -97,12 +97,20 @@ Use this section for datasets with exact page labels. These numbers are **averag
 | MaxSim+ | pending | pending | pending | pending |
 | Graph Page Preserve | pending | pending | pending | pending |
 
+### DUDE
+
+| Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
+| --- | ---: | ---: | ---: | ---: |
+| MaxSim+ | pending | pending | pending | pending |
+| Graph Page Preserve | pending | pending | pending | pending |
+
 Interpretation:
 
 - MMDocIR, SciEGQA-Bench, and ViDoRe V3 support the current single page-labeled default: `denseheavy125_medium_both`.
 - ViDoSeek is almost saturated under `plain_top224`; the graph row still improves page@4/page@20 slightly, but the dataset-specific best uses heavier graph weights.
 - OpenDocVQA should not use the earlier all-empty SPLADE run. Wait for real OCR-backed page text before reporting Graph-PPR.
 - MMLongBench DocQA now has a converted page-labeled split, but retrieval numbers are not available until embeddings, dense retrieval, `plain_top224`, SPLADE, and Graph-PPR finish.
+- DUDE is scaffolded as the MP-DocVQA replacement target. It should use the same page-labeled default first after prepare/embedding/retrieval.
 
 ## Table D: Dataset Run Status
 
@@ -115,6 +123,7 @@ Interpretation:
 | ViDoSeek | yes | yes | PDF text | yes | none |
 | OpenDocVQA | yes | yes | EasyOCR/Tesseract shards still required | no valid OCR-backed graph result yet | finish OCR merge, rebuild SPLADE, then run Graph-PPR |
 | MMLongBench DocQA | yes | no | `page_text_list` in manifest | no | wait for embeddings, then run dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |
+| DUDE | scaffolded | no | DUDE OCR in manifest | no | prepare val split, then embed, dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |
 
 ## Historical Baseline Note
 
