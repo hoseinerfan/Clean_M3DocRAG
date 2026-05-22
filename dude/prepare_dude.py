@@ -518,11 +518,44 @@ def group_texts_by_page(obj: object, by_page: dict[int, list[str]], page_count: 
             group_texts_by_page(item, by_page, page_count)
 
 
+def iter_ocr_blocks(obj: object):
+    if isinstance(obj, dict):
+        block_type = str(obj.get("BlockType") or obj.get("blockType") or "").upper()
+        if block_type in {"LINE", "WORD"}:
+            yield obj
+        for value in obj.values():
+            yield from iter_ocr_blocks(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            yield from iter_ocr_blocks(item)
+
+
+def extract_textract_block_texts(data: object, page_count: int) -> dict[int, str]:
+    line_texts: dict[int, list[str]] = defaultdict(list)
+    word_texts: dict[int, list[str]] = defaultdict(list)
+    for block in iter_ocr_blocks(data):
+        text = normalize_text(block.get("Text") or block.get("text"))
+        if not text:
+            continue
+        page_idx = page_idx_from_value(block.get("Page", 1), page_count=page_count, fallback_idx=0)
+        block_type = str(block.get("BlockType") or block.get("blockType") or "").upper()
+        if block_type == "LINE":
+            line_texts[page_idx].append(text)
+        elif block_type == "WORD":
+            word_texts[page_idx].append(text)
+    chosen = line_texts or word_texts
+    return {idx: normalize_text(" ".join(parts)) for idx, parts in chosen.items() if parts}
+
+
 def extract_ocr_page_texts(ocr_path: Path, page_count: int) -> dict[int, str]:
     if not ocr_path.exists():
         return {}
     with ocr_path.open("r", encoding="utf-8") as handle:
         data = json.load(handle)
+
+    block_texts = extract_textract_block_texts(data, page_count)
+    if block_texts:
+        return block_texts
 
     if isinstance(data, dict):
         blocks = data.get("Blocks") or data.get("blocks")
