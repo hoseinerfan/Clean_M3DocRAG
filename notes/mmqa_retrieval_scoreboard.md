@@ -1,0 +1,401 @@
+# MMQA Retrieval Scoreboard
+
+Purpose: keep a short, updateable MMQA scoreboard with the exact tables, configs, artifact paths, and commands used to produce them. Extend this same structure in future chats and mirror it for other datasets.
+
+## Metric Policy
+
+- Use **average recall@k** as the primary retrieval metric everywhere.
+- Keep **doc hit@k** as a secondary diagnostic only.
+- Compare against the M3DocRAG baseline using the same recall-style metric as the baseline evaluator in `src/m3docrag/datasets/m3_docvqa/evaluate.py`.
+
+## Method Labels Used Below
+
+- `baseline`
+  - current raw M3DocRAG retrieval baseline from the stronger saved `ret1000full_nprobe4` artifact
+  - this is **not** the older historical April 10 `rag_dev_ret4` baseline
+- `MaxSim+`
+  - `plain_top224`
+- `Graph Page Preserve`
+  - page-preserving Graph-PPR using `plain_top224` dense + SPLADE sparse
+  - the tables below use profile `denseheavy_lightboth`
+
+## Table A: Doc Hit@k
+
+These are document hit-rate numbers, not recall. They are still useful as a shortlist diagnostic.
+
+| Method | Whole Dev doc@4 | Whole Dev doc@20 | ImageListQ doc@4 | ImageListQ doc@20 |
+| --- | ---: | ---: | ---: | ---: |
+| baseline | `2193 / 2441 = 89.84%` | `2340 / 2441 = 95.86%` | `62 / 141 = 43.97%` | `91 / 141 = 64.54%` |
+| MaxSim+ | `2277 / 2441 = 93.28%` | `2368 / 2441 = 97.01%` | `81 / 141 = 57.45%` | `101 / 141 = 71.63%` |
+| Graph Page Preserve | `2346 / 2441 = 96.11%` | `2401 / 2441 = 98.36%` | `86 / 141 = 60.99%` | `114 / 141 = 80.85%` |
+
+## Table B: Average Recall@k
+
+These are the main retrieval numbers to compare with the baseline evaluator.
+
+| Method | Whole Dev recall@4 | Whole Dev recall@20 | ImageListQ recall@4 | ImageListQ recall@20 |
+| --- | ---: | ---: | ---: | ---: |
+| baseline | `71.56%` | `84.72%` | `32.27%` | `58.60%` |
+| MaxSim+ | `74.89%` | `86.53%` | `43.91%` | `62.68%` |
+| Graph Page Preserve | `76.18%` | `89.29%` | `42.02%` | `67.88%` |
+
+Interpretation:
+
+- Whole MMQA dev:
+  - `Graph Page Preserve` is best at both `recall@4` and `recall@20`.
+- `ImageListQ`:
+  - `MaxSim+` is slightly better at `recall@4`.
+  - `Graph Page Preserve` is clearly better at `recall@20`.
+
+## Historical Baseline Note
+
+The old true full-dev `ret4` baseline artifact is lower than the current controlled baseline:
+
+- old historical `rag_dev_ret4` baseline:
+  - `EM = 32.4048`
+  - `F1 = 37.4416`
+  - `recall@4 = 0.7120`
+- current controlled external baseline top4:
+  - `EM = 34.7399`
+  - `F1 = 40.1487`
+  - `recall@4 = 0.7156`
+
+Reason:
+
+- old baseline = retrieve `4` directly
+- current controlled baseline = retrieve `1000` with the later stronger saved retrieval artifact, then truncate to top `4` for QA
+
+So the current controlled baseline is better, and should not be confused with the older April 10 historical baseline.
+
+## Canonical MMQA Artifacts
+
+### Gold
+
+- gold JSONL:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl`
+
+### Current Baseline
+
+- retrieval prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/retrieval_only_dev_ret1000full_nprobe4/colpali-v1.2_ivfflat_nprobe4_ret1000_2026-05-10_10-28-25.json`
+- external-QA prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_external_qa_mmqa_dev/mmqa_dev_m3docrag_baseline_qwen2vl_top4.prediction.json`
+- external-QA eval JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_external_qa_mmqa_dev/mmqa_dev_m3docrag_baseline_qwen2vl_top4.eval.json`
+
+### Historical Baseline
+
+- old full-dev prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/rag_dev_ret4/colpali-v1.2_ivfflat_ret4_Qwen2-VL-7B-Instruct_2026-04-10_22-49-57.json`
+- old full-dev eval JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/rag_dev_ret4/colpali-v1.2_ivfflat_ret4_Qwen2-VL-7B-Instruct_2026-04-10_22-49-57_eval_results.json`
+
+### MaxSim+
+
+- `plain_top224` prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json`
+- external-QA prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_external_qa_mmqa_dev/mmqa_dev_plain_top224_qwen2vl_top4.prediction.json`
+- external-QA eval JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_external_qa_mmqa_dev/mmqa_dev_plain_top224_qwen2vl_top4.eval.json`
+
+### Graph Page Preserve
+
+- graph retrieval prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth.prediction.json`
+- graph retrieval summary JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth.summary.json`
+- graph retrieval analysis JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth.retrieval_analysis.json`
+- graph external-QA prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth_qwen2vl_top4.prediction.json`
+- graph external-QA eval JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth_qwen2vl_top4.eval.json`
+
+## Configs Used For These Tables
+
+### Baseline
+
+- retrieval artifact:
+  - raw saved baseline retrieval from `ret1000full_nprobe4`
+- QA:
+  - external adapter
+  - `qa_top_pages = 4`
+  - `model_name_or_path = Qwen2-VL-7B-Instruct`
+  - `bits = 16`
+
+### MaxSim+ (`plain_top224`)
+
+- dense source:
+  - current baseline retrieval pool with `top1000`
+- rerank:
+  - `base-score-source = approx_page_maxsim_topk`
+  - `approx-base-page-token-topk = 224`
+  - `approx-base-page-token-scorer = query_mean`
+  - `approx-base-page-token-selector = global_topk`
+  - `approx-base-page-token-coarse-dtype = fp32`
+- QA:
+  - external adapter
+  - `qa_top_pages = 4`
+  - `model_name_or_path = Qwen2-VL-7B-Instruct`
+  - `bits = 16`
+
+### Graph Page Preserve (`denseheavy_lightboth`)
+
+- dense input:
+  - `plain_top224`
+- sparse input:
+  - SPLADE retrieval top1000
+- graph profile:
+  - `GRAPH_PROFILE = denseheavy_lightboth`
+  - `dense_weight = 1.25`
+  - `sparse_weight = 0.75`
+  - `rrf_k = 10`
+  - `doc_seed_weight = 0.0`
+  - `restart_prob = 0.15`
+  - `ppr_iters = 30`
+  - `page_doc_edge_weight = 1.0`
+  - `same_doc_window = 1`
+  - `adjacent_page_edge_weight = 0.25`
+  - `final_top_pages = 1000`
+  - `per_doc_page_limit = 0`
+  - `final_page_seed_weight = 1.0`
+  - `final_ppr_page_weight = 0.25`
+  - `final_ppr_doc_weight = 0.25`
+- QA:
+  - external adapter
+  - `qa_top_pages = 4`
+  - `model_name_or_path = Qwen2-VL-7B-Instruct`
+  - `bits = 16`
+
+Important:
+
+- current wrappers default to `GRAPH_PROFILE = denseheavy125_medium_both`
+- the tables above are for the earlier **`denseheavy_lightboth`** run
+- keep that distinction explicit when adding future rows
+
+## Reproduction Commands
+
+### 1. Baseline top4 QA eval
+
+```bash
+REPO=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+GOLD=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl
+OUTDIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_external_qa_mmqa_dev
+
+export LOCAL_DATA_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/data
+export LOCAL_MODEL_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/model
+
+cd "${REPO}"
+python scripts/run_m3docvqa_external_retrieval_qa.py \
+  --prediction-json /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/retrieval_only_dev_ret1000full_nprobe4/colpali-v1.2_ivfflat_nprobe4_ret1000_2026-05-10_10-28-25.json \
+  --gold "${GOLD}" \
+  --data-name m3-docvqa \
+  --split dev \
+  --model-name-or-path Qwen2-VL-7B-Instruct \
+  --bits 16 \
+  --qa-top-pages 4 \
+  --doc-image-cache-size 16 \
+  --save-every 25 \
+  --resume \
+  --run-eval \
+  --output-prediction-json "${OUTDIR}/mmqa_dev_m3docrag_baseline_qwen2vl_top4.prediction.json" \
+  --output-eval-json "${OUTDIR}/mmqa_dev_m3docrag_baseline_qwen2vl_top4.eval.json"
+```
+
+### 2. MaxSim+ top4 QA eval
+
+```bash
+python scripts/run_m3docvqa_external_retrieval_qa.py \
+  --prediction-json /mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json \
+  --gold "${GOLD}" \
+  --data-name m3-docvqa \
+  --split dev \
+  --model-name-or-path Qwen2-VL-7B-Instruct \
+  --bits 16 \
+  --qa-top-pages 4 \
+  --doc-image-cache-size 16 \
+  --save-every 25 \
+  --resume \
+  --run-eval \
+  --output-prediction-json "${OUTDIR}/mmqa_dev_plain_top224_qwen2vl_top4.prediction.json" \
+  --output-eval-json "${OUTDIR}/mmqa_dev_plain_top224_qwen2vl_top4.eval.json"
+```
+
+### 3. Graph Page Preserve retrieval (`denseheavy_lightboth`)
+
+```bash
+DENSE_PRED=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json \
+SPARSE_PRED=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json \
+GRAPH_OUT_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev \
+GRAPH_PROFILE=denseheavy_lightboth \
+bash scripts/run_m3docvqa_page_preserving_graph_pipeline.sh
+```
+
+### 4. Graph Page Preserve top4 QA eval (`denseheavy_lightboth`)
+
+```bash
+GRAPH_OUT_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev \
+GRAPH_PROFILE=denseheavy_lightboth \
+QA_TOP_PAGES=4 \
+MODEL_NAME_OR_PATH=Qwen2-VL-7B-Instruct \
+bash scripts/run_m3docvqa_graph_pagepreserve_qa.sh
+```
+
+### 5. Rebuild Table A (doc hit)
+
+```bash
+python - <<'PY'
+import json
+
+gold_path = "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl"
+preds = {
+    "baseline": "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/retrieval_only_dev_ret1000full_nprobe4/colpali-v1.2_ivfflat_nprobe4_ret1000_2026-05-10_10-28-25.json",
+    "MaxSim+": "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json",
+    "Graph Page Preserve": "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth.prediction.json",
+}
+
+gold_rows = [json.loads(line) for line in open(gold_path)]
+slices = {
+    "Whole Dev": gold_rows,
+    "ImageListQ": [row for row in gold_rows if row.get("metadata", {}).get("type") == "ImageListQ"],
+}
+payloads = {name: json.load(open(path)) for name, path in preds.items()}
+
+def first_gold_rank(pred_row, gold_doc_ids):
+    seen = set()
+    rank = 0
+    for doc_id, page_idx, score in pred_row.get("page_retrieval_results", []):
+        doc_id = str(doc_id).strip()
+        if doc_id in seen:
+            continue
+        seen.add(doc_id)
+        rank += 1
+        if doc_id in gold_doc_ids:
+            return rank
+    return None
+
+print("| Method | Whole Dev doc@4 | Whole Dev doc@20 | ImageListQ doc@4 | ImageListQ doc@20 |")
+print("| --- | ---: | ---: | ---: | ---: |")
+for name, payload in payloads.items():
+    vals = {}
+    for slice_name, rows in slices.items():
+        hit4 = 0
+        hit20 = 0
+        for row in rows:
+            gold_doc_ids = {
+                str(ctx["doc_id"]).strip()
+                for ctx in row.get("supporting_context", [])
+                if str(ctx.get("doc_id", "")).strip()
+            }
+            rank = first_gold_rank(payload[row["qid"]], gold_doc_ids)
+            if rank is not None and rank <= 4:
+                hit4 += 1
+            if rank is not None and rank <= 20:
+                hit20 += 1
+        vals[(slice_name, 4)] = (hit4, len(rows), hit4 / len(rows))
+        vals[(slice_name, 20)] = (hit20, len(rows), hit20 / len(rows))
+    print(
+        f"| {name} | "
+        f"`{vals[('Whole Dev', 4)][0]} / {vals[('Whole Dev', 4)][1]} = {vals[('Whole Dev', 4)][2]*100:.2f}%` | "
+        f"`{vals[('Whole Dev', 20)][0]} / {vals[('Whole Dev', 20)][1]} = {vals[('Whole Dev', 20)][2]*100:.2f}%` | "
+        f"`{vals[('ImageListQ', 4)][0]} / {vals[('ImageListQ', 4)][1]} = {vals[('ImageListQ', 4)][2]*100:.2f}%` | "
+        f"`{vals[('ImageListQ', 20)][0]} / {vals[('ImageListQ', 20)][1]} = {vals[('ImageListQ', 20)][2]*100:.2f}%` |"
+    )
+PY
+```
+
+### 6. Rebuild Table B (average recall)
+
+```bash
+python - <<'PY'
+import json
+
+gold_path = "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl"
+preds = {
+    "baseline": "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/retrieval_only_dev_ret1000full_nprobe4/colpali-v1.2_ivfflat_nprobe4_ret1000_2026-05-10_10-28-25.json",
+    "MaxSim+": "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json",
+    "Graph Page Preserve": "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth.prediction.json",
+}
+
+gold_rows = [json.loads(line) for line in open(gold_path)]
+slices = {
+    "Whole Dev": gold_rows,
+    "ImageListQ": [row for row in gold_rows if row.get("metadata", {}).get("type") == "ImageListQ"],
+}
+
+def recall_at_k(pred_row, gold_doc_ids, k):
+    rows = pred_row.get("page_retrieval_results", [])[:k]
+    top_k_doc_ids = {str(row[0]).strip() for row in rows if isinstance(row, list) and len(row) >= 1}
+    return len(top_k_doc_ids & gold_doc_ids) / len(gold_doc_ids) if gold_doc_ids else 0.0
+
+payloads = {name: json.load(open(path)) for name, path in preds.items()}
+
+print("| Method | Whole Dev recall@4 | Whole Dev recall@20 | ImageListQ recall@4 | ImageListQ recall@20 |")
+print("| --- | ---: | ---: | ---: | ---: |")
+
+for name, payload in payloads.items():
+    vals = {}
+    for slice_name, rows in slices.items():
+        r4 = []
+        r20 = []
+        for row in rows:
+            qid = row["qid"]
+            gold_doc_ids = {
+                str(ctx["doc_id"]).strip()
+                for ctx in row.get("supporting_context", [])
+                if str(ctx.get("doc_id", "")).strip()
+            }
+            pred_row = payload[qid]
+            r4.append(recall_at_k(pred_row, gold_doc_ids, 4))
+            r20.append(recall_at_k(pred_row, gold_doc_ids, 20))
+        vals[(slice_name, 4)] = sum(r4) / len(r4)
+        vals[(slice_name, 20)] = sum(r20) / len(r20)
+
+    print(
+        f"| {name} | "
+        f"`{vals[('Whole Dev', 4)]*100:.2f}%` | "
+        f"`{vals[('Whole Dev', 20)]*100:.2f}%` | "
+        f"`{vals[('ImageListQ', 4)]*100:.2f}%` | "
+        f"`{vals[('ImageListQ', 20)]*100:.2f}%` |"
+    )
+PY
+```
+
+## Output Structure To Reuse For Other Datasets
+
+For each dataset, keep the same sections:
+
+1. method labels
+2. doc hit table
+3. recall table
+4. canonical artifact paths
+5. configs used
+6. reproduction commands
+7. historical-baseline note if needed
+
+Recommended artifact naming pattern:
+
+```text
+<dataset>/
+  baseline/
+    <dataset>_baseline.prediction.json
+    <dataset>_baseline.eval.json
+  maxsim_plus/
+    <dataset>_plain_top224.prediction.json
+    <dataset>_plain_top224.eval.json
+  graph_pagepreserve/
+    <dataset>_plain_top224_splade_graph_pagepreserve_<profile>.prediction.json
+    <dataset>_plain_top224_splade_graph_pagepreserve_<profile>.summary.json
+    <dataset>_plain_top224_splade_graph_pagepreserve_<profile>.retrieval_analysis.json
+    <dataset>_plain_top224_splade_graph_pagepreserve_<profile>.eval.json
+  tables/
+    <dataset>_doc_hit_table.md
+    <dataset>_recall_table.md
+```
+
+For MMQA, the current active profile to test next is:
+
+- `denseheavy125_medium_both`
+
+But keep the older `denseheavy_lightboth` rows above intact, since they are the current finalized numbers for this scoreboard.
