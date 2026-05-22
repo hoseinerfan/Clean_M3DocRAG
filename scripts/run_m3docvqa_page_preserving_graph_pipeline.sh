@@ -29,6 +29,12 @@ RECALL_K_VALUES="${RECALL_K_VALUES:-1 2 4 5 10 20 50 100 500 1000}"
 
 mkdir -p "$OUT_DIR"
 
+echo "using_dense_pred=$DENSE_PRED"
+echo "using_sparse_pred=$SPARSE_PRED"
+echo "using_gold=$GOLD"
+echo "using_out_dir=$OUT_DIR"
+echo "using_question_type_filter=${QUESTION_TYPE_FILTER:-ALL}"
+
 "$PYTHON_BIN" - "$DENSE_PRED" "$SPARSE_PRED" "$GOLD" "$QUESTION_TYPE_FILTER" <<'PY'
 import json
 import sys
