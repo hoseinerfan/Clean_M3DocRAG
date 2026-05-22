@@ -21,6 +21,7 @@ class PageRecord:
     dense_score: float | None = None
     sparse_score: float | None = None
     expansion_score: float | None = None
+    neighbor_seed_score: float = 0.0
 
     @property
     def page_uid(self) -> str:
@@ -77,7 +78,8 @@ def parse_args() -> argparse.Namespace:
         default="",
         help=(
             "Optional full SPLADE page index .pt. When set with --expansion-top-pages, "
-            "the script performs pseudo-relevance-feedback page expansion before graph/PPR."
+            "the script performs pseudo-relevance-feedback page expansion before graph/PPR. "
+            "It is also used as a page catalog for neighbor-page expansion."
         ),
     )
     parser.add_argument(
@@ -129,6 +131,36 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional within-source min-max score contribution added to rank/RRF page seeds. "
             "Default 0 keeps the graph seed rank-based and comparable across dense/SPLADE."
+        ),
+    )
+    parser.add_argument(
+        "--neighbor-expansion-window",
+        type=int,
+        default=0,
+        help=(
+            "Add unseen same-document neighboring pages within this distance for strong seed pages. "
+            "Use 0 to disable neighbor-page expansion."
+        ),
+    )
+    parser.add_argument(
+        "--expand-neighbors-from-top-dense-pages",
+        type=int,
+        default=50,
+        help="Dense seed pages used to add same-document neighboring pages.",
+    )
+    parser.add_argument(
+        "--expand-neighbors-from-top-sparse-pages",
+        type=int,
+        default=50,
+        help="Sparse seed pages used to add same-document neighboring pages.",
+    )
+    parser.add_argument(
+        "--neighbor-seed-weight",
+        type=float,
+        default=0.25,
+        help=(
+            "Relative weight for neighbor-page seed mass inherited from a seed page. "
+            "The inherited contribution is source_weight * neighbor_seed_weight / (rrf_k + rank) / distance."
         ),
     )
     parser.add_argument(
@@ -198,7 +230,7 @@ def load_prediction(path: Path) -> dict[str, dict]:
 
 
 class SparsePageIndex:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, *, load_postings: bool = True) -> None:
         import torch
 
         payload = torch.load(path, map_location="cpu")
@@ -210,23 +242,30 @@ class SparsePageIndex:
         self.term_ids = payload["term_ids"].to(torch.int64)
         self.term_weights = payload["term_weights"].to(torch.float32)
         self.page_uid_to_idx = {page_uid: idx for idx, page_uid in enumerate(self.page_uids)}
+        self.doc_to_page_indices: dict[str, set[int]] = defaultdict(set)
+        for doc_id, page_idx in zip(self.doc_ids, self.page_indices.tolist()):
+            self.doc_to_page_indices[str(doc_id)].add(int(page_idx))
         self.postings: dict[int, tuple[object, object]] = {}
-        posting_pages: dict[int, list[int]] = defaultdict(list)
-        posting_weights: dict[int, list[float]] = defaultdict(list)
-        for page_idx in range(len(self.page_uids)):
-            start = int(self.offsets[page_idx].item())
-            end = int(self.offsets[page_idx + 1].item())
-            for term_id, weight in zip(
-                self.term_ids[start:end].tolist(),
-                self.term_weights[start:end].tolist(),
-            ):
-                posting_pages[int(term_id)].append(page_idx)
-                posting_weights[int(term_id)].append(float(weight))
-        for term_id, page_ids in posting_pages.items():
-            self.postings[int(term_id)] = (
-                torch.tensor(page_ids, dtype=torch.int64),
-                torch.tensor(posting_weights[int(term_id)], dtype=torch.float32),
-            )
+        if load_postings:
+            posting_pages: dict[int, list[int]] = defaultdict(list)
+            posting_weights: dict[int, list[float]] = defaultdict(list)
+            for page_idx in range(len(self.page_uids)):
+                start = int(self.offsets[page_idx].item())
+                end = int(self.offsets[page_idx + 1].item())
+                for term_id, weight in zip(
+                    self.term_ids[start:end].tolist(),
+                    self.term_weights[start:end].tolist(),
+                ):
+                    posting_pages[int(term_id)].append(page_idx)
+                    posting_weights[int(term_id)].append(float(weight))
+            for term_id, page_ids in posting_pages.items():
+                self.postings[int(term_id)] = (
+                    torch.tensor(page_ids, dtype=torch.int64),
+                    torch.tensor(posting_weights[int(term_id)], dtype=torch.float32),
+                )
+
+    def has_page(self, doc_id: str, page_idx: int) -> bool:
+        return int(page_idx) in self.doc_to_page_indices.get(str(doc_id), set())
 
     def top_terms_for_page(self, page_uid_value: str, topk: int) -> list[tuple[int, float]]:
         page_idx = self.page_uid_to_idx.get(page_uid_value)
@@ -395,6 +434,62 @@ def build_expansion_query_terms(
     return dict(term_scores)
 
 
+def build_neighbor_expansion_pages(
+    *,
+    dense_pages: list[tuple[str, int, float, int]],
+    sparse_pages: list[tuple[str, int, float, int]],
+    sparse_index: SparsePageIndex,
+    args: argparse.Namespace,
+) -> tuple[list[tuple[str, int, float]], dict[str, float]]:
+    window = max(0, int(args.neighbor_expansion_window))
+    if window <= 0:
+        return [], {}
+
+    seed_specs = [
+        (
+            dense_pages[: max(0, int(args.expand_neighbors_from_top_dense_pages))],
+            float(args.dense_weight),
+        ),
+        (
+            sparse_pages[: max(0, int(args.expand_neighbors_from_top_sparse_pages))],
+            float(args.sparse_weight),
+        ),
+    ]
+    neighbor_seed: dict[str, float] = defaultdict(float)
+    seed_pages = {
+        (str(doc_id), int(page_idx))
+        for source_pages, _source_weight in seed_specs
+        for doc_id, page_idx, _score, _rank in source_pages
+    }
+    for source_pages, source_weight in seed_specs:
+        for doc_id, page_idx, _score, rank in source_pages:
+            base_contribution = source_weight * float(args.neighbor_seed_weight) / (
+                float(args.rrf_k) + float(rank)
+            )
+            if base_contribution <= 0:
+                continue
+            for distance in range(1, window + 1):
+                inherited = base_contribution / float(distance)
+                for direction in (-1, 1):
+                    neighbor_idx = int(page_idx) + direction * distance
+                    if neighbor_idx < 0:
+                        continue
+                    if not sparse_index.has_page(str(doc_id), neighbor_idx):
+                        continue
+                    if (str(doc_id), neighbor_idx) in seed_pages:
+                        continue
+                    uid = page_uid(str(doc_id), neighbor_idx)
+                    neighbor_seed[uid] += inherited
+
+    neighbor_pages = [
+        (str(doc_id), int(page_idx), float(seed_score))
+        for uid, seed_score in neighbor_seed.items()
+        for doc_id, page_idx in [(uid.rsplit("_page", 1)[0], int(uid.rsplit("_page", 1)[1]))]
+    ]
+    neighbor_pages.sort(key=lambda item: (-item[2], item[0], item[1]))
+    return neighbor_pages, dict(neighbor_seed)
+
+
 def add_undirected_edge(
     graph: dict[str, dict[str, float]],
     left: str,
@@ -553,6 +648,8 @@ def build_qid_graph_ranking(
         int(args.sparse_top_pages),
     )
     expansion_pages: list[tuple[str, int, float, int]] = []
+    neighbor_pages: list[tuple[str, int, float]] = []
+    neighbor_seed: dict[str, float] = {}
     if sparse_index is not None and int(args.expansion_top_pages) > 0:
         expansion_query_terms = build_expansion_query_terms(
             sparse_index=sparse_index,
@@ -564,6 +661,13 @@ def build_qid_graph_ranking(
             expansion_query_terms,
             top_pages=int(args.expansion_top_pages),
             min_score=float(args.expansion_min_score),
+        )
+    if sparse_index is not None and int(args.neighbor_expansion_window) > 0:
+        neighbor_pages, neighbor_seed = build_neighbor_expansion_pages(
+            dense_pages=dense_pages,
+            sparse_pages=sparse_pages,
+            sparse_index=sparse_index,
+            args=args,
         )
     dense_score_norm = minmax_by_uid(dense_pages)
     sparse_score_norm = minmax_by_uid(sparse_pages)
@@ -597,6 +701,15 @@ def build_qid_graph_ranking(
                 record.expansion_score = score
             page_seed[uid] += source_weight / (float(args.rrf_k) + float(rank))
             page_seed[uid] += source_weight * float(args.score_seed_weight) * source_score_norm.get(uid, 0.0)
+
+    for doc_id, page_idx, seed_score in neighbor_pages:
+        uid = page_uid(doc_id, page_idx)
+        record = records.get(uid)
+        if record is None:
+            record = PageRecord(doc_id=doc_id, page_idx=page_idx)
+            records[uid] = record
+        record.neighbor_seed_score += float(seed_score)
+        page_seed[uid] += float(seed_score)
 
     for doc_id, rank in dense_doc_ranks.items():
         doc_seed[f"doc::{doc_id}"] += (
@@ -694,6 +807,7 @@ def build_qid_graph_ranking(
             "dense_rank": record.dense_rank,
             "sparse_rank": record.sparse_rank,
             "expansion_rank": record.expansion_rank,
+            "neighbor_seed_score": record.neighbor_seed_score,
         }
         for record, final_score, seed_component, page_ppr_component, doc_ppr_component in ranked_records[:20]
     ]
@@ -706,6 +820,7 @@ def build_qid_graph_ranking(
         "dense_candidate_page_count": len(dense_pages),
         "sparse_candidate_page_count": len(sparse_pages),
         "expansion_candidate_page_count": len(expansion_pages),
+        "neighbor_candidate_page_count": len(neighbor_pages),
         "output_page_count": len(final_rows),
         "graph_node_count": len(graph),
         "graph_edge_count_undirected": sum(len(neighbors) for neighbors in graph.values()) // 2,
@@ -756,8 +871,16 @@ def main() -> None:
     dense_pred = load_prediction(Path(args.dense_prediction_json))
     sparse_pred = load_prediction(Path(args.sparse_prediction_json))
     sparse_index = None
-    if args.splade_index_pt and int(args.expansion_top_pages) > 0:
-        sparse_index = SparsePageIndex(Path(args.splade_index_pt))
+    need_sparse_index = bool(args.splade_index_pt) and (
+        int(args.expansion_top_pages) > 0 or int(args.neighbor_expansion_window) > 0
+    )
+    if int(args.neighbor_expansion_window) > 0 and not args.splade_index_pt:
+        raise ValueError("--neighbor-expansion-window requires --splade-index-pt for page-catalog lookup.")
+    if need_sparse_index:
+        sparse_index = SparsePageIndex(
+            Path(args.splade_index_pt),
+            load_postings=int(args.expansion_top_pages) > 0,
+        )
     common_qids = sorted(set(dense_pred) & set(sparse_pred))
     if not common_qids:
         raise ValueError("Dense and sparse predictions have no qids in common.")
