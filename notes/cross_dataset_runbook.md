@@ -1,0 +1,633 @@
+# Cross-Dataset Runbook
+
+Last updated: 2026-05-22
+
+Purpose: keep the operational commands from the dataset chats in one place. Per-dataset folders still contain the detailed READMEs; this file is the compact checklist to resume work without searching old chats.
+
+## Global Rules
+
+- Always clear stale dataset env vars before switching datasets:
+
+```bash
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+```
+
+- Then source exactly one dataset env:
+
+```bash
+source <dataset>/env_hpc.sh
+```
+
+- Use page recall as the main metric for exact page-labeled datasets. Doc recall is useful but secondary.
+- Use `plain_top224_ret1000_prediction.json` as the dense input for SPLADE fusion and Graph-PPR unless a dataset note says otherwise.
+- Use this frozen page-labeled Graph-PPR default first:
+
+```bash
+GRAPH_PROFILE=page_rank_probe
+FINAL_TOP_PAGES=1000
+PER_DOC_PAGE_LIMIT=0
+DENSE_WEIGHT=1.25
+SPARSE_WEIGHT=0.75
+RESTART_PROB=0.15
+PPR_ITERS=30
+PAGE_DOC_EDGE_WEIGHT=1.0
+SAME_DOC_WINDOW=1
+ADJACENT_PAGE_EDGE_WEIGHT=0.25
+FINAL_PAGE_SEED_WEIGHT=1.0
+FINAL_PPR_PAGE_WEIGHT=0.5
+FINAL_PPR_DOC_WEIGHT=0.25
+```
+
+This corresponds to the row we call `denseheavy125_medium_both`. ViDoSeek has a dataset-specific heavier best row, but `denseheavy125_medium_both` is the current single general config.
+
+## Current Status Snapshot
+
+| Dataset | Status | Next action |
+| --- | --- | --- |
+| M3DocVQA/MMQA | Baseline, MaxSim+, SPLADE, and Graph Page Preserve runs exist. | Optional clean apples-to-apples ret4 vs ret1000 QA check. |
+| MMDocIR | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
+| SciEGQA | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
+| ViDoRe V3 | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
+| ViDoSeek | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
+| OpenDocVQA | Full OCR shards merged; OCR text sanity passed; OCR-backed SPLADE/doc-RRF completed and improved retrieval. | Run Graph-PPR using OCR-backed SPLADE. |
+| MMLongBench DocQA | Prepared: 708 docs, 30,917 pages, 14,466 QAs, 19 missing gold pages; embedding job was submitted. | Check embedding completion, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
+| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. | Embed pages, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
+
+## Common Sanity Checks
+
+### Converted Dataset
+
+```bash
+"$REPO_ROOT/env/bin/python" - <<'PY'
+import json, os
+from pathlib import Path
+DATASET_ROOT_NAME = "dude"  # change this, e.g. "vidore-v3" or "sci-egqa-bench"
+root = Path(os.environ["LOCAL_DATA_DIR"]) / DATASET_ROOT_NAME
+doc_ids = json.loads((root / "dev_doc_ids.json").read_text())
+pages = [json.loads(line) for line in (root / "doc_pages_dev.jsonl").open() if line.strip()]
+qas = [json.loads(line) for line in (root / "MMQA_dev.jsonl").open() if line.strip()]
+page_uids = {row["page_uid"] for row in pages}
+missing = []
+for row in qas:
+    for uid in row.get("metadata", {}).get("gold_page_uids", []):
+        if uid not in page_uids:
+            missing.append((row["qid"], uid))
+print("docs", len(doc_ids))
+print("pages", len(pages))
+print("qas", len(qas))
+print("missing_gold_pages", len(missing))
+print("first_missing", missing[:5])
+PY
+```
+
+### Text Coverage For SPLADE
+
+```bash
+"$REPO_ROOT/env/bin/python" - <<'PY'
+import json, os
+from pathlib import Path
+DATASET_ROOT_NAME = "dude"  # change this, e.g. "vidore-v3" or "mmlongbench-docqa"
+root = Path(os.environ["LOCAL_DATA_DIR"]) / DATASET_ROOT_NAME
+n = nonempty = empty = missing_img = 0
+samples = []
+for line in open(root / "doc_pages_dev.jsonl"):
+    r = json.loads(line)
+    n += 1
+    text = (r.get("text") or r.get("ocr_text") or "").strip()
+    nonempty += bool(text)
+    empty += not bool(text)
+    if text and len(samples) < 5:
+        samples.append((r["page_uid"], len(text), text[:160]))
+    if not (root / r["image_path"]).exists():
+        missing_img += 1
+print("pages", n)
+print("nonempty_text_pages", nonempty)
+print("empty_text_pages", empty)
+print("empty_fraction", empty / n if n else None)
+print("missing_images", missing_img)
+print("samples", samples)
+PY
+```
+
+Do not run SPLADE if text is empty or clearly metadata garbage.
+
+### Embedding Completion
+
+```bash
+find "$LOCAL_EMBEDDINGS_DIR/<embedding_name>" -name "*.safetensors" | wc -l
+"$REPO_ROOT/env/bin/python" - <<'PY'
+import json, os
+DATASET_ROOT_NAME = "dude"  # change this
+p = os.environ["LOCAL_DATA_DIR"] + f"/{DATASET_ROOT_NAME}/dev_doc_ids.json"
+print(len(json.load(open(p))))
+PY
+```
+
+The counts should match.
+
+### Evaluation
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$PRED" \
+  --gold "$GOLD" \
+  --recall-k 1 2 4 5 10 20 50 100
+```
+
+## Standard Page-Labeled Pipeline
+
+Use this shape for MMDocIR, SciEGQA, ViDoRe V3, ViDoSeek, MMLongBench DocQA, DUDE, and OpenDocVQA after each dataset is prepared.
+
+### Build Index
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/run_indexing_mmdocir.py \
+  --data-root "$DATA_ROOT" \
+  --embedding-dir "$EMBEDDING_DIR" \
+  --output-dir "$INDEX_DIR" \
+  --faiss-index-type ivfflat
+```
+
+### Dense Retrieval
+
+```bash
+mkdir -p "$LOCAL_OUTPUT_DIR/$DATA_NAME"
+
+"$REPO_ROOT/env/bin/python" mmdocir/run_retrieval_mmdocir.py \
+  --data-root "$DATA_ROOT" \
+  --embedding-dir "$EMBEDDING_DIR" \
+  --index-dir "$INDEX_DIR" \
+  --output-json "$LOCAL_OUTPUT_DIR/$DATA_NAME/baseline_ret1000.json" \
+  --n-retrieval-pages 1000 \
+  --faiss-nprobe 4
+```
+
+### Plain Top-224
+
+Prefer the dataset wrapper when it exists:
+
+```bash
+bash <dataset>/run_plain_top224_<dataset>.sh
+```
+
+The output should be:
+
+```text
+$LOCAL_OUTPUT_DIR/<dataset>/plain_top224_ret1000_prediction.json
+```
+
+### SPLADE + Doc-RRF
+
+```bash
+DATA_NAME=<dataset> \
+DATA_ROOT="$DATA_ROOT" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/<dataset>/plain_top224_ret1000_prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/<dataset>/doc_rrf_plain_top224_splade" \
+DENSE_WEIGHT=1.25 \
+SPARSE_WEIGHT=0.75 \
+RRF_K=10 \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
+```
+
+If page text was already exported manually, add:
+
+```bash
+PAGE_TEXT_JSONL="$LOCAL_OUTPUT_DIR/<dataset>/doc_rrf_plain_top224_splade/<dataset>_page_text_dev.jsonl" \
+SKIP_EXPORT=1
+```
+
+### Graph-PPR Default
+
+```bash
+DATA_NAME=<dataset> \
+DATA_ROOT="$DATA_ROOT" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/<dataset>/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/<dataset>/doc_rrf_plain_top224_splade/<dataset>_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/<dataset>/graph_ppr_plain_top224_splade" \
+GRAPH_PROFILE=page_rank_probe \
+GRAPH_LABEL="<dataset>_denseheavy125_medium_both" \
+FINAL_TOP_PAGES=1000 \
+PER_DOC_PAGE_LIMIT=0 \
+DENSE_WEIGHT=1.25 \
+SPARSE_WEIGHT=0.75 \
+RESTART_PROB=0.15 \
+PPR_ITERS=30 \
+PAGE_DOC_EDGE_WEIGHT=1.0 \
+SAME_DOC_WINDOW=1 \
+ADJACENT_PAGE_EDGE_WEIGHT=0.25 \
+FINAL_PAGE_SEED_WEIGHT=1.0 \
+FINAL_PPR_PAGE_WEIGHT=0.5 \
+FINAL_PPR_DOC_WEIGHT=0.25 \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+## Dataset-Specific Entries
+
+### MMDocIR
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source mmdocir/env_hpc.sh
+```
+
+Prepare:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/prepare_mmdocir.py \
+  --download \
+  --snapshot-dir "$MMDocIR_WORK_ROOT/hf_snapshot/MMDocIR_Evaluation_Dataset" \
+  --output-root "$LOCAL_DATA_DIR/mm-docir"
+```
+
+Key paths:
+
+```text
+DATA_ROOT="$LOCAL_DATA_DIR/mm-docir"
+EMBEDDING_DIR="$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_mm-docir_dev"
+INDEX_DIR="$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_mm-docir_dev_pageindex_ivfflat"
+DENSE_PRED="$LOCAL_OUTPUT_DIR/mmdocir/plain_top224_ret1000_prediction.json"
+```
+
+Run `plain_top224`:
+
+```bash
+bash mmdocir/run_plain_top224_mmdocir.sh
+```
+
+### SciEGQA
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source sciegqa/env_hpc.sh
+```
+
+Prepare:
+
+```bash
+"$REPO_ROOT/env/bin/python" sciegqa/prepare_sciegqa_bench.py \
+  --download \
+  --snapshot-dir "$SciEGQA_WORK_ROOT/hf_snapshot/SciEGQA-Bench" \
+  --output-root "$LOCAL_DATA_DIR/sci-egqa-bench"
+```
+
+Embed:
+
+```bash
+sbatch sciegqa/sbatch_embed_sciegqa_array.sh
+```
+
+Run `plain_top224`:
+
+```bash
+bash sciegqa/run_plain_top224_sciegqa.sh
+```
+
+Key paths:
+
+```text
+DATA_ROOT="$LOCAL_DATA_DIR/sci-egqa-bench"
+EMBEDDING_DIR="$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_sci-egqa-bench_dev"
+INDEX_DIR="$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_sci-egqa-bench_dev_pageindex_ivfflat"
+DENSE_PRED="$LOCAL_OUTPUT_DIR/sciegqa/plain_top224_ret1000_prediction.json"
+```
+
+### ViDoRe V3
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source vidore/env_hpc.sh
+```
+
+Prepare all public V3 domains:
+
+```bash
+"$REPO_ROOT/env/bin/python" vidore/prepare_vidore_v3.py \
+  --download \
+  --cache-dir "$VIDORE_WORK_ROOT/hf_cache" \
+  --output-root "$LOCAL_DATA_DIR/vidore-v3"
+```
+
+Embed:
+
+```bash
+sbatch --time=12:00:00 --array=0-7 --export=ALL,NUM_SHARDS=8,BATCH_SIZE=2 \
+  vidore/sbatch_embed_vidore_v3_array.sh
+```
+
+Use sharded retrieval/plain_top224 for full ViDoRe:
+
+```bash
+sbatch --time=24:00:00 --array=0-15%4 \
+  --export=ALL,NUM_SHARDS=16,TOP_PAGES=1000,FAISS_NPROBE=4,SAVE_EVERY=25 \
+  vidore/sbatch_retrieval_vidore_v3_array.sh
+
+"$REPO_ROOT/env/bin/python" mmdocir/merge_retrieval_predictions.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000_shards/shard_*_of_16.json" \
+  --output-json "$LOCAL_OUTPUT_DIR/vidore-v3/baseline_ret1000.json" \
+  --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
+
+sbatch --time=24:00:00 --array=0-15%4 \
+  --export=ALL,NUM_SHARDS=16,TOP_PAGES=1000,BASE_ONLY_PAGE_BATCH_SIZE=64 \
+  vidore/sbatch_plain_top224_vidore_v3_array.sh
+
+"$REPO_ROOT/env/bin/python" mmdocir/merge_retrieval_predictions.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_shards/shard_*_of_16_prediction.json" \
+  --output-json "$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json" \
+  --gold "$LOCAL_DATA_DIR/vidore-v3/MMQA_dev.jsonl"
+```
+
+### ViDoSeek
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source vidoseek/env_hpc.sh
+```
+
+Prepare:
+
+```bash
+"$REPO_ROOT/env/bin/python" vidoseek/prepare_vidoseek.py \
+  --download \
+  --snapshot-dir "$VIDOSEEK_WORK_ROOT/hf_snapshot/ViDoSeek" \
+  --output-root "$LOCAL_DATA_DIR/vidoseek"
+```
+
+Embed:
+
+```bash
+sbatch --array=0-7 --export=ALL,NUM_SHARDS=8,BATCH_SIZE=2 \
+  vidoseek/sbatch_embed_vidoseek_array.sh
+```
+
+Run `plain_top224`:
+
+```bash
+bash vidoseek/run_plain_top224_vidoseek.sh
+```
+
+Note: ViDoSeek is saturated. `denseheavy150_m3best_pagepreserve` is the best individual row recorded so far, but use `denseheavy125_medium_both` for uniform cross-dataset reporting unless intentionally optimizing ViDoSeek alone.
+
+### OpenDocVQA
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
+source opendocvqa/env_hpc.sh
+```
+
+OpenDocVQA-Corpus is gated and large. Full prepared state observed:
+
+```text
+docs=3223
+pages=206267
+qas=41017
+missing_gold_pages=0
+```
+
+OCR status from the completed EasyOCR run:
+
+```text
+rows=206267
+unique_page_uids=206267
+duplicates=0
+nonempty_text_pages=205573
+empty_text_pages=694
+empty_fraction=0.00336
+```
+
+Merge OCR shards:
+
+```bash
+"$REPO_ROOT/env/bin/python" scripts/merge_jsonl_shards.py \
+  --input-glob "$LOCAL_OUTPUT_DIR/opendocvqa/easyocr_page_text_shards/shard_*_of_64.jsonl" \
+  --output-jsonl "$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_page_text_dev.jsonl" \
+  --output-summary-json "$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_page_text_dev_merge_summary.json" \
+  --dedupe-key page_uid
+```
+
+OCR-backed SPLADE/doc-RRF already produced:
+
+```text
+opendocvqa_splade_ret1000.prediction.json
+opendocvqa_exact_dense_splade_doc_rrf.prediction.json
+page@4=0.5825
+page@20=0.7395
+doc@4=0.6069
+doc@20=0.7818
+```
+
+Run OpenDocVQA Graph-PPR next:
+
+```bash
+DATA_NAME=opendocvqa \
+DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/opendocvqa/graph_ppr_plain_top224_splade" \
+GRAPH_PROFILE=page_rank_probe \
+GRAPH_LABEL="opendocvqa_denseheavy125_medium_both" \
+FINAL_TOP_PAGES=1000 \
+PER_DOC_PAGE_LIMIT=0 \
+DENSE_WEIGHT=1.25 \
+SPARSE_WEIGHT=0.75 \
+RESTART_PROB=0.15 \
+PPR_ITERS=30 \
+PAGE_DOC_EDGE_WEIGHT=1.0 \
+SAME_DOC_WINDOW=1 \
+ADJACENT_PAGE_EDGE_WEIGHT=0.25 \
+FINAL_PAGE_SEED_WEIGHT=1.0 \
+FINAL_PPR_PAGE_WEIGHT=0.5 \
+FINAL_PPR_DOC_WEIGHT=0.25 \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+### MMLongBench DocQA
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source mmlongbench/env_hpc.sh
+```
+
+Prepare:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmlongbench/prepare_mmlongbench.py \
+  --download \
+  --snapshot-dir "$MMLONGBENCH_WORK_ROOT/hf_snapshot/MMLongBench" \
+  --output-root "$LOCAL_DATA_DIR/mmlongbench-docqa"
+```
+
+Observed prepare:
+
+```text
+doc_count=708
+page_count=30917
+qa_count=14466
+missing_gold_page_count=19
+task_counts={'longdocurl': 5039, 'mmlongdoc': 4160, 'slidevqa': 5267}
+```
+
+Embed:
+
+```bash
+sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
+  mmlongbench/sbatch_embed_mmlongbench_array.sh
+```
+
+After embedding, follow the standard page-labeled pipeline with:
+
+```text
+DATA_NAME=mmlongbench-docqa
+DATA_ROOT="$LOCAL_DATA_DIR/mmlongbench-docqa"
+EMBEDDING_DIR="$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_mmlongbench-docqa_dev"
+INDEX_DIR="$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_mmlongbench-docqa_dev_pageindex_ivfflat"
+```
+
+### DUDE
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
+source dude/env_hpc.sh
+```
+
+Prepare with `Amazon_original`; do not use `Amazon_due` for SPLADE text:
+
+```bash
+"$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
+  --output-root "$LOCAL_DATA_DIR/dude" \
+  --hf-config Amazon_original \
+  --source-split val
+```
+
+Observed prepare:
+
+```text
+doc_count=732
+page_count=4083
+qa_count=2903
+skipped_no_gold_page_count=3412
+answer_page_base=0
+answer_page_base_missing_counts={'0': 17, '1': 1884}
+answer_type_counts_kept={'extractive': 2586, 'list/extractive': 317}
+```
+
+Observed OCR sanity after parser fix:
+
+```text
+pages=4086
+nonempty_text_pages=4020
+empty_text_pages=66
+empty_fraction=0.01615
+bad_succeeded_prefix_pages=1
+missing_images=0
+```
+
+Embed next:
+
+```bash
+sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
+  dude/sbatch_embed_dude_array.sh
+```
+
+After embedding, follow the standard page-labeled pipeline with:
+
+```text
+DATA_NAME=dude
+DATA_ROOT="$LOCAL_DATA_DIR/dude"
+EMBEDDING_DIR="$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_dude_dev"
+INDEX_DIR="$LOCAL_EMBEDDINGS_DIR/colpali-v1.2_dude_dev_pageindex_ivfflat"
+```
+
+### M3DocVQA/MMQA
+
+MMQA has unreliable gold page labels for full-dev; use document recall for retrieval and EM/F1 for end-to-end QA.
+
+Clean apples-to-apples baseline check:
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+export M3DOCVQA_LOCAL_DATA_DIR="$PWD/data"
+export M3DOCVQA_LOCAL_MODEL_DIR="$PWD/model"
+export M3DOCVQA_LOCAL_EMBEDDINGS_DIR="$PWD/embeddings"
+export M3DOCVQA_LOCAL_OUTPUT_DIR="$PWD/output"
+OUTROOT=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_apples_ret4_vs_ret1000_current
+mkdir -p "$OUTROOT"
+
+SPLIT=dev \
+FAISS_INDEX_TYPE=ivfflat \
+FAISS_NPROBE=4 \
+N_RETRIEVAL_PAGES=4 \
+BASELINE_RETR_OUT_DIR="$OUTROOT/retrieval_ret4" \
+BASELINE_LABEL="mmqa_dev_baseline_current_ret4_nprobe4" \
+bash scripts/run_m3docvqa_baseline_retrieval.sh
+
+SPLIT=dev \
+FAISS_INDEX_TYPE=ivfflat \
+FAISS_NPROBE=4 \
+N_RETRIEVAL_PAGES=1000 \
+BASELINE_RETR_OUT_DIR="$OUTROOT/retrieval_ret1000" \
+BASELINE_LABEL="mmqa_dev_baseline_current_ret1000_nprobe4" \
+bash scripts/run_m3docvqa_baseline_retrieval.sh
+```
+
+Then run the same QA adapter on top-4 pages:
+
+```bash
+GOLD="$PWD/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl"
+QAOUT="$OUTROOT/qa_top4"
+mkdir -p "$QAOUT"
+
+"$PWD/env/bin/python" scripts/run_m3docvqa_external_retrieval_qa.py \
+  --prediction-json "$OUTROOT/retrieval_ret4/mmqa_dev_baseline_current_ret4_nprobe4.prediction.json" \
+  --gold "$GOLD" \
+  --data-name m3-docvqa \
+  --split dev \
+  --model-name-or-path Qwen2-VL-7B-Instruct \
+  --bits 16 \
+  --qa-top-pages 4 \
+  --doc-image-cache-size 16 \
+  --save-every 25 \
+  --resume \
+  --run-eval \
+  --output-prediction-json "$QAOUT/mmqa_dev_baseline_current_ret4_qwen2vl_top4.prediction.json" \
+  --output-eval-json "$QAOUT/mmqa_dev_baseline_current_ret4_qwen2vl_top4.eval.json"
+
+"$PWD/env/bin/python" scripts/run_m3docvqa_external_retrieval_qa.py \
+  --prediction-json "$OUTROOT/retrieval_ret1000/mmqa_dev_baseline_current_ret1000_nprobe4.prediction.json" \
+  --gold "$GOLD" \
+  --data-name m3-docvqa \
+  --split dev \
+  --model-name-or-path Qwen2-VL-7B-Instruct \
+  --bits 16 \
+  --qa-top-pages 4 \
+  --doc-image-cache-size 16 \
+  --save-every 25 \
+  --resume \
+  --run-eval \
+  --output-prediction-json "$QAOUT/mmqa_dev_baseline_current_ret1000_qwen2vl_top4.prediction.json" \
+  --output-eval-json "$QAOUT/mmqa_dev_baseline_current_ret1000_qwen2vl_top4.eval.json"
+```
+
+## Scoreboards And Handoffs
+
+- MMQA scoreboard: `notes/mmqa_retrieval_scoreboard.md`
+- Cross-dataset retrieval scoreboard: `notes/cross_dataset_retrieval_scoreboard.md`
+- Graph-PPR external handoff: `notes/graph_ppr_external_datasets_handoff_2026-05-21.md`
+- Visual/Graph historical handoff: `notes/visual_reranker_handoff_2026-04-27.md`
+- Dataset-specific READMEs:
+  - `mmdocir/README.md`
+  - `sciegqa/README.md`
+  - `vidore/README.md`
+  - `vidoseek/README.md`
+  - `opendocvqa/README.md`
+  - `mmlongbench/README.md`
+  - `dude/README.md`
