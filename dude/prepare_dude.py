@@ -5,10 +5,22 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import ssl
+import tarfile
+import urllib.request
 from collections import Counter, defaultdict
 from pathlib import Path
 from urllib.parse import quote
 
+
+DEFAULT_ANNOTATIONS_URL = (
+    "https://zenodo.org/record/7763635/files/"
+    "2023-03-23_DUDE_gt_test_PUBLIC.json?download=1"
+)
+DEFAULT_BINARIES_URL = (
+    "https://huggingface.co/datasets/jordyvl/DUDE_loader/resolve/main/data/"
+    "DUDE_train-val-test_binaries.tar.gz"
+)
 
 SKIP_DOC_IDS = {
     "nan",
@@ -21,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Prepare DUDE for M3DocRAG-style page retrieval. The converter uses "
-            "the official Hugging Face DUDE loader, renders source PDFs into page "
+            "the public DUDE annotations/PDFs/OCR, renders source PDFs into page "
             "images, and emits MMQA_<split>.jsonl, qids_<split>.jsonl, "
             "gold_pages_<split>.jsonl, and doc_pages_<split>.jsonl."
         )
@@ -29,11 +41,25 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hf-repo", default="jordyvl/DUDE_loader")
     parser.add_argument("--hf-config", default="Amazon_due")
     parser.add_argument(
+        "--annotations-json",
+        default="",
+        help=(
+            "Optional local DUDE annotation JSON. If omitted, the public Zenodo "
+            "annotation file is downloaded into <output-root>/downloads."
+        ),
+    )
+    parser.add_argument(
+        "--binaries-url",
+        default=DEFAULT_BINARIES_URL,
+        help="URL for DUDE_train-val-test_binaries.tar.gz when --data-dir is omitted.",
+    )
+    parser.add_argument(
         "--data-dir",
         default="",
         help=(
             "Optional extracted DUDE_train-val-test_binaries directory. If omitted, "
-            "datasets.load_dataset downloads/extracts the binaries into the HF cache."
+            "the tarball is downloaded into <output-root>/downloads and extracted "
+            "under <output-root>/raw, avoiding the Hugging Face datasets cache."
         ),
     )
     parser.add_argument("--output-root", required=True)
@@ -72,16 +98,172 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_hf_dataset(args: argparse.Namespace):
-    from datasets import load_dataset
-
-    kwargs: dict[str, object] = {}
-    if args.data_dir:
-        kwargs["data_dir"] = args.data_dir
+def ssl_context() -> ssl.SSLContext | None:
     try:
-        return load_dataset(args.hf_repo, args.hf_config, trust_remote_code=True, **kwargs)
-    except TypeError:
-        return load_dataset(args.hf_repo, args.hf_config, **kwargs)
+        import certifi
+
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
+def download_url(url: str, output_path: Path) -> Path:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists() and output_path.stat().st_size > 0:
+        return output_path
+
+    tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    request = urllib.request.Request(url, headers={"User-Agent": "Clean_M3DocRAG DUDE prepare"})
+    with urllib.request.urlopen(request, context=ssl_context()) as response, tmp_path.open("wb") as out:
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+    tmp_path.replace(output_path)
+    return output_path
+
+
+def safe_extract_tar(tar_path: Path, output_dir: Path) -> None:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    root = output_dir.resolve()
+    with tarfile.open(tar_path, "r:*") as tar:
+        for member in tar.getmembers():
+            member_path = (output_dir / member.name).resolve()
+            if root not in member_path.parents and member_path != root:
+                raise ValueError(f"Refusing to extract path outside output dir: {member.name}")
+        tar.extractall(output_dir)
+
+
+def resolve_extracted_binaries_dir(path: Path) -> Path:
+    candidates = [
+        path,
+        path / "DUDE_train-val-test_binaries",
+    ]
+    candidates.extend(child for child in path.glob("*") if child.is_dir())
+    for candidate in candidates:
+        if (candidate / "PDF").exists() and (candidate / "OCR").exists():
+            return candidate
+    raise FileNotFoundError(
+        f"Could not find DUDE extracted binaries under {path}. "
+        "Expected a directory containing PDF/ and OCR/."
+    )
+
+
+def ensure_binaries_dir(args: argparse.Namespace, output_root: Path) -> Path:
+    if args.data_dir:
+        return resolve_extracted_binaries_dir(Path(args.data_dir))
+
+    download_dir = output_root / "downloads"
+    raw_dir = output_root / "raw"
+    existing = raw_dir / "DUDE_train-val-test_binaries"
+    if existing.exists():
+        return resolve_extracted_binaries_dir(existing)
+
+    tar_path = download_dir / "DUDE_train-val-test_binaries.tar.gz"
+    print(f"downloading_dude_binaries={args.binaries_url}")
+    print(f"download_target={tar_path}")
+    download_url(args.binaries_url, tar_path)
+    print(f"extracting_dude_binaries={tar_path}")
+    safe_extract_tar(tar_path, raw_dir)
+    return resolve_extracted_binaries_dir(raw_dir)
+
+
+def ensure_annotations_json(args: argparse.Namespace, output_root: Path) -> Path:
+    if args.annotations_json:
+        return Path(args.annotations_json)
+    output_path = output_root / "downloads" / "2023-03-23_DUDE_gt_test_PUBLIC.json"
+    print(f"downloading_dude_annotations={DEFAULT_ANNOTATIONS_URL}")
+    print(f"download_target={output_path}")
+    return download_url(DEFAULT_ANNOTATIONS_URL, output_path)
+
+
+def parse_hf_config(config_name: str) -> tuple[str, str]:
+    config = config_name.strip()
+    if config.startswith("bin_"):
+        config = config[4:]
+    parts = config.split("_", 1)
+    if len(parts) != 2:
+        raise ValueError(
+            f"Unsupported DUDE hf-config {config_name!r}. Expected e.g. Amazon_due."
+        )
+    ocr_engine, ocr_format = parts
+    if ocr_engine not in {"Azure", "Amazon", "Tesseract"}:
+        raise ValueError(f"Unsupported DUDE OCR engine in hf-config: {ocr_engine}")
+    if ocr_format not in {"original", "due"}:
+        raise ValueError(f"Unsupported DUDE OCR format in hf-config: {ocr_format}")
+    return ocr_engine, ocr_format
+
+
+def parse_dude_bbox(value: object) -> list[dict[str, int]]:
+    if value in (None, [], [[]]):
+        return []
+    boxes = value
+    if isinstance(boxes, list) and boxes and isinstance(boxes[0], list):
+        boxes = boxes[0]
+    if isinstance(boxes, dict):
+        boxes = [boxes]
+    if not isinstance(boxes, list):
+        return []
+
+    out: list[dict[str, int]] = []
+    for box in boxes:
+        if not isinstance(box, dict):
+            continue
+        parsed: dict[str, int] = {}
+        for key in ("left", "top", "width", "height", "page"):
+            try:
+                parsed[key] = int(box[key])
+            except (KeyError, TypeError, ValueError):
+                parsed = {}
+                break
+        if parsed:
+            out.append(parsed)
+    return out
+
+
+def load_dude_rows(args: argparse.Namespace, output_root: Path) -> list[dict]:
+    binaries_dir = ensure_binaries_dir(args, output_root)
+    annotations_path = ensure_annotations_json(args, output_root)
+    ocr_engine, ocr_format = parse_hf_config(args.hf_config)
+
+    with annotations_path.open("r", encoding="utf-8") as handle:
+        annotations = json.load(handle)
+    if isinstance(annotations, dict):
+        annotations = annotations.get("data", annotations)
+    if not isinstance(annotations, list):
+        raise TypeError(f"DUDE annotations must be a list or dict with data list: {annotations_path}")
+
+    rows: list[dict] = []
+    for annotation in annotations:
+        if not isinstance(annotation, dict):
+            continue
+        row = dict(annotation)
+        doc_id = str(row.get("docId", "") or "").strip()
+        if doc_id in SKIP_DOC_IDS:
+            continue
+        data_split = str(row.get("data_split", "") or "")
+        if args.source_split in {"train", "val"}:
+            if data_split != args.source_split:
+                continue
+        elif args.source_split not in data_split:
+            continue
+
+        row["data_split"] = args.source_split
+        row["answers_page_bounding_boxes"] = parse_dude_bbox(
+            row.get("answers_page_bounding_boxes", [])
+        )
+        if "answers" not in row:
+            row["answers"] = None
+        if "answers_variants" not in row:
+            row["answers_variants"] = None
+        if "answer_type" not in row:
+            row["answer_type"] = None
+
+        row["document"] = str(binaries_dir / "PDF" / args.source_split / f"{doc_id}.pdf")
+        row["OCR"] = str(binaries_dir / "OCR" / ocr_engine / f"{doc_id}_{ocr_format}.json")
+        rows.append(row)
+    return rows
 
 
 def get_source_rows(dataset, source_split: str) -> list[dict]:
@@ -624,9 +806,8 @@ def main() -> None:
     output_root = Path(args.output_root)
     output_root.mkdir(parents=True, exist_ok=True)
 
-    dataset = load_hf_dataset(args)
     source_rows = filter_rows(
-        get_source_rows(dataset, args.source_split),
+        load_dude_rows(args, output_root),
         max_docs=args.max_docs,
         max_questions=args.max_questions,
     )
@@ -679,6 +860,9 @@ def main() -> None:
         "prepared_output_root": str(output_root),
         "hf_repo": args.hf_repo,
         "hf_config": args.hf_config,
+        "data_dir": args.data_dir,
+        "annotations_json": args.annotations_json,
+        "binaries_url": args.binaries_url,
         "source_split": args.source_split,
         "split": args.split,
         "answer_page_base": answer_page_base,

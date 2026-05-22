@@ -9,7 +9,6 @@ DUDE is a multi-page document QA benchmark. The public loader exposes PDF paths,
 ```bash
 cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
 unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
-unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
 source dude/env_hpc.sh
 
 "$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
@@ -18,11 +17,24 @@ source dude/env_hpc.sh
   --source-split val
 ```
 
+`prepare_dude.py` does not use `datasets.load_dataset` anymore. It downloads the public annotation JSON and DUDE binary tarball directly into `$LOCAL_DATA_DIR/dude/downloads`, then extracts PDFs/OCR under `$LOCAL_DATA_DIR/dude/raw`. This avoids the newer Hugging Face `trust_remote_code` block and avoids filling the default HF cache.
+
 If you already have the extracted `DUDE_train-val-test_binaries` directory:
 
 ```bash
 "$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
   --data-dir /path/to/DUDE_train-val-test_binaries \
+  --output-root "$LOCAL_DATA_DIR/dude" \
+  --hf-config Amazon_due \
+  --source-split val
+```
+
+If you already downloaded the public annotations too:
+
+```bash
+"$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
+  --data-dir /path/to/DUDE_train-val-test_binaries \
+  --annotations-json /path/to/2023-03-23_DUDE_gt_test_PUBLIC.json \
   --output-root "$LOCAL_DATA_DIR/dude" \
   --hf-config Amazon_due \
   --source-split val
