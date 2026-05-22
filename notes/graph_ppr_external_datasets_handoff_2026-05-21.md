@@ -2,7 +2,7 @@
 
 Date: 2026-05-21
 
-Purpose: use this note in the datasets chat to adjust Graph-PPR for external page-labeled benchmarks after the first transfer results underperformed `plain_top224` on page metrics.
+Purpose: use this note in the datasets chat to adjust Graph-PPR for external page-labeled benchmarks. The first direct transfer underperformed `plain_top224` on page metrics; follow-up page-preserving sweeps found a better page-labeled default.
 
 ## Short Conclusion
 
@@ -26,7 +26,8 @@ So the current `doc_shortlist_best` config can find the right document but throw
 Main action:
 
 - do not use `doc_shortlist_best` unchanged as the final page retriever
-- use page-preserving Graph-PPR or Graph-PPR as a document prior combined with ColPali page scores
+- use `denseheavy_lightboth` as the current best page-labeled Graph-PPR config
+- keep Graph-PPR as a document prior plus ColPali page scoring as the next major direction if more improvement is needed
 
 ## Updated Page-Labeled Dataset Conclusion
 
@@ -123,7 +124,7 @@ For ViDoRe / ViDoSeek:
 
 - document recall is already high
 - the real problem is exact page localization
-- Graph-PPR adds little as a doc retriever and can hurt page ranking
+- the old one-page-per-doc Graph-PPR adds little as a doc retriever and can hurt page ranking
 
 For SciEGQA:
 
@@ -131,20 +132,32 @@ For SciEGQA:
 - therefore it should be used as a document prior or candidate generator
 - it should not be the final page selection mechanism in one-page-per-doc mode
 
-## Configs To Try Next
+## Confirmed Config And Remaining Controls
 
-### 1. Page-Preserving Graph-PPR
+### 1. Confirmed default: `denseheavy_lightboth`
 
-This is the first fix to try.
-
-Change:
+This is the best general page-labeled Graph-PPR config found so far.
 
 ```text
-per_doc_page_limit = 0
-final_top_pages = 1000
+GRAPH_PROFILE=page_rank_probe
+FINAL_TOP_PAGES=1000
+PER_DOC_PAGE_LIMIT=0
+
+DENSE_WEIGHT=1.25
+SPARSE_WEIGHT=0.75
+
+RESTART_PROB=0.15
+PPR_ITERS=30
+PAGE_DOC_EDGE_WEIGHT=1.0
+SAME_DOC_WINDOW=1
+ADJACENT_PAGE_EDGE_WEIGHT=0.25
+
+FINAL_PAGE_SEED_WEIGHT=1.0
+FINAL_PPR_PAGE_WEIGHT=0.25
+FINAL_PPR_DOC_WEIGHT=0.25
 ```
 
-Keep the same Graph-PPR weights initially:
+Equivalent direct graph command:
 
 ```bash
 python scripts/graph_rerank_page_retrieval_predictions.py \
@@ -157,8 +170,8 @@ python scripts/graph_rerank_page_retrieval_predictions.py \
   --final-top-pages 1000 \
   --per-doc-page-limit 0 \
   --rrf-k 10 \
-  --dense-weight 1.0 \
-  --sparse-weight 1.0 \
+  --dense-weight 1.25 \
+  --sparse-weight 0.75 \
   --doc-seed-weight 0.0 \
   --restart-prob 0.15 \
   --ppr-iters 30 \
@@ -166,85 +179,61 @@ python scripts/graph_rerank_page_retrieval_predictions.py \
   --same-doc-window 1 \
   --adjacent-page-edge-weight 0.25 \
   --final-page-seed-weight 1.0 \
-  --final-ppr-page-weight 1.5 \
-  --final-ppr-doc-weight 0.75 \
-  --output-prediction-json "${OUTDIR}/graph_ppr_page_preserve_1000.prediction.json" \
-  --output-summary-json "${OUTDIR}/graph_ppr_page_preserve_1000.summary.json"
+  --final-ppr-page-weight 0.25 \
+  --final-ppr-doc-weight 0.25 \
+  --output-prediction-json "${OUTDIR}/graph_ppr_denseheavy_lightboth.prediction.json" \
+  --output-summary-json "${OUTDIR}/graph_ppr_denseheavy_lightboth.summary.json"
 ```
 
-Expected behavior:
+Why this works better than the M3DocVQA config:
 
-- doc metrics may stay strong
-- page@20 should recover because gold pages are no longer discarded
-- page@1/page@4 may still need retuning because doc smoothing can still overpower page-local evidence
+- it preserves pages instead of keeping only one page per doc
+- it keeps dense ColPali page evidence stronger than SPLADE
+- it keeps graph/PPR as a light prior rather than letting graph smoothing dominate exact page evidence
 
-Run this before adding new code.
+Use this as the default page-labeled benchmark config.
 
-### 2. Page-Local Dominant Graph-PPR
+### 2. Remaining useful controls
 
-For page-labeled datasets, the final score should keep ColPali/SPLADE page evidence dominant and use graph scores as a weak prior.
+Still run these when validating a new dataset:
 
-Try:
+- `plain_top224`
+  - strongest old baseline
+- `doc_shortlist_best`
+  - shows why the M3DocVQA doc-shortlist config is not a final page retriever
+- page-preserving page-RRF
+  - no graph / no PPR control
+- M3DocVQA-best weights in page-preserving mode
+  - checks whether the issue was only `PER_DOC_PAGE_LIMIT=1` or also graph-heavy scoring
+- two-stage Graph-PPR docs + ColPali page rerank
+  - next direction if `denseheavy_lightboth` is not enough
 
-```text
-final_page_seed_weight = 1.0
-final_ppr_page_weight = 0.25 or 0.5
-final_ppr_doc_weight = 0.10 or 0.25
-per_doc_page_limit = 0
-final_top_pages = 1000
-```
+### 3. Page-local dominant sweep history
 
-Recommended small sweep:
+The sweep that led to `denseheavy_lightboth` tested:
 
 | config | final_page_seed_weight | final_ppr_page_weight | final_ppr_doc_weight |
 | --- | ---: | ---: | ---: |
 | seed_plus_light_page | 1.0 | 0.25 | 0.0 |
 | seed_plus_light_doc | 1.0 | 0.0 | 0.25 |
-| seed_plus_light_both | 1.0 | 0.25 | 0.25 |
+| seed_plus_light_both / `lightboth` | 1.0 | 0.25 | 0.25 |
 | seed_plus_medium_both | 1.0 | 0.5 | 0.25 |
 | M3DocVQA_best_page_preserve | 1.0 | 1.5 | 0.75 |
 
-Hypothesis:
+Best source weights for the general page-labeled setting:
 
-- M3DocVQA best weights are too graph-heavy for exact page retrieval
-- lighter PPR/doc weights should improve page metrics
+- `dense_weight = 1.25`
+- `sparse_weight = 0.75`
 
-### 3. Dense-Heavy Page-Preserving Graph-PPR
+Interpretation:
 
-SPLADE is often useful for finding the right document family but weaker for exact page/layout selection.
-
-Try dense-heavy source weights:
-
-```text
-dense_weight = 1.25
-sparse_weight = 0.75
-```
-
-and optionally:
-
-```text
-dense_weight = 1.5
-sparse_weight = 0.5
-```
-
-Keep:
-
-```text
-per_doc_page_limit = 0
-final_top_pages = 1000
-final_page_seed_weight = 1.0
-final_ppr_page_weight = 0.25 or 0.5
-final_ppr_doc_weight = 0.10 or 0.25
-```
-
-Hypothesis:
-
-- dense ColPali page evidence should dominate page ranking
-- SPLADE should act as recall support, not final page selector
+- M3DocVQA best weights were too graph-heavy for exact page retrieval
+- equal dense/sparse source weighting underused ColPali page-local evidence
+- dense-heavy + light page/doc PPR is the best current compromise
 
 ### 4. Two-Stage Graph-PPR Doc Prior + ColPali Page Rerank
 
-This is likely the strongest conceptual fix.
+This remains the strongest conceptual follow-up if `denseheavy_lightboth` plateaus.
 
 Stage 1:
 
@@ -298,40 +287,37 @@ If page-RRF is also worse than `plain_top224`, then the dense+SPLADE rank fusion
 
 ## Recommended Experiment Order
 
-Run the smallest diagnostic set first.
+For a new page-labeled dataset, run this order:
 
 1. `plain_top224`
-   - existing baseline
-2. current `doc_shortlist_best`
-   - confirms the failure pattern
-3. page-preserving Graph-PPR with M3DocVQA best weights
-   - `per_doc_page_limit=0`, `final_top_pages=1000`
+   - baseline
+2. `denseheavy_lightboth`
+   - current best general Graph-PPR page-labeled config
+3. `doc_shortlist_best`
+   - diagnostic only; confirms why the M3DocVQA doc-shortlist config should not be used as a page retriever
 4. page-preserving page-RRF
-   - no graph, no PPR, `per_doc_page_limit=0`
-5. page-local dominant Graph-PPR
-   - `page_seed=1.0`, `page_ppr=0.25`, `doc_ppr=0.25`
-6. dense-heavy page-local dominant Graph-PPR
-   - `dense_weight=1.25`, `sparse_weight=0.75`
-7. two-stage Graph-PPR docs + ColPali page rerank
-   - if steps 3-6 do not beat `plain_top224`
+   - no graph / no PPR control
+5. M3DocVQA-best weights in page-preserving mode
+   - checks whether the old failure was only the one-page-per-doc output or also graph-heavy scoring
+6. two-stage Graph-PPR docs + ColPali page rerank
+   - next major direction if `denseheavy_lightboth` is not enough
 
 ## How To Interpret Outcomes
 
-### Case A: Page-preserving Graph-PPR beats `doc_shortlist_best` but not `plain_top224`
+### Case A: `denseheavy_lightboth` beats `plain_top224` at page@4/page@20
 
 Conclusion:
 
-- one-page-per-doc was a major problem
-- graph smoothing is still too strong or not page-local enough
-- try page-local dominant weights and dense-heavy source weights
+- page-preserving dense-heavy light-prior Graph-PPR transfers
+- use it as the external page-labeled default
+- still report page@1 caveats if `plain_top224` is better at rank 1
 
-### Case B: Page-preserving Graph-PPR beats `plain_top224`
+### Case B: `denseheavy_lightboth` improves docs but not pages
 
 Conclusion:
 
-- Graph-PPR transfers after removing the doc-shortlist output constraint
-- use this as the external-dataset config
-- still report `doc_shortlist_best` only as a doc-retrieval config
+- Graph-PPR is useful as a document prior
+- use the two-stage Graph-PPR docs + ColPali page rerank direction
 
 ### Case C: Page-preserving page-RRF beats Graph-PPR
 
@@ -339,7 +325,7 @@ Conclusion:
 
 - dense+SPLADE page fusion helps
 - graph propagation hurts exact page ranking
-- use page-RRF or lighter PPR weights for page-labeled tasks
+- use page-RRF or make graph weights even lighter for that dataset
 
 ### Case D: Two-stage wins
 
@@ -355,64 +341,65 @@ Conclusion:
 
 ### SciEGQA
 
-Most promising transfer target.
+`denseheavy_lightboth` is a strong setting here:
 
-Reason:
+- page@4 improves over `plain_top224`
+- page@20 improves over `plain_top224`
+- doc@4 and doc@20 improve over `plain_top224`
+- page@1 remains better for `plain_top224`
 
-- Graph-PPR already improved doc metrics
-- page metrics failed because of wrong page selection
+Interpretation:
 
-Best next bet:
-
-- two-stage Graph-PPR docs + ColPali page rerank
-- page-preserving Graph-PPR with light graph weights
+- page-preserving output fixed the major failure
+- dense-heavy light graph prior is better than the old doc-shortlist config
 
 ### ViDoSeek
 
-Document recall is almost saturated.
+High-saturation case.
 
-Reason:
+`denseheavy_lightboth`:
 
-- `doc@20 = 1.0000` for both methods
-- page ranking is the real bottleneck
+- improves page@20 over `plain_top224`
+- reaches perfect doc@4/doc@20
+- is still slightly behind `plain_top224` at page@1/page@4
 
-Best next bet:
+Interpretation:
 
-- stay close to `plain_top224`
-- only use very weak doc prior
-- do not use one-page-per-doc Graph-PPR
+- use `denseheavy_lightboth` if page@20 is the main target
+- use `plain_top224` if page@1/page@4 is the main target
 
 ### ViDoRe V3
 
-Page localization is hard and important.
+`denseheavy_lightboth`:
 
-Reason:
+- improves page@4 and page@20 over `plain_top224`
+- improves doc@4 over `plain_top224`
+- loses slightly at page@1 and doc@20
 
-- Graph-PPR page@20 is much worse than `plain_top224`
-- doc@20 is also lower than `plain_top224`
+Interpretation:
 
-Best next bet:
-
-- page-preserving page-RRF control
-- dense-heavy page-local dominant Graph-PPR
-- two-stage doc prior only if Graph-PPR doc candidates improve candidate recall
+- the page-preserving dense-heavy light-prior fix works
+- rank-1 exact page precision still favors `plain_top224`
 
 ### MMDocIR
 
-Graph-PPR is slightly worse on both doc and page metrics.
+`denseheavy_lightboth`:
 
-Best next bet:
+- improves page@4/page@20 over `plain_top224`
+- improves doc@4/doc@20 over `plain_top224`
+- loses slightly at page@1
 
-- do not assume graph helps
-- first check page-preserving page-RRF
-- then try dense-heavy light-prior Graph-PPR
+Interpretation:
+
+- do not use the old `doc_shortlist_best`
+- use `denseheavy_lightboth` as the Graph-PPR page-labeled default
 
 ## Reporting Recommendation
 
 Use this wording:
 
 ```text
-The M3DocVQA-tuned Graph-PPR config is a document-shortlist reranker. It improves document retrieval on M3DocVQA and SciEGQA, but its one-page-per-document output is not appropriate as a final page retriever for page-labeled benchmarks. For external page-retrieval datasets, the next configuration should preserve multiple pages per document and use graph scores as a weak document prior, or use Graph-PPR only for document selection followed by ColPali page-local reranking.
+The M3DocVQA-tuned Graph-PPR config is a document-shortlist reranker and should not be used unchanged for page-labeled benchmarks. For external page-retrieval datasets, the best current Graph-PPR setting is the page-preserving dense-heavy light-prior config (`denseheavy_lightboth`): it keeps all pages, weights ColPali dense evidence above SPLADE, and uses page/doc PPR only as a light prior. This recovers the page metrics that the one-page-per-doc config destroyed, especially at page@4 and page@20, while page@1 can still favor plain ColPali on some datasets.
 ```
 
 Do not claim:
@@ -424,7 +411,8 @@ Do not claim:
 Claim instead:
 
 - `doc_shortlist_best` does not transfer as a final page retriever
-- the transfer path should be page-preserving and page-local-score dominated
+- `denseheavy_lightboth` is the current best frozen Graph-PPR config for page-labeled datasets
+- the remaining transfer path should keep page output page-preserving and page-local-score dominated
 
 ## Bottom Line For The Datasets Chat
 
@@ -432,21 +420,27 @@ The next chat should not rerun the same `doc_shortlist_best` config as the final
 
 Priority configs:
 
-1. page-preserving Graph-PPR:
-   - `per_doc_page_limit=0`
-   - `final_top_pages=1000`
-2. light-prior Graph-PPR:
-   - `page_seed=1.0`
-   - `page_ppr=0.25`
-   - `doc_ppr=0.25`
-3. dense-heavy light-prior Graph-PPR:
+1. `denseheavy_lightboth`:
+   - `GRAPH_PROFILE=page_rank_probe`
+   - `FINAL_TOP_PAGES=1000`
+   - `PER_DOC_PAGE_LIMIT=0`
    - `dense_weight=1.25`
    - `sparse_weight=0.75`
-4. two-stage:
+   - `final_page_seed_weight=1.0`
+   - `final_ppr_page_weight=0.25`
+   - `final_ppr_doc_weight=0.25`
+2. `plain_top224`:
+   - required baseline
+   - still competitive or better at page@1
+3. page-preserving page-RRF:
+   - no graph / no PPR control
+4. M3DocVQA-best page-preserving control:
+   - confirms why light graph weights are needed
+5. two-stage:
    - Graph-PPR top docs
    - ColPali / `plain_top224` page rerank inside those docs
 
-The main target is to keep Graph-PPR's document discovery gains without discarding or demoting the exact gold page.
+The main target is now to keep `denseheavy_lightboth` as the frozen general page-labeled config, then test whether the two-stage design can improve rank-1 page precision.
 
 ## SciEGQA Targeted Sweep Runner
 
