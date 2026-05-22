@@ -518,20 +518,20 @@ PAGE_DOC_EDGE_WEIGHT=1.0
 SAME_DOC_WINDOW=1
 ADJACENT_PAGE_EDGE_WEIGHT=0.25
 FINAL_PAGE_SEED_WEIGHT=1.0
-FINAL_PPR_PAGE_WEIGHT=0.25
+FINAL_PPR_PAGE_WEIGHT=0.5
 FINAL_PPR_DOC_WEIGHT=0.25
 ```
 
-Short label: `denseheavy_lightboth`.
+Short label: `denseheavy125_medium_both`.
 
-| Dataset | qids | page@1 | page@4 | page@20 | doc@4 | doc@20 | note |
-|---|---:|---:|---:|---:|---:|---:|---|
-| SciEGQA-Bench | 1623 | 0.4951 *(plain 0.5228)* | 0.7686 *(plain 0.7394)* | 0.9104 *(plain 0.8758)* | 0.9261 *(plain 0.9070)* | 0.9852 *(plain 0.9772)* | better at page@4/@20; loses page@1 |
-| MMDocIR | 1658 | 0.4074 *(plain 0.4136)* | 0.6342 *(plain 0.6075)* | 0.7662 *(plain 0.7480)* | 0.8148 *(plain 0.8058)* | 0.8920 *(plain 0.8890)* | better at page@4/@20; loses page@1 |
-| ViDoRe V3 | 14514 | 0.1689 *(plain 0.1730)* | 0.3475 *(plain 0.3312)* | 0.5706 *(plain 0.5431)* | 0.8959 *(plain 0.8854)* | 0.9751 *(plain 0.9809)* | better at page@4/@20; loses page@1/doc@20 |
-| ViDoSeek | 1142 | 0.6567 *(plain 0.6830)* | 0.8923 *(plain 0.8958)* | 0.9974 *(plain 0.9842)* | 1.0000 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; plain slightly better at page@1/@4 |
+| Dataset | qids | best sweep row by page@4 | page@1 | page@4 | page@20 | doc@4 | doc@20 | note |
+|---|---:|---|---:|---:|---:|---:|---:|---|
+| SciEGQA-Bench | 1623 | `denseheavy125_medium_both` | 0.5508 *(plain 0.5228)* | 0.8152 *(plain 0.7394)* | 0.9248 *(plain 0.8758)* | 0.9291 *(plain 0.9070)* | 0.9871 *(plain 0.9772)* | broad page/doc win |
+| MMDocIR | 1658 | `denseheavy125_medium_both` | 0.4596 *(plain 0.4136)* | 0.6719 *(plain 0.6075)* | 0.7889 *(plain 0.7480)* | 0.8160 *(plain 0.8058)* | 0.8938 *(plain 0.8890)* | clear page@1/@4/@20 win |
+| ViDoRe V3 | 14514 | `denseheavy125_medium_both` | 0.3902 *(plain 0.1730)* | 0.6465 *(plain 0.3312)* | 0.8227 *(plain 0.5431)* | 0.9099 *(plain 0.8854)* | 0.9788 *(plain 0.9809)* | large page gain; tiny doc@20 loss |
+| ViDoSeek | 1142 | `denseheavy150_m3best_pagepreserve` | 0.6909 *(plain 0.6830)* | 0.9037 *(plain 0.8958)* | 0.9982 *(plain 0.9842)* | 0.9991 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; heavier row best for this dataset |
 
-Use this as the current frozen page-labeled config unless the full sweep collector identifies a better single setting. The defensible claim is improvement at practical context depths, especially page@4/page@20 on SciEGQA, MMDocIR, and ViDoRe V3. Do not claim universal page@1 improvement or universal superiority over `plain_top224`.
+Use `denseheavy125_medium_both` as the current frozen single page-labeled config. ViDoSeek's best individual row is `denseheavy150_m3best_pagepreserve`, but the `1.25/0.75 + medium_both` setting is the best common setting across SciEGQA, MMDocIR, and ViDoRe V3 and remains close on ViDoSeek. Do not claim universal superiority at every metric; report page@1 separately and keep `plain_top224` as the required baseline.
 
 ## Dataset Summary
 
