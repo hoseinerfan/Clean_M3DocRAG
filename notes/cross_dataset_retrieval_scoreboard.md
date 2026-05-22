@@ -47,6 +47,26 @@ Reading:
 - page@4, page@20, doc@4, and doc@20 all improve over `plain_top224`
 - this is the clearest external-dataset confirmation that the page-preserving fix works
 
+Neighbor-page expansion check:
+
+| Method | qids | page@1 | page@4 | page@20 | doc@4 | doc@20 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| `Graph Page Preserve` (`denseheavy125_medium_both`) | `1,623` | `0.4951` | `0.7733` | `0.9116` | `0.9291` | `0.9871` |
+| `Graph Page Preserve + Neighbor1` (`denseheavy125_medium_both_neighbor1`) | `1,623` | `0.4969` | `0.7748` | `0.9187` | `0.9273` | `0.9864` |
+
+Reading:
+
+- `neighbor1` gives a very small page gain:
+  - `page@1`: `+0.0018`
+  - `page@4`: `+0.0015`
+  - `page@20`: `+0.0071`
+- but it slightly hurts document retrieval:
+  - `doc@4`: `-0.0018`
+  - `doc@20`: `-0.0006`
+- current conclusion:
+  - neighbor-page expansion is promising as a page-localization idea
+  - but the naive `page±1` expansion is too small a win to replace `denseheavy125_medium_both`
+
 ## Table C: MMDocIR
 
 | Method | qids | page@1 | page@4 | page@20 | doc@4 | doc@20 |
