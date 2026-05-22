@@ -51,18 +51,51 @@ Interpretation:
   - `MaxSim+` is slightly better at `recall@4`.
   - `Graph Page Preserve` is clearly better at `recall@20`.
 
-## Table C: External Page-Labeled Retrieval Scoreboard
+## Table C: External Page-Labeled Method Tables
 
-Use this table for datasets with exact page labels. These numbers are **average page/doc recall@k**, not answer EM/F1. Values in parentheses are the corresponding `plain_top224` baseline values.
+Use this section for datasets with exact page labels. These numbers are **average page/doc recall@k**, not answer EM/F1. Raw dense baseline rows are not recorded here unless explicitly listed; the complete rows we currently have are `MaxSim+` (`plain_top224`) and page-preserving Graph-PPR.
 
-| Dataset | qids | Best Graph-PPR row used here | page@1 | page@4 | page@20 | doc@4 | doc@20 | Status |
-| --- | ---: | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| MMDocIR | 1658 | `denseheavy125_medium_both` | `0.4596` (`0.4136`) | `0.6719` (`0.6075`) | `0.7889` (`0.7480`) | `0.8160` (`0.8058`) | `0.8938` (`0.8890`) | complete |
-| SciEGQA-Bench | 1623 | `denseheavy125_medium_both` | `0.5508` (`0.5228`) | `0.8152` (`0.7394`) | `0.9248` (`0.8758`) | `0.9291` (`0.9070`) | `0.9871` (`0.9772`) | complete |
-| ViDoRe V3 | 14514 | `denseheavy125_medium_both` | `0.3902` (`0.1730`) | `0.6465` (`0.3312`) | `0.8227` (`0.5431`) | `0.9099` (`0.8854`) | `0.9788` (`0.9809`) | complete; tiny doc@20 loss |
-| ViDoSeek | 1142 | `denseheavy150_m3best_pagepreserve` | `0.6909` (`0.6830`) | `0.9037` (`0.8958`) | `0.9982` (`0.9842`) | `0.9991` (`0.9982`) | `1.0000` (`1.0000`) | complete; saturated, dataset-specific best row |
-| OpenDocVQA | 41017 | pending OCR-backed SPLADE/Graph-PPR | pending (`0.3516`) | pending (`0.5122`) | pending (`0.6599`) | pending (`0.5307`) | pending (`0.6955`) | `plain_top224` done; OCR-backed SPLADE/Graph-PPR still pending |
-| MMLongBench DocQA | 14466 | pending | pending | pending | pending | pending | pending | prepare done; embedding job submitted as `10888555` |
+### MMDocIR
+
+| Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
+| --- | ---: | ---: | ---: | ---: |
+| MaxSim+ | `60.75%` | `74.80%` | `80.58%` | `88.90%` |
+| Graph Page Preserve (`denseheavy125_medium_both`) | `67.19%` | `78.89%` | `81.60%` | `89.38%` |
+
+### SciEGQA-Bench
+
+| Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
+| --- | ---: | ---: | ---: | ---: |
+| MaxSim+ | `73.94%` | `87.58%` | `90.70%` | `97.72%` |
+| Graph Page Preserve (`denseheavy125_medium_both`) | `81.52%` | `92.48%` | `92.91%` | `98.71%` |
+
+### ViDoRe V3
+
+| Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
+| --- | ---: | ---: | ---: | ---: |
+| MaxSim+ | `33.12%` | `54.31%` | `88.54%` | `98.09%` |
+| Graph Page Preserve (`denseheavy125_medium_both`) | `64.65%` | `82.27%` | `90.99%` | `97.88%` |
+
+### ViDoSeek
+
+| Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
+| --- | ---: | ---: | ---: | ---: |
+| MaxSim+ | `89.58%` | `98.42%` | `99.82%` | `100.00%` |
+| Graph Page Preserve (`denseheavy150_m3best_pagepreserve`) | `90.37%` | `99.82%` | `99.91%` | `100.00%` |
+
+### OpenDocVQA
+
+| Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
+| --- | ---: | ---: | ---: | ---: |
+| MaxSim+ | `51.22%` | `65.99%` | `53.07%` | `69.55%` |
+| Graph Page Preserve | pending OCR-backed SPLADE | pending OCR-backed SPLADE | pending OCR-backed SPLADE | pending OCR-backed SPLADE |
+
+### MMLongBench DocQA
+
+| Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
+| --- | ---: | ---: | ---: | ---: |
+| MaxSim+ | pending | pending | pending | pending |
+| Graph Page Preserve | pending | pending | pending | pending |
 
 Interpretation:
 
