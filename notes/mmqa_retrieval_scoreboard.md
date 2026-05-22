@@ -190,6 +190,17 @@ So the current controlled baseline is better, and should not be confused with th
 - graph external-QA eval JSON:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth_qwen2vl_top4.eval.json`
 
+### Graph Page Preserve (`denseheavy125_medium_both`)
+
+- graph retrieval prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy125_medium_both.prediction.json`
+- graph retrieval summary JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy125_medium_both.summary.json`
+- graph external-QA prediction JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy125_medium_both_qwen2vl_top4.prediction.json`
+- graph external-QA eval JSON:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev/mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy125_medium_both_qwen2vl_top4.eval.json`
+
 ## Configs Used For These Tables
 
 ### Baseline
@@ -251,6 +262,57 @@ Important:
 - current wrappers default to `GRAPH_PROFILE = denseheavy125_medium_both`
 - the tables above are for the earlier **`denseheavy_lightboth`** run
 - keep that distinction explicit when adding future rows
+
+### Graph Page Preserve (`denseheavy125_medium_both`)
+
+- dense input:
+  - `plain_top224`
+- sparse input:
+  - SPLADE retrieval top1000
+- graph profile:
+  - `GRAPH_PROFILE = denseheavy125_medium_both`
+  - `dense_weight = 1.25`
+  - `sparse_weight = 0.75`
+  - `rrf_k = 10`
+  - `doc_seed_weight = 0.0`
+  - `restart_prob = 0.15`
+  - `ppr_iters = 30`
+  - `page_doc_edge_weight = 1.0`
+  - `same_doc_window = 1`
+  - `adjacent_page_edge_weight = 0.25`
+  - `final_top_pages = 1000`
+  - `per_doc_page_limit = 0`
+  - `final_page_seed_weight = 1.0`
+  - `final_ppr_page_weight = 0.5`
+  - `final_ppr_doc_weight = 0.25`
+- QA:
+  - external adapter
+  - `qa_top_pages = 4`
+  - `model_name_or_path = Qwen2-VL-7B-Instruct`
+  - `bits = 16`
+
+## End-to-End QA Leaderboard (Top-4 Pages)
+
+These numbers come from the final QA eval JSONs built with `qa_top_pages = 4`. The printed `recall@4` here is the baseline evaluator's average recall over the truncated top-4 page rows, so do not use these files for `recall@20`.
+
+| Method | EM | F1 | recall@4 |
+| --- | ---: | ---: | ---: |
+| historical `rag_dev_ret4` baseline | `32.40` | `37.44` | `71.20%` |
+| current controlled `baseline` top4 | `34.74` | `40.15` | `71.56%` |
+| `MaxSim+` (`plain_top224`) | `35.64` | `41.28` | `74.89%` |
+| `Graph Page Preserve` (`denseheavy_lightboth`) | `37.61` | `43.50` | `76.18%` |
+| `Graph Page Preserve` (`denseheavy125_medium_both`) | `37.65` | `43.57` | `75.80%` |
+
+Current reading:
+
+- best end-to-end QA (`EM` / `F1`) so far:
+  - `denseheavy125_medium_both`
+- best top-4 recall among the evaluated QA-truncated outputs so far:
+  - `denseheavy_lightboth`
+- the `denseheavy125_medium_both` gain over `denseheavy_lightboth` is small but positive on answer quality:
+  - `EM`: `37.6075 -> 37.6485`
+  - `F1`: `43.4998 -> 43.5690`
+  - `recall@4`: `76.18% -> 75.80%`
 
 ## Reproduction Commands
 
