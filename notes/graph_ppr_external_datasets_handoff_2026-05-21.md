@@ -504,3 +504,27 @@ OUT_DIR="$LOCAL_OUTPUT_DIR/vidoseek/graph_ppr_plain_top224_splade" \
 LABEL_PREFIX="vidoseek_pagepreserve_sweep" \
 bash scripts/run_external_page_preserving_graph_ppr_sweep.sh
 ```
+
+## Collect All Sweep Outputs Together
+
+After the SciEGQA, MMDocIR, ViDoRe V3, and ViDoSeek sweeps finish, run:
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+git pull --rebase
+
+"$REPO_ROOT/env/bin/python" scripts/collect_page_preserving_sweep_results.py \
+  --dataset SciEGQA /mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/graph_ppr_plain_top224_splade/sciegqa_pagepreserve_sweep_recall_table.csv \
+  --plain-eval SciEGQA /mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/graph_ppr_plain_top224_splade/sciegqa_pagepreserve_sweep_plain_top224.eval.txt \
+  --dataset MMDocIR /mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/graph_ppr_plain_top224_splade/mmdocir_pagepreserve_sweep_recall_table.csv \
+  --plain-eval MMDocIR /mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/graph_ppr_plain_top224_splade/mmdocir_pagepreserve_sweep_plain_top224.eval.txt \
+  --dataset ViDoRe-V3 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/graph_ppr_plain_top224_splade/vidore-v3_pagepreserve_sweep_recall_table.csv \
+  --plain-eval ViDoRe-V3 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/graph_ppr_plain_top224_splade/vidore-v3_pagepreserve_sweep_plain_top224.eval.txt \
+  --dataset ViDoSeek /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/graph_ppr_plain_top224_splade/vidoseek_pagepreserve_sweep_recall_table.csv \
+  --plain-eval ViDoSeek /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/graph_ppr_plain_top224_splade/vidoseek_pagepreserve_sweep_plain_top224.eval.txt \
+  --top-n 5 \
+  --sort-metric page@4 \
+  | tee /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/pagepreserve_sweep_top5_by_page4.md
+```
+
+For only the winning config per dataset, change `--top-n 5` to `--top-n 1`.
