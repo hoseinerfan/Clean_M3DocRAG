@@ -23,8 +23,15 @@ SAVE_EVERY="${SAVE_EVERY:-25}"
 DOC_IMAGE_CACHE_SIZE="${DOC_IMAGE_CACHE_SIZE:-16}"
 RUN_EVAL="${RUN_EVAL:-1}"
 RESUME="${RESUME:-1}"
+DEFAULT_M3DOCVQA_LOCAL_DATA_DIR="$REPO_ROOT/data"
+DEFAULT_M3DOCVQA_LOCAL_MODEL_DIR="$REPO_ROOT/model"
+M3DOCVQA_LOCAL_DATA_DIR="${M3DOCVQA_LOCAL_DATA_DIR:-$DEFAULT_M3DOCVQA_LOCAL_DATA_DIR}"
+M3DOCVQA_LOCAL_MODEL_DIR="${M3DOCVQA_LOCAL_MODEL_DIR:-$DEFAULT_M3DOCVQA_LOCAL_MODEL_DIR}"
 
 mkdir -p "$QA_OUT_DIR"
+
+export LOCAL_DATA_DIR="$M3DOCVQA_LOCAL_DATA_DIR"
+export LOCAL_MODEL_DIR="$M3DOCVQA_LOCAL_MODEL_DIR"
 
 echo "using_graph_pred=$GRAPH_PRED"
 echo "using_gold=$GOLD"
@@ -34,6 +41,8 @@ echo "using_qa_out_dir=$QA_OUT_DIR"
 echo "using_output_pred=$OUTPUT_PRED"
 echo "using_output_eval=$OUTPUT_EVAL"
 echo "using_question_type_filter=${QUESTION_TYPE_FILTER:-ALL}"
+echo "using_local_data_dir=$LOCAL_DATA_DIR"
+echo "using_local_model_dir=$LOCAL_MODEL_DIR"
 
 ARGS=(
   --prediction-json "$GRAPH_PRED"
