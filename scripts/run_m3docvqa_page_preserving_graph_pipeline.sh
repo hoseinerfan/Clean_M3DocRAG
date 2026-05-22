@@ -16,7 +16,7 @@ GOLD="${GOLD:-$REPO_ROOT/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl}"
 
 DENSE_PRED="${DENSE_PRED:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json}"
 SPARSE_PRED="${SPARSE_PRED:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json}"
-QUESTION_TYPE="${QUESTION_TYPE:-}"
+QUESTION_TYPE_FILTER="${QUESTION_TYPE_FILTER:-}"
 
 GRAPH_LABEL="${GRAPH_LABEL:-mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth}"
 PRED_OUT="${PRED_OUT:-$OUT_DIR/${GRAPH_LABEL}.prediction.json}"
@@ -28,6 +28,58 @@ VS_SPLADE_OUT="${VS_SPLADE_OUT:-$OUT_DIR/${GRAPH_LABEL}.vs_splade.json}"
 RECALL_K_VALUES="${RECALL_K_VALUES:-1 2 4 5 10 20 50 100 500 1000}"
 
 mkdir -p "$OUT_DIR"
+
+"$PYTHON_BIN" - "$DENSE_PRED" "$SPARSE_PRED" "$GOLD" "$QUESTION_TYPE_FILTER" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+dense_path = Path(sys.argv[1])
+sparse_path = Path(sys.argv[2])
+gold_path = Path(sys.argv[3])
+question_type = str(sys.argv[4]).strip()
+
+dense = json.loads(dense_path.read_text(encoding="utf-8"))
+sparse = json.loads(sparse_path.read_text(encoding="utf-8"))
+if not isinstance(dense, dict):
+    raise TypeError(f"dense prediction JSON is not keyed by qid: {dense_path}")
+if not isinstance(sparse, dict):
+    raise TypeError(f"sparse prediction JSON is not keyed by qid: {sparse_path}")
+
+gold_qids = set()
+with gold_path.open("r", encoding="utf-8") as handle:
+    for line in handle:
+        if not line.strip():
+            continue
+        row = json.loads(line)
+        if question_type:
+            row_type = str(row.get("metadata", {}).get("type", "")).strip()
+            if row_type != question_type:
+                continue
+        qid = str(row.get("qid", "")).strip()
+        if qid:
+            gold_qids.add(qid)
+
+dense_qids = set(map(str, dense.keys()))
+sparse_qids = set(map(str, sparse.keys()))
+common_qids = dense_qids & sparse_qids
+joint_gold_qids = common_qids & gold_qids
+
+print(f"preflight_dense_qids={len(dense_qids)}")
+print(f"preflight_sparse_qids={len(sparse_qids)}")
+print(f"preflight_common_qids={len(common_qids)}")
+print(f"preflight_gold_qids={len(gold_qids)}")
+print(f"preflight_joint_gold_qids={len(joint_gold_qids)}")
+print(f"preflight_question_type_filter={question_type or 'ALL'}")
+
+if not common_qids:
+    raise SystemExit("Dense and sparse predictions have no qids in common.")
+if not joint_gold_qids:
+    raise SystemExit(
+        "No qids remain after intersecting dense, sparse, and gold qids. "
+        "Check the gold path and question-type filter."
+    )
+PY
 
 # Best current page-preserving transfer config from the handoff:
 # denseheavy_lightboth
@@ -54,8 +106,8 @@ GRAPH_ARGS=(
   --output-prediction-json "$PRED_OUT"
   --output-summary-json "$SUMMARY_OUT"
 )
-if [[ -n "$QUESTION_TYPE" ]]; then
-  GRAPH_ARGS+=(--question-type "$QUESTION_TYPE")
+if [[ -n "$QUESTION_TYPE_FILTER" ]]; then
+  GRAPH_ARGS+=(--question-type "$QUESTION_TYPE_FILTER")
 fi
 "$PYTHON_BIN" "$REPO_ROOT/scripts/graph_rerank_page_retrieval_predictions.py" "${GRAPH_ARGS[@]}"
 
