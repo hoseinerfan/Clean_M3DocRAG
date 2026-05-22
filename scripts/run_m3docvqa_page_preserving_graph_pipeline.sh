@@ -11,7 +11,8 @@ GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$DEFAULT_GRAPH_OUT_DIR}"
 DENSE_PRED="${DENSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_${SPLIT}/mmqa_${SPLIT}_plain_top224_nprobe${FAISS_NPROBE}_effdiag_all.prediction.json}"
 SPARSE_PRED="${SPARSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_${SPLIT}/mmqa_${SPLIT}_splade.prediction.json}"
 
-GRAPH_LABEL="${GRAPH_LABEL:-mmqa_${SPLIT}_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth}"
+GRAPH_PROFILE="${GRAPH_PROFILE:-denseheavy125_medium_both}"
+GRAPH_LABEL="${GRAPH_LABEL:-mmqa_${SPLIT}_plain_top224_splade_graph_pagepreserve_${GRAPH_PROFILE}}"
 PRED_OUT="${PRED_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.prediction.json}"
 SUMMARY_OUT="${SUMMARY_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.summary.json}"
 ANALYSIS_OUT="${ANALYSIS_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.retrieval_analysis.json}"
@@ -26,6 +27,7 @@ echo "using_dense_pred=$DENSE_PRED"
 echo "using_sparse_pred=$SPARSE_PRED"
 echo "using_gold=$GOLD"
 echo "using_graph_out_dir=$GRAPH_OUT_DIR"
+echo "using_graph_profile=$GRAPH_PROFILE"
 if [[ -n "${OUT_DIR:-}" && "$GRAPH_OUT_DIR" == "$DEFAULT_GRAPH_OUT_DIR" ]]; then
   echo "ignoring_generic_out_dir=$OUT_DIR"
 fi
@@ -115,28 +117,82 @@ if not joint_gold_qids:
     )
 PY
 
-# Best current page-preserving transfer config from the handoff:
-# denseheavy_lightboth
+case "$GRAPH_PROFILE" in
+  denseheavy125_medium_both)
+    PROFILE_FINAL_TOP_PAGES=1000
+    PROFILE_PER_DOC_PAGE_LIMIT=0
+    PROFILE_DENSE_WEIGHT=1.25
+    PROFILE_SPARSE_WEIGHT=0.75
+    PROFILE_FINAL_PPR_PAGE_WEIGHT=0.5
+    PROFILE_FINAL_PPR_DOC_WEIGHT=0.25
+    ;;
+  denseheavy_lightboth)
+    PROFILE_FINAL_TOP_PAGES=1000
+    PROFILE_PER_DOC_PAGE_LIMIT=0
+    PROFILE_DENSE_WEIGHT=1.25
+    PROFILE_SPARSE_WEIGHT=0.75
+    PROFILE_FINAL_PPR_PAGE_WEIGHT=0.25
+    PROFILE_FINAL_PPR_DOC_WEIGHT=0.25
+    ;;
+  denseheavy150_m3best_pagepreserve)
+    PROFILE_FINAL_TOP_PAGES=1000
+    PROFILE_PER_DOC_PAGE_LIMIT=0
+    PROFILE_DENSE_WEIGHT=1.5
+    PROFILE_SPARSE_WEIGHT=0.5
+    PROFILE_FINAL_PPR_PAGE_WEIGHT=1.5
+    PROFILE_FINAL_PPR_DOC_WEIGHT=0.75
+    ;;
+  doc_shortlist_best|graph1000)
+    PROFILE_FINAL_TOP_PAGES=20
+    PROFILE_PER_DOC_PAGE_LIMIT=1
+    PROFILE_DENSE_WEIGHT=1.0
+    PROFILE_SPARSE_WEIGHT=1.0
+    PROFILE_FINAL_PPR_PAGE_WEIGHT=1.5
+    PROFILE_FINAL_PPR_DOC_WEIGHT=0.75
+    ;;
+  *)
+    echo "Unsupported GRAPH_PROFILE=$GRAPH_PROFILE" >&2
+    exit 1
+    ;;
+esac
+
+DENSE_TOP_PAGES="${DENSE_TOP_PAGES:-1000}"
+SPARSE_TOP_PAGES="${SPARSE_TOP_PAGES:-1000}"
+FINAL_TOP_PAGES="${FINAL_TOP_PAGES:-$PROFILE_FINAL_TOP_PAGES}"
+PER_DOC_PAGE_LIMIT="${PER_DOC_PAGE_LIMIT:-$PROFILE_PER_DOC_PAGE_LIMIT}"
+RRF_K="${RRF_K:-10}"
+DENSE_WEIGHT="${DENSE_WEIGHT:-$PROFILE_DENSE_WEIGHT}"
+SPARSE_WEIGHT="${SPARSE_WEIGHT:-$PROFILE_SPARSE_WEIGHT}"
+DOC_SEED_WEIGHT="${DOC_SEED_WEIGHT:-0.0}"
+RESTART_PROB="${RESTART_PROB:-0.15}"
+PPR_ITERS="${PPR_ITERS:-30}"
+PAGE_DOC_EDGE_WEIGHT="${PAGE_DOC_EDGE_WEIGHT:-1.0}"
+SAME_DOC_WINDOW="${SAME_DOC_WINDOW:-1}"
+ADJACENT_PAGE_EDGE_WEIGHT="${ADJACENT_PAGE_EDGE_WEIGHT:-0.25}"
+FINAL_PAGE_SEED_WEIGHT="${FINAL_PAGE_SEED_WEIGHT:-1.0}"
+FINAL_PPR_PAGE_WEIGHT="${FINAL_PPR_PAGE_WEIGHT:-$PROFILE_FINAL_PPR_PAGE_WEIGHT}"
+FINAL_PPR_DOC_WEIGHT="${FINAL_PPR_DOC_WEIGHT:-$PROFILE_FINAL_PPR_DOC_WEIGHT}"
+
 GRAPH_ARGS=(
   --dense-prediction-json "$DENSE_PRED"
   --sparse-prediction-json "$SPARSE_PRED"
   --gold "$GOLD"
-  --dense-top-pages 1000
-  --sparse-top-pages 1000
-  --final-top-pages 1000
-  --per-doc-page-limit 0
-  --rrf-k 10
-  --dense-weight 1.25
-  --sparse-weight 0.75
-  --doc-seed-weight 0.0
-  --restart-prob 0.15
-  --ppr-iters 30
-  --page-doc-edge-weight 1.0
-  --same-doc-window 1
-  --adjacent-page-edge-weight 0.25
-  --final-page-seed-weight 1.0
-  --final-ppr-page-weight 0.25
-  --final-ppr-doc-weight 0.25
+  --dense-top-pages "$DENSE_TOP_PAGES"
+  --sparse-top-pages "$SPARSE_TOP_PAGES"
+  --final-top-pages "$FINAL_TOP_PAGES"
+  --per-doc-page-limit "$PER_DOC_PAGE_LIMIT"
+  --rrf-k "$RRF_K"
+  --dense-weight "$DENSE_WEIGHT"
+  --sparse-weight "$SPARSE_WEIGHT"
+  --doc-seed-weight "$DOC_SEED_WEIGHT"
+  --restart-prob "$RESTART_PROB"
+  --ppr-iters "$PPR_ITERS"
+  --page-doc-edge-weight "$PAGE_DOC_EDGE_WEIGHT"
+  --same-doc-window "$SAME_DOC_WINDOW"
+  --adjacent-page-edge-weight "$ADJACENT_PAGE_EDGE_WEIGHT"
+  --final-page-seed-weight "$FINAL_PAGE_SEED_WEIGHT"
+  --final-ppr-page-weight "$FINAL_PPR_PAGE_WEIGHT"
+  --final-ppr-doc-weight "$FINAL_PPR_DOC_WEIGHT"
   --output-prediction-json "$PRED_OUT"
   --output-summary-json "$SUMMARY_OUT"
 )
