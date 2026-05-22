@@ -28,6 +28,13 @@ class PageRecord:
         return page_uid(self.doc_id, self.page_idx)
 
 
+@dataclass
+class SourceWeights:
+    dense_weight: float
+    sparse_weight: float
+    metadata: dict[str, object]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -73,6 +80,64 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--rrf-k", type=float, default=10.0)
     parser.add_argument("--dense-weight", type=float, default=1.0)
     parser.add_argument("--sparse-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--adaptive-source-weight-mode",
+        choices=["none", "agreement"],
+        default="none",
+        help=(
+            "Optional query-adaptive source weighting. 'agreement' increases dense weight "
+            "and decreases sparse weight when dense/SPLADE overlap is low."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-source-agreement-top-pages",
+        type=int,
+        default=20,
+        help="Top pages used to estimate dense/SPLADE page and doc overlap. Default: 20.",
+    )
+    parser.add_argument(
+        "--adaptive-source-top1-lookup-pages",
+        type=int,
+        default=1000,
+        help="Sparse top pages used to check whether dense top-1 is supported. Default: 1000.",
+    )
+    parser.add_argument(
+        "--adaptive-source-doc-overlap-weight",
+        type=float,
+        default=0.7,
+        help="Agreement score weight for dense/SPLADE doc-overlap. Default: 0.7.",
+    )
+    parser.add_argument(
+        "--adaptive-source-page-overlap-weight",
+        type=float,
+        default=0.2,
+        help="Agreement score weight for dense/SPLADE page-overlap. Default: 0.2.",
+    )
+    parser.add_argument(
+        "--adaptive-source-top1-weight",
+        type=float,
+        default=0.1,
+        help="Agreement score weight for dense-top1-in-sparse support. Default: 0.1.",
+    )
+    parser.add_argument(
+        "--adaptive-source-strength",
+        type=float,
+        default=0.5,
+        help=(
+            "How strongly disagreement shifts mass toward dense. With the defaults, "
+            "zero agreement gives dense x1.5 and sparse x0.5 before clamps."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-source-gamma",
+        type=float,
+        default=1.0,
+        help="Exponent applied to disagreement before weighting. Default: 1.0.",
+    )
+    parser.add_argument("--adaptive-source-min-dense-mult", type=float, default=1.0)
+    parser.add_argument("--adaptive-source-max-dense-mult", type=float, default=1.5)
+    parser.add_argument("--adaptive-source-min-sparse-mult", type=float, default=0.5)
+    parser.add_argument("--adaptive-source-max-sparse-mult", type=float, default=1.0)
     parser.add_argument(
         "--splade-index-pt",
         default="",
@@ -402,19 +467,132 @@ def minmax_by_uid(rows: list[tuple[str, int, float, int]]) -> dict[str, float]:
     }
 
 
+def clamp(value: float, low: float, high: float) -> float:
+    if high < low:
+        low, high = high, low
+    return min(max(float(value), float(low)), float(high))
+
+
+def jaccard(left: set[str], right: set[str]) -> float:
+    if not left and not right:
+        return 0.0
+    union = left | right
+    if not union:
+        return 0.0
+    return len(left & right) / len(union)
+
+
+def compute_source_weights(
+    *,
+    dense_pages: list[tuple[str, int, float, int]],
+    sparse_pages: list[tuple[str, int, float, int]],
+    args: argparse.Namespace,
+) -> SourceWeights:
+    base_dense_weight = float(args.dense_weight)
+    base_sparse_weight = float(args.sparse_weight)
+    mode = str(args.adaptive_source_weight_mode)
+    metadata: dict[str, object] = {
+        "adaptive_source_weight_mode": mode,
+        "base_dense_weight": base_dense_weight,
+        "base_sparse_weight": base_sparse_weight,
+        "effective_dense_weight": base_dense_weight,
+        "effective_sparse_weight": base_sparse_weight,
+    }
+    if mode == "none":
+        return SourceWeights(base_dense_weight, base_sparse_weight, metadata)
+
+    overlap_top_pages = max(0, int(args.adaptive_source_agreement_top_pages))
+    top1_lookup_pages = max(0, int(args.adaptive_source_top1_lookup_pages))
+    dense_overlap_pages = {
+        page_uid(doc_id, page_idx)
+        for doc_id, page_idx, _score, _rank in dense_pages[:overlap_top_pages]
+    }
+    sparse_overlap_pages = {
+        page_uid(doc_id, page_idx)
+        for doc_id, page_idx, _score, _rank in sparse_pages[:overlap_top_pages]
+    }
+    dense_overlap_docs = {doc_id for doc_id, _page_idx, _score, _rank in dense_pages[:overlap_top_pages]}
+    sparse_overlap_docs = {doc_id for doc_id, _page_idx, _score, _rank in sparse_pages[:overlap_top_pages]}
+    sparse_lookup_pages = {
+        page_uid(doc_id, page_idx)
+        for doc_id, page_idx, _score, _rank in sparse_pages[:top1_lookup_pages]
+    }
+    dense_top1_uid = (
+        page_uid(dense_pages[0][0], dense_pages[0][1])
+        if dense_pages
+        else ""
+    )
+    dense_top1_in_sparse_lookup = bool(dense_top1_uid and dense_top1_uid in sparse_lookup_pages)
+
+    page_overlap = jaccard(dense_overlap_pages, sparse_overlap_pages)
+    doc_overlap = jaccard(dense_overlap_docs, sparse_overlap_docs)
+    doc_overlap_weight = max(0.0, float(args.adaptive_source_doc_overlap_weight))
+    page_overlap_weight = max(0.0, float(args.adaptive_source_page_overlap_weight))
+    top1_weight = max(0.0, float(args.adaptive_source_top1_weight))
+    agreement_denominator = doc_overlap_weight + page_overlap_weight + top1_weight
+    if agreement_denominator <= 0:
+        agreement_score = 0.0
+    else:
+        agreement_score = (
+            doc_overlap_weight * doc_overlap
+            + page_overlap_weight * page_overlap
+            + top1_weight * float(dense_top1_in_sparse_lookup)
+        ) / agreement_denominator
+    agreement_score = clamp(agreement_score, 0.0, 1.0)
+    disagreement = clamp(1.0 - agreement_score, 0.0, 1.0)
+    gamma = max(0.0, float(args.adaptive_source_gamma))
+    if gamma != 1.0:
+        disagreement = disagreement**gamma
+    strength = max(0.0, float(args.adaptive_source_strength))
+    dense_mult = clamp(
+        1.0 + strength * disagreement,
+        float(args.adaptive_source_min_dense_mult),
+        float(args.adaptive_source_max_dense_mult),
+    )
+    sparse_mult = clamp(
+        1.0 - strength * disagreement,
+        float(args.adaptive_source_min_sparse_mult),
+        float(args.adaptive_source_max_sparse_mult),
+    )
+    effective_dense_weight = base_dense_weight * dense_mult
+    effective_sparse_weight = base_sparse_weight * sparse_mult
+    metadata.update(
+        {
+            "adaptive_source_agreement_top_pages": overlap_top_pages,
+            "adaptive_source_top1_lookup_pages": top1_lookup_pages,
+            "adaptive_source_page_overlap": page_overlap,
+            "adaptive_source_doc_overlap": doc_overlap,
+            "adaptive_source_dense_top1_in_sparse_lookup": dense_top1_in_sparse_lookup,
+            "adaptive_source_agreement_score": agreement_score,
+            "adaptive_source_disagreement_score": disagreement,
+            "adaptive_source_dense_multiplier": dense_mult,
+            "adaptive_source_sparse_multiplier": sparse_mult,
+            "effective_dense_weight": effective_dense_weight,
+            "effective_sparse_weight": effective_sparse_weight,
+        }
+    )
+    return SourceWeights(effective_dense_weight, effective_sparse_weight, metadata)
+
+
 def build_expansion_query_terms(
     *,
     sparse_index: SparsePageIndex,
     dense_pages: list[tuple[str, int, float, int]],
     sparse_pages: list[tuple[str, int, float, int]],
+    dense_weight: float,
+    sparse_weight: float,
     args: argparse.Namespace,
 ) -> dict[int, float]:
     term_scores: dict[int, float] = defaultdict(float)
     seed_weights: dict[str, float] = defaultdict(float)
     for doc_id, page_idx, _score, rank in dense_pages[: max(0, int(args.expand_from_top_dense_pages))]:
-        seed_weights[page_uid(doc_id, page_idx)] += float(args.dense_weight) / (float(args.rrf_k) + float(rank))
+        seed_weights[page_uid(doc_id, page_idx)] += float(dense_weight) / (
+            float(args.rrf_k) + float(rank)
+        )
     for doc_id, page_idx, _score, rank in sparse_pages[: max(0, int(args.expand_from_top_sparse_pages))]:
-        seed_weights[page_uid(doc_id, page_idx)] += float(args.sparse_weight) / (float(args.rrf_k) + float(rank))
+        seed_weights[page_uid(doc_id, page_idx)] += float(sparse_weight) / (
+            float(args.rrf_k) + float(rank)
+        )
 
     for seed_page_uid, seed_weight in seed_weights.items():
         for term_id, term_weight in sparse_index.top_terms_for_page(
@@ -439,6 +617,8 @@ def build_neighbor_expansion_pages(
     dense_pages: list[tuple[str, int, float, int]],
     sparse_pages: list[tuple[str, int, float, int]],
     sparse_index: SparsePageIndex,
+    dense_weight: float,
+    sparse_weight: float,
     args: argparse.Namespace,
 ) -> tuple[list[tuple[str, int, float]], dict[str, float]]:
     window = max(0, int(args.neighbor_expansion_window))
@@ -448,11 +628,11 @@ def build_neighbor_expansion_pages(
     seed_specs = [
         (
             dense_pages[: max(0, int(args.expand_neighbors_from_top_dense_pages))],
-            float(args.dense_weight),
+            float(dense_weight),
         ),
         (
             sparse_pages[: max(0, int(args.expand_neighbors_from_top_sparse_pages))],
-            float(args.sparse_weight),
+            float(sparse_weight),
         ),
     ]
     neighbor_seed: dict[str, float] = defaultdict(float)
@@ -647,6 +827,11 @@ def build_qid_graph_ranking(
         sparse_row.get("page_retrieval_results", []),
         int(args.sparse_top_pages),
     )
+    source_weights = compute_source_weights(
+        dense_pages=dense_pages,
+        sparse_pages=sparse_pages,
+        args=args,
+    )
     expansion_pages: list[tuple[str, int, float, int]] = []
     neighbor_pages: list[tuple[str, int, float]] = []
     neighbor_seed: dict[str, float] = {}
@@ -655,6 +840,8 @@ def build_qid_graph_ranking(
             sparse_index=sparse_index,
             dense_pages=dense_pages,
             sparse_pages=sparse_pages,
+            dense_weight=source_weights.dense_weight,
+            sparse_weight=source_weights.sparse_weight,
             args=args,
         )
         expansion_pages = sparse_index.retrieve_sparse_query(
@@ -667,6 +854,8 @@ def build_qid_graph_ranking(
             dense_pages=dense_pages,
             sparse_pages=sparse_pages,
             sparse_index=sparse_index,
+            dense_weight=source_weights.dense_weight,
+            sparse_weight=source_weights.sparse_weight,
             args=args,
         )
     dense_score_norm = minmax_by_uid(dense_pages)
@@ -680,8 +869,8 @@ def build_qid_graph_ranking(
     doc_seed: dict[str, float] = defaultdict(float)
 
     for source_name, source_weight, source_pages, source_score_norm in [
-        ("dense", float(args.dense_weight), dense_pages, dense_score_norm),
-        ("sparse", float(args.sparse_weight), sparse_pages, sparse_score_norm),
+        ("dense", source_weights.dense_weight, dense_pages, dense_score_norm),
+        ("sparse", source_weights.sparse_weight, sparse_pages, sparse_score_norm),
         ("expansion", float(args.expansion_weight), expansion_pages, expansion_score_norm),
     ]:
         for doc_id, page_idx, score, rank in source_pages:
@@ -713,11 +902,15 @@ def build_qid_graph_ranking(
 
     for doc_id, rank in dense_doc_ranks.items():
         doc_seed[f"doc::{doc_id}"] += (
-            float(args.doc_seed_weight) * float(args.dense_weight) / (float(args.rrf_k) + float(rank))
+            float(args.doc_seed_weight)
+            * source_weights.dense_weight
+            / (float(args.rrf_k) + float(rank))
         )
     for doc_id, rank in sparse_doc_ranks.items():
         doc_seed[f"doc::{doc_id}"] += (
-            float(args.doc_seed_weight) * float(args.sparse_weight) / (float(args.rrf_k) + float(rank))
+            float(args.doc_seed_weight)
+            * source_weights.sparse_weight
+            / (float(args.rrf_k) + float(rank))
         )
 
     graph: dict[str, dict[str, float]] = defaultdict(dict)
@@ -825,6 +1018,7 @@ def build_qid_graph_ranking(
         "graph_node_count": len(graph),
         "graph_edge_count_undirected": sum(len(neighbors) for neighbors in graph.values()) // 2,
         "top_graph_pages": trace_top,
+        **source_weights.metadata,
     }
     if gold_row is not None:
         doc_gold = gold_doc_ids(gold_row)
@@ -950,6 +1144,18 @@ def main() -> None:
                 "rrf_k": float(args.rrf_k),
                 "dense_weight": float(args.dense_weight),
                 "sparse_weight": float(args.sparse_weight),
+                "adaptive_source_weight_mode": args.adaptive_source_weight_mode,
+                "adaptive_source_agreement_top_pages": int(args.adaptive_source_agreement_top_pages),
+                "adaptive_source_top1_lookup_pages": int(args.adaptive_source_top1_lookup_pages),
+                "adaptive_source_doc_overlap_weight": float(args.adaptive_source_doc_overlap_weight),
+                "adaptive_source_page_overlap_weight": float(args.adaptive_source_page_overlap_weight),
+                "adaptive_source_top1_weight": float(args.adaptive_source_top1_weight),
+                "adaptive_source_strength": float(args.adaptive_source_strength),
+                "adaptive_source_gamma": float(args.adaptive_source_gamma),
+                "adaptive_source_min_dense_mult": float(args.adaptive_source_min_dense_mult),
+                "adaptive_source_max_dense_mult": float(args.adaptive_source_max_dense_mult),
+                "adaptive_source_min_sparse_mult": float(args.adaptive_source_min_sparse_mult),
+                "adaptive_source_max_sparse_mult": float(args.adaptive_source_max_sparse_mult),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -990,6 +1196,18 @@ def main() -> None:
         "rrf_k": float(args.rrf_k),
         "dense_weight": float(args.dense_weight),
         "sparse_weight": float(args.sparse_weight),
+        "adaptive_source_weight_mode": args.adaptive_source_weight_mode,
+        "adaptive_source_agreement_top_pages": int(args.adaptive_source_agreement_top_pages),
+        "adaptive_source_top1_lookup_pages": int(args.adaptive_source_top1_lookup_pages),
+        "adaptive_source_doc_overlap_weight": float(args.adaptive_source_doc_overlap_weight),
+        "adaptive_source_page_overlap_weight": float(args.adaptive_source_page_overlap_weight),
+        "adaptive_source_top1_weight": float(args.adaptive_source_top1_weight),
+        "adaptive_source_strength": float(args.adaptive_source_strength),
+        "adaptive_source_gamma": float(args.adaptive_source_gamma),
+        "adaptive_source_min_dense_mult": float(args.adaptive_source_min_dense_mult),
+        "adaptive_source_max_dense_mult": float(args.adaptive_source_max_dense_mult),
+        "adaptive_source_min_sparse_mult": float(args.adaptive_source_min_sparse_mult),
+        "adaptive_source_max_sparse_mult": float(args.adaptive_source_max_sparse_mult),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -1017,6 +1235,45 @@ def main() -> None:
             statistics.fmean(float(row["graph"]["candidate_doc_count"]) for row in per_qid)
             if per_qid
             else None
+        ),
+        "mean_effective_dense_weight": (
+            statistics.fmean(float(row["graph"]["effective_dense_weight"]) for row in per_qid)
+            if per_qid
+            else None
+        ),
+        "mean_effective_sparse_weight": (
+            statistics.fmean(float(row["graph"]["effective_sparse_weight"]) for row in per_qid)
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_source_agreement_score": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_source_agreement_score", 1.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_source_doc_overlap": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_source_doc_overlap", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_source_page_overlap": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_source_page_overlap", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "adaptive_source_dense_top1_in_sparse_lookup_count": sum(
+            1
+            for row in per_qid
+            if row["graph"].get("adaptive_source_dense_top1_in_sparse_lookup") is True
         ),
         "per_qid": per_qid,
     }
