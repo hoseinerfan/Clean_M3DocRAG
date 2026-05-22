@@ -107,21 +107,45 @@ def ssl_context() -> ssl.SSLContext | None:
         return None
 
 
-def download_url(url: str, output_path: Path) -> Path:
+def download_url(url: str, output_path: Path, *, force: bool = False) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    if force and output_path.exists():
+        output_path.unlink()
     if output_path.exists() and output_path.stat().st_size > 0:
         return output_path
 
     tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
     request = urllib.request.Request(url, headers={"User-Agent": "Clean_M3DocRAG DUDE prepare"})
+    bytes_written = 0
     with urllib.request.urlopen(request, context=ssl_context()) as response, tmp_path.open("wb") as out:
+        expected_size = response.headers.get("Content-Length")
         while True:
             chunk = response.read(1024 * 1024)
             if not chunk:
                 break
             out.write(chunk)
+            bytes_written += len(chunk)
+    if expected_size and bytes_written != int(expected_size):
+        tmp_path.unlink(missing_ok=True)
+        raise EOFError(
+            f"Downloaded {bytes_written} bytes from {url}, expected {expected_size} bytes."
+        )
     tmp_path.replace(output_path)
     return output_path
+
+
+def tar_archive_is_complete(tar_path: Path) -> bool:
+    if not tar_path.exists() or tar_path.stat().st_size <= 0:
+        return False
+    try:
+        with tarfile.open(tar_path, "r:*") as tar:
+            for _member in tar:
+                pass
+        return True
+    except (tarfile.TarError, EOFError, OSError):
+        return False
 
 
 def safe_extract_tar(tar_path: Path, output_dir: Path) -> None:
@@ -163,7 +187,16 @@ def ensure_binaries_dir(args: argparse.Namespace, output_root: Path) -> Path:
     tar_path = download_dir / "DUDE_train-val-test_binaries.tar.gz"
     print(f"downloading_dude_binaries={args.binaries_url}")
     print(f"download_target={tar_path}")
-    download_url(args.binaries_url, tar_path)
+    force_download = False
+    if tar_path.exists() and not tar_archive_is_complete(tar_path):
+        print(f"existing_dude_binaries_corrupt={tar_path}")
+        force_download = True
+    download_url(args.binaries_url, tar_path, force=force_download)
+    if not tar_archive_is_complete(tar_path):
+        raise EOFError(
+            f"Downloaded DUDE binaries archive is incomplete or corrupt: {tar_path}. "
+            "Delete it and rerun, or pass --data-dir pointing to an already extracted copy."
+        )
     print(f"extracting_dude_binaries={tar_path}")
     safe_extract_tar(tar_path, raw_dir)
     return resolve_extracted_binaries_dir(raw_dir)
