@@ -38,6 +38,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hit-k", type=int, default=4, help="K used for hit/miss struggle rates.")
     parser.add_argument("--recall-k", dest="recall_ks", type=int, nargs="+", default=DEFAULT_RECALL_KS)
+    parser.add_argument(
+        "--table-metric",
+        choices=["recall", "hit"],
+        default="recall",
+        help="Which metric family to emphasize in the printed markdown table. Default: recall.",
+    )
     parser.add_argument("--min-count", type=int, default=5, help="Hide groups with fewer qids.")
     parser.add_argument("--top-groups", type=int, default=40)
     parser.add_argument(
@@ -281,6 +287,18 @@ def summarize_group(
             compact_page_hits = [row["runs"][compact_label]["page_hit_at_k"] for row in paired]
             exact_doc_hits = [row["runs"][exact_label]["doc_hit_at_k"] for row in paired]
             compact_doc_hits = [row["runs"][compact_label]["doc_hit_at_k"] for row in paired]
+            for k in recall_ks:
+                key = str(k)
+                exact_page_recalls = [float(row["runs"][exact_label]["page_recall_at_k"][key]) for row in paired]
+                compact_page_recalls = [float(row["runs"][compact_label]["page_recall_at_k"][key]) for row in paired]
+                exact_doc_recalls = [float(row["runs"][exact_label]["doc_recall_at_k"][key]) for row in paired]
+                compact_doc_recalls = [float(row["runs"][compact_label]["doc_recall_at_k"][key]) for row in paired]
+                summary[f"{compact_label}_minus_{exact_label}_page_recall_at_{k}"] = (
+                    mean(compact_page_recalls) - mean(exact_page_recalls)
+                )
+                summary[f"{compact_label}_minus_{exact_label}_doc_recall_at_{k}"] = (
+                    mean(compact_doc_recalls) - mean(exact_doc_recalls)
+                )
             summary[f"{compact_label}_minus_{exact_label}_page_hit_at_{hit_k}"] = (
                 mean([float(value) for value in compact_page_hits])
                 - mean([float(value) for value in exact_page_hits])
@@ -329,20 +347,37 @@ def summarize_group(
     return summary
 
 
-def make_markdown_table(summaries: list[dict], labels: list[str], hit_k: int) -> str:
+def make_markdown_table(
+    summaries: list[dict],
+    labels: list[str],
+    hit_k: int,
+    table_metric: str,
+) -> str:
     headers = ["group_by", "group", "n"]
-    for label in labels:
-        headers.extend([f"{label} page@{hit_k}", f"{label} doc@{hit_k}"])
-    if len(labels) == 2:
-        exact_label, compact_label = labels
-        headers.extend(
-            [
-                f"{compact_label}-{exact_label} page@{hit_k}",
-                f"both page miss@{hit_k}",
-                f"{compact_label} loses page@{hit_k}",
-                f"{compact_label} recovers page@{hit_k}",
-            ]
-        )
+    if table_metric == "recall":
+        for label in labels:
+            headers.extend([f"{label} page_recall@{hit_k}", f"{label} doc_recall@{hit_k}"])
+        if len(labels) == 2:
+            exact_label, compact_label = labels
+            headers.extend(
+                [
+                    f"{compact_label}-{exact_label} page_recall@{hit_k}",
+                    f"{compact_label}-{exact_label} doc_recall@{hit_k}",
+                ]
+            )
+    else:
+        for label in labels:
+            headers.extend([f"{label} page_hit@{hit_k}", f"{label} doc_hit@{hit_k}"])
+        if len(labels) == 2:
+            exact_label, compact_label = labels
+            headers.extend(
+                [
+                    f"{compact_label}-{exact_label} page_hit@{hit_k}",
+                    f"both page miss@{hit_k}",
+                    f"{compact_label} loses page@{hit_k}",
+                    f"{compact_label} recovers page@{hit_k}",
+                ]
+            )
 
     def fmt(value: Any) -> str:
         if isinstance(value, float):
@@ -352,23 +387,40 @@ def make_markdown_table(summaries: list[dict], labels: list[str], hit_k: int) ->
     lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
     for item in summaries:
         row = [item["group_by"], item["group"], item["n_qids"]]
-        for label in labels:
-            row.extend(
-                [
-                    item.get(f"{label}_page_hit_at_{hit_k}", 0.0),
-                    item.get(f"{label}_doc_hit_at_{hit_k}", 0.0),
-                ]
-            )
-        if len(labels) == 2:
-            exact_label, compact_label = labels
-            row.extend(
-                [
-                    item.get(f"{compact_label}_minus_{exact_label}_page_hit_at_{hit_k}", 0.0),
-                    item.get(f"both_page_miss_at_{hit_k}", 0.0),
-                    item.get(f"{compact_label}_loses_page_at_{hit_k}", 0.0),
-                    item.get(f"{compact_label}_recovers_page_at_{hit_k}", 0.0),
-                ]
-            )
+        if table_metric == "recall":
+            for label in labels:
+                row.extend(
+                    [
+                        item.get(f"{label}_page_recall_at_{hit_k}", 0.0),
+                        item.get(f"{label}_doc_recall_at_{hit_k}", 0.0),
+                    ]
+                )
+            if len(labels) == 2:
+                exact_label, compact_label = labels
+                row.extend(
+                    [
+                        item.get(f"{compact_label}_minus_{exact_label}_page_recall_at_{hit_k}", 0.0),
+                        item.get(f"{compact_label}_minus_{exact_label}_doc_recall_at_{hit_k}", 0.0),
+                    ]
+                )
+        else:
+            for label in labels:
+                row.extend(
+                    [
+                        item.get(f"{label}_page_hit_at_{hit_k}", 0.0),
+                        item.get(f"{label}_doc_hit_at_{hit_k}", 0.0),
+                    ]
+                )
+            if len(labels) == 2:
+                exact_label, compact_label = labels
+                row.extend(
+                    [
+                        item.get(f"{compact_label}_minus_{exact_label}_page_hit_at_{hit_k}", 0.0),
+                        item.get(f"both_page_miss_at_{hit_k}", 0.0),
+                        item.get(f"{compact_label}_loses_page_at_{hit_k}", 0.0),
+                        item.get(f"{compact_label}_recovers_page_at_{hit_k}", 0.0),
+                    ]
+                )
         lines.append("| " + " | ".join(fmt(value) for value in row) + " |")
     return "\n".join(lines) + "\n"
 
@@ -376,6 +428,10 @@ def make_markdown_table(summaries: list[dict], labels: list[str], hit_k: int) ->
 def choose_sort(args: argparse.Namespace, labels: list[str]) -> tuple[str, bool]:
     if args.sort_by != "auto":
         return args.sort_by, args.descending
+    if args.table_metric == "recall":
+        if len(labels) == 2:
+            return f"{args.compact_label}_minus_{args.exact_label}_doc_recall_at_{args.hit_k}", True
+        return f"{labels[0]}_doc_recall_at_{args.hit_k}", True
     if len(labels) == 2:
         return f"both_page_miss_at_{args.hit_k}", True
     return f"{labels[0]}_page_hit_at_{args.hit_k}", False
@@ -466,7 +522,7 @@ def main() -> None:
                 writer.writerow({key: item.get(key, "") for key in fieldnames})
         print(f"saved_csv={output_path}")
 
-    markdown = make_markdown_table(summaries, labels, args.hit_k)
+    markdown = make_markdown_table(summaries, labels, args.hit_k, args.table_metric)
     if args.output_md:
         output_path = Path(args.output_md)
         output_path.parent.mkdir(parents=True, exist_ok=True)
