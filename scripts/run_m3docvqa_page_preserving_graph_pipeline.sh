@@ -39,12 +39,40 @@ sparse_path = Path(sys.argv[2])
 gold_path = Path(sys.argv[3])
 question_type = str(sys.argv[4]).strip()
 
-dense = json.loads(dense_path.read_text(encoding="utf-8"))
-sparse = json.loads(sparse_path.read_text(encoding="utf-8"))
-if not isinstance(dense, dict):
-    raise TypeError(f"dense prediction JSON is not keyed by qid: {dense_path}")
-if not isinstance(sparse, dict):
-    raise TypeError(f"sparse prediction JSON is not keyed by qid: {sparse_path}")
+def load_prediction(path: Path) -> tuple[dict[str, dict], list[str], list[str]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and "predictions" in payload and isinstance(
+        payload["predictions"], (dict, list)
+    ):
+        payload = payload["predictions"]
+
+    rows_by_qid = {}
+    raw_keys = []
+    row_qids = []
+    if isinstance(payload, list):
+        iterable = enumerate(payload)
+    elif isinstance(payload, dict):
+        iterable = payload.items()
+    else:
+        raise TypeError(f"Prediction JSON must be a list or object of prediction rows: {path}")
+
+    for raw_key, row in iterable:
+        if not isinstance(row, dict):
+            raise TypeError(f"Prediction row must be an object: {path} key={raw_key!r}")
+        raw_keys.append(str(raw_key))
+        row_qid = str(row.get("qid", "")).strip()
+        if row_qid:
+            row_qids.append(row_qid)
+        qid = row_qid or str(raw_key).strip()
+        if not qid:
+            raise ValueError(f"Prediction row is missing qid and key is empty: {path} key={raw_key!r}")
+        if qid in rows_by_qid:
+            raise ValueError(f"Duplicate qid after normalization: {qid} ({path})")
+        rows_by_qid[qid] = row
+    return rows_by_qid, raw_keys[:3], row_qids[:3]
+
+dense, dense_raw_keys, dense_row_qids = load_prediction(dense_path)
+sparse, sparse_raw_keys, sparse_row_qids = load_prediction(sparse_path)
 
 gold_qids = set()
 with gold_path.open("r", encoding="utf-8") as handle:
@@ -71,6 +99,10 @@ print(f"preflight_common_qids={len(common_qids)}")
 print(f"preflight_gold_qids={len(gold_qids)}")
 print(f"preflight_joint_gold_qids={len(joint_gold_qids)}")
 print(f"preflight_question_type_filter={question_type or 'ALL'}")
+print(f"preflight_dense_sample_raw_keys={dense_raw_keys}")
+print(f"preflight_dense_sample_row_qids={dense_row_qids}")
+print(f"preflight_sparse_sample_raw_keys={sparse_raw_keys}")
+print(f"preflight_sparse_sample_row_qids={sparse_row_qids}")
 
 if not common_qids:
     raise SystemExit("Dense and sparse predictions have no qids in common.")

@@ -172,9 +172,29 @@ def parse_args() -> argparse.Namespace:
 
 def load_prediction(path: Path) -> dict[str, dict]:
     payload = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise TypeError(f"Prediction JSON must be an object keyed by qid: {path}")
-    return {str(qid): row for qid, row in payload.items()}
+    if isinstance(payload, dict) and "predictions" in payload and isinstance(
+        payload["predictions"], (dict, list)
+    ):
+        payload = payload["predictions"]
+
+    rows_by_qid: dict[str, dict] = {}
+    if isinstance(payload, list):
+        iterable = enumerate(payload)
+    elif isinstance(payload, dict):
+        iterable = payload.items()
+    else:
+        raise TypeError(f"Prediction JSON must be a list or object of prediction rows: {path}")
+
+    for raw_key, row in iterable:
+        if not isinstance(row, dict):
+            raise TypeError(f"Prediction row must be an object: {path} key={raw_key!r}")
+        qid = str(row.get("qid", "")).strip() or str(raw_key).strip()
+        if not qid:
+            raise ValueError(f"Prediction row is missing qid and key is empty: {path} key={raw_key!r}")
+        if qid in rows_by_qid:
+            raise ValueError(f"Duplicate qid after normalization: {qid} ({path})")
+        rows_by_qid[qid] = row
+    return rows_by_qid
 
 
 class SparsePageIndex:

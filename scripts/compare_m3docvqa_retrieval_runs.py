@@ -17,6 +17,33 @@ def load_jsonl(path: Path) -> list[dict]:
     return rows
 
 
+def load_prediction(path: Path) -> dict[str, dict]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(payload, dict) and "predictions" in payload and isinstance(
+        payload["predictions"], (dict, list)
+    ):
+        payload = payload["predictions"]
+
+    rows_by_qid: dict[str, dict] = {}
+    if isinstance(payload, list):
+        iterable = enumerate(payload)
+    elif isinstance(payload, dict):
+        iterable = payload.items()
+    else:
+        raise TypeError(f"Prediction JSON must be a list or object of prediction rows: {path}")
+
+    for raw_key, row in iterable:
+        if not isinstance(row, dict):
+            raise TypeError(f"Prediction row must be an object: {path} key={raw_key!r}")
+        qid = str(row.get("qid", "")).strip() or str(raw_key).strip()
+        if not qid:
+            raise ValueError(f"Prediction row is missing qid and key is empty: {path} key={raw_key!r}")
+        if qid in rows_by_qid:
+            raise ValueError(f"Duplicate qid after normalization: {qid} ({path})")
+        rows_by_qid[qid] = row
+    return rows_by_qid
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -170,8 +197,8 @@ def compare_ranks(qid: str, baseline_item: dict, candidate_item: dict) -> dict:
 def main() -> None:
     args = parse_args()
 
-    baseline = json.loads(Path(args.baseline).read_text())
-    candidate = json.loads(Path(args.candidate).read_text())
+    baseline = load_prediction(Path(args.baseline))
+    candidate = load_prediction(Path(args.candidate))
     gold_rows = load_jsonl(Path(args.gold))
     gold_by_qid = {row["qid"]: row for row in gold_rows}
 
