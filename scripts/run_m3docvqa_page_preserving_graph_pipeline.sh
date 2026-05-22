@@ -8,7 +8,8 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python}"
 fi
 
-OUT_DIR="${OUT_DIR:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev}"
+DEFAULT_GRAPH_OUT_DIR="/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_graph_pagepreserve_mmqa_dev"
+GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$DEFAULT_GRAPH_OUT_DIR}"
 DATA_NAME="${DATA_NAME:-m3docvqa-mmqa}"
 DATA_ROOT="${DATA_ROOT:-$REPO_ROOT/data/m3-docvqa/multimodalqa}"
 SPLIT="${SPLIT:-dev}"
@@ -19,20 +20,23 @@ SPARSE_PRED="${SPARSE_PRED:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outp
 QUESTION_TYPE_FILTER="${QUESTION_TYPE_FILTER:-}"
 
 GRAPH_LABEL="${GRAPH_LABEL:-mmqa_dev_plain_top224_splade_graph_pagepreserve_denseheavy_lightboth}"
-PRED_OUT="${PRED_OUT:-$OUT_DIR/${GRAPH_LABEL}.prediction.json}"
-SUMMARY_OUT="${SUMMARY_OUT:-$OUT_DIR/${GRAPH_LABEL}.summary.json}"
-ANALYSIS_OUT="${ANALYSIS_OUT:-$OUT_DIR/${GRAPH_LABEL}.retrieval_analysis.json}"
-VS_DENSE_OUT="${VS_DENSE_OUT:-$OUT_DIR/${GRAPH_LABEL}.vs_dense.json}"
-VS_SPLADE_OUT="${VS_SPLADE_OUT:-$OUT_DIR/${GRAPH_LABEL}.vs_splade.json}"
+PRED_OUT="${PRED_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.prediction.json}"
+SUMMARY_OUT="${SUMMARY_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.summary.json}"
+ANALYSIS_OUT="${ANALYSIS_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.retrieval_analysis.json}"
+VS_DENSE_OUT="${VS_DENSE_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.vs_dense.json}"
+VS_SPLADE_OUT="${VS_SPLADE_OUT:-$GRAPH_OUT_DIR/${GRAPH_LABEL}.vs_splade.json}"
 
 RECALL_K_VALUES="${RECALL_K_VALUES:-1 2 4 5 10 20 50 100 500 1000}"
 
-mkdir -p "$OUT_DIR"
+mkdir -p "$GRAPH_OUT_DIR"
 
 echo "using_dense_pred=$DENSE_PRED"
 echo "using_sparse_pred=$SPARSE_PRED"
 echo "using_gold=$GOLD"
-echo "using_out_dir=$OUT_DIR"
+echo "using_graph_out_dir=$GRAPH_OUT_DIR"
+if [[ -n "${OUT_DIR:-}" && "$GRAPH_OUT_DIR" == "$DEFAULT_GRAPH_OUT_DIR" ]]; then
+  echo "ignoring_generic_out_dir=$OUT_DIR"
+fi
 echo "using_question_type_filter=${QUESTION_TYPE_FILTER:-ALL}"
 
 "$PYTHON_BIN" - "$DENSE_PRED" "$SPARSE_PRED" "$GOLD" "$QUESTION_TYPE_FILTER" <<'PY'
