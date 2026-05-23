@@ -406,6 +406,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--position-evidence-edge-weight", type=float, default=0.10)
     parser.add_argument("--position-evidence-restart-weight", type=float, default=0.10)
     parser.add_argument(
+        "--position-evidence-scope",
+        choices=["global", "doc_conditioned"],
+        default="global",
+        help=(
+            "Scope of position evidence edges. 'global' connects role nodes to all matching "
+            "candidate pages. 'doc_conditioned' only connects pages in high-confidence "
+            "candidate documents, with edge weights scaled by dense/SPLADE doc support."
+        ),
+    )
+    parser.add_argument(
+        "--position-evidence-doc-top-k",
+        type=int,
+        default=20,
+        help="Candidate documents kept for doc_conditioned position evidence. Default: 20.",
+    )
+    parser.add_argument(
+        "--position-evidence-min-doc-support",
+        type=float,
+        default=0.0,
+        help="Minimum normalized doc support for doc_conditioned position evidence.",
+    )
+    parser.add_argument(
         "--position-evidence-explicit-page-edge-weight",
         type=float,
         default=0.50,
@@ -1828,6 +1850,7 @@ def build_position_evidence_policy(
     question: str,
     records: dict[str, PageRecord],
     doc_page_counts: dict[str, int],
+    doc_position_weights: dict[str, float],
     args: argparse.Namespace,
 ) -> PositionEvidencePolicy:
     mode = str(args.position_evidence_mode)
@@ -1839,7 +1862,14 @@ def build_position_evidence_policy(
         explicit_set = set(explicit_page_indices)
         early_frac = float(args.position_evidence_early_frac)
         late_frac = float(args.position_evidence_late_frac)
+        scope = str(args.position_evidence_scope)
+        min_doc_support = clamp(float(args.position_evidence_min_doc_support), 0.0, 1.0)
         for uid, record in records.items():
+            doc_support = 1.0
+            if scope == "doc_conditioned":
+                doc_support = doc_position_weights.get(record.doc_id, 0.0)
+                if doc_support < min_doc_support or doc_support <= 0:
+                    continue
             page_roles = record_position_roles(
                 record=record,
                 doc_page_counts=doc_page_counts,
@@ -1849,16 +1879,23 @@ def build_position_evidence_policy(
             )
             for role in page_roles:
                 if role in active_role_weights:
-                    role_page_weights.setdefault(role, {})[uid] = 1.0
+                    role_page_weights.setdefault(role, {})[uid] = doc_support
 
     page_match_count = sum(len(pages) for pages in role_page_weights.values())
     metadata: dict[str, object] = {
         "position_evidence_mode": mode,
+        "position_evidence_scope": str(args.position_evidence_scope),
         "position_evidence_active_roles": sorted(active_role_weights),
         "position_evidence_active_role_count": len(active_role_weights),
         "position_evidence_explicit_page_indices": explicit_page_indices,
         "position_evidence_role_node_count": len(role_page_weights),
         "position_evidence_page_match_count": page_match_count,
+        "position_evidence_doc_support_count": len(doc_position_weights),
+        "position_evidence_doc_top_k": int(args.position_evidence_doc_top_k),
+        "position_evidence_min_doc_support": float(args.position_evidence_min_doc_support),
+        "mean_position_evidence_doc_support": (
+            statistics.fmean(doc_position_weights.values()) if doc_position_weights else None
+        ),
         "position_evidence_doc_page_count_available": bool(doc_page_counts),
         "position_evidence_edge_weight": float(args.position_evidence_edge_weight),
         "position_evidence_restart_weight": float(args.position_evidence_restart_weight),
@@ -1880,6 +1917,34 @@ def build_position_evidence_policy(
 
 def is_explicit_position_role(role: str) -> bool:
     return role.startswith("page_")
+
+
+def build_position_doc_weights(
+    *,
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    raw_doc_weights: dict[str, float] = defaultdict(float)
+    for doc_id, rank in dense_doc_ranks.items():
+        raw_doc_weights[doc_id] += source_weights.dense_weight / (
+            float(args.rrf_k) + float(rank)
+        )
+    for doc_id, rank in sparse_doc_ranks.items():
+        raw_doc_weights[doc_id] += source_weights.sparse_weight / (
+            float(args.rrf_k) + float(rank)
+        )
+    if not raw_doc_weights:
+        return {}
+    top_k = max(0, int(args.position_evidence_doc_top_k))
+    sorted_docs = sorted(
+        raw_doc_weights.items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    if top_k > 0:
+        sorted_docs = sorted_docs[:top_k]
+    return max_scale(dict(sorted_docs))
 
 
 def add_position_evidence_edges(
@@ -2236,10 +2301,17 @@ def build_qid_graph_ranking(
         source_weights=source_weights,
         args=args,
     )
+    position_doc_weights = build_position_doc_weights(
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        source_weights=source_weights,
+        args=args,
+    )
     position_policy = build_position_evidence_policy(
         question=question,
         records=records,
         doc_page_counts=doc_page_counts or {},
+        doc_position_weights=position_doc_weights,
         args=args,
     )
 
@@ -2643,6 +2715,11 @@ def main() -> None:
                 ),
                 "doc_pages_jsonl": args.doc_pages_jsonl,
                 "position_evidence_mode": args.position_evidence_mode,
+                "position_evidence_scope": args.position_evidence_scope,
+                "position_evidence_doc_top_k": int(args.position_evidence_doc_top_k),
+                "position_evidence_min_doc_support": float(
+                    args.position_evidence_min_doc_support
+                ),
                 "position_evidence_edge_weight": float(args.position_evidence_edge_weight),
                 "position_evidence_restart_weight": float(args.position_evidence_restart_weight),
                 "position_evidence_explicit_page_edge_weight": float(
@@ -2753,6 +2830,9 @@ def main() -> None:
         "doc_pages_jsonl": args.doc_pages_jsonl,
         "doc_page_count_doc_count": len(doc_page_counts),
         "position_evidence_mode": args.position_evidence_mode,
+        "position_evidence_scope": args.position_evidence_scope,
+        "position_evidence_doc_top_k": int(args.position_evidence_doc_top_k),
+        "position_evidence_min_doc_support": float(args.position_evidence_min_doc_support),
         "position_evidence_edge_weight": float(args.position_evidence_edge_weight),
         "position_evidence_restart_weight": float(args.position_evidence_restart_weight),
         "position_evidence_explicit_page_edge_weight": float(
@@ -3060,6 +3140,26 @@ def main() -> None:
                 for row in per_qid
             )
             if per_qid
+            else None
+        ),
+        "mean_position_evidence_doc_support_count": (
+            statistics.fmean(
+                float(row["graph"].get("position_evidence_doc_support_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_position_evidence_doc_support": (
+            statistics.fmean(
+                float(row["graph"].get("mean_position_evidence_doc_support", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_position_evidence_doc_support") is not None
+            )
+            if any(
+                row["graph"].get("mean_position_evidence_doc_support") is not None
+                for row in per_qid
+            )
             else None
         ),
         "mean_position_evidence_restart_seed_node_count": (
