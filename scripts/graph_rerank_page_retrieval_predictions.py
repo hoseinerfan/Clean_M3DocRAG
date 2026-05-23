@@ -539,6 +539,34 @@ def parse_args() -> argparse.Namespace:
         help="Drop anchors matching more than this many candidate pages. Use 0 to disable.",
     )
     parser.add_argument(
+        "--query-anchor-reasoning-mode",
+        choices=["none", "financial_slots"],
+        default="none",
+        help=(
+            "Optional query-anchor reasoning layer. financial_slots adds a co-occurrence "
+            "node for pages that satisfy multiple financial evidence slots such as metric "
+            "terms and fiscal years."
+        ),
+    )
+    parser.add_argument(
+        "--query-anchor-financial-bundle-weight",
+        type=float,
+        default=1.0,
+        help="Node weight for financial slot co-occurrence evidence.",
+    )
+    parser.add_argument(
+        "--query-anchor-financial-min-slot-types",
+        type=int,
+        default=2,
+        help="Minimum financial slot categories a page must match before it receives bundle evidence.",
+    )
+    parser.add_argument(
+        "--query-anchor-financial-max-page-matches",
+        type=int,
+        default=0,
+        help="Drop financial bundle evidence if it matches more than this many pages. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--splade-index-pt",
         default="",
         help=(
@@ -2232,6 +2260,62 @@ QUERY_ANCHOR_STOPWORDS = {
     "write",
 }
 
+FINANCIAL_METRIC_TERMS = {
+    "asset",
+    "assets",
+    "capitalization",
+    "cash",
+    "compensation",
+    "cost",
+    "costs",
+    "debt",
+    "depreciation",
+    "dividend",
+    "dividends",
+    "ebitda",
+    "emission",
+    "emissions",
+    "employee",
+    "employees",
+    "expense",
+    "expenses",
+    "flow",
+    "ghg",
+    "gross",
+    "income",
+    "interest",
+    "liabilities",
+    "liability",
+    "margin",
+    "market",
+    "operating",
+    "profit",
+    "purchase",
+    "ratio",
+    "repurchase",
+    "revenue",
+    "revenues",
+    "sales",
+    "share",
+    "shareholder",
+    "shareholders",
+    "shares",
+    "stock",
+    "tax",
+    "total",
+}
+
+FINANCIAL_REASONING_TRIGGERS = FINANCIAL_METRIC_TERMS | {
+    "fy",
+    "fiscal",
+    "million",
+    "billion",
+    "percentage",
+    "percent",
+    "round",
+    "year",
+}
+
 
 def normalize_query_anchor(anchor: str) -> str:
     normalized = re.sub(r"\s+", " ", str(anchor or "").strip(" \t\n\r,.;:!?()[]{}\"'`"))
@@ -2306,6 +2390,127 @@ def anchor_matches_page_text(anchor: str, page_text: str) -> bool:
     return normalized_anchor in page_text
 
 
+def query_has_financial_reasoning_cue(question: str) -> bool:
+    tokens = {
+        token.lower()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9&./+-]*", str(question or ""))
+    }
+    return bool(tokens & FINANCIAL_REASONING_TRIGGERS)
+
+
+def financial_anchor_slots(anchors: list[str]) -> dict[str, list[str]]:
+    slots: dict[str, list[str]] = {"metric": [], "year": [], "entity": []}
+    seen: dict[str, set[str]] = {key: set() for key in slots}
+    for anchor in anchors:
+        normalized = normalize_query_anchor(anchor)
+        lower = normalized.lower()
+        if not normalized:
+            continue
+        anchor_tokens = set(re.findall(r"[a-z][a-z0-9&./+-]*", lower))
+        if re.search(r"\b(?:fy)?20\d{2}\b", lower):
+            slot = "year"
+        elif anchor_tokens & FINANCIAL_METRIC_TERMS:
+            slot = "metric"
+        elif re.search(r"[A-Z]", normalized) and lower not in QUERY_ANCHOR_STOPWORDS:
+            slot = "entity"
+        else:
+            continue
+        if lower not in seen[slot]:
+            slots[slot].append(normalized)
+            seen[slot].add(lower)
+    return slots
+
+
+def financial_reasoning_node_id(anchors: list[str]) -> str:
+    normalized = "|".join(sorted(normalize_query_anchor(anchor).lower() for anchor in anchors))
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:12]
+    return f"financial_reasoning::{digest}"
+
+
+def build_financial_reasoning_bundle(
+    *,
+    anchors: list[str],
+    records: dict[str, PageRecord],
+    page_texts: dict[str, str],
+    doc_anchor_weights: dict[str, float],
+    args: argparse.Namespace,
+) -> tuple[str | None, dict[str, float], dict[str, object]]:
+    if str(args.query_anchor_reasoning_mode) != "financial_slots":
+        return None, {}, {}
+    slots = financial_anchor_slots(anchors)
+    active_slots = {slot: values for slot, values in slots.items() if values}
+    min_slot_types = max(1, int(args.query_anchor_financial_min_slot_types))
+    base_metadata: dict[str, object] = {
+        "query_anchor_reasoning_mode": str(args.query_anchor_reasoning_mode),
+        "query_anchor_financial_bundle_weight": float(args.query_anchor_financial_bundle_weight),
+        "query_anchor_financial_min_slot_types": min_slot_types,
+        "query_anchor_financial_max_page_matches": int(
+            args.query_anchor_financial_max_page_matches
+        ),
+    }
+    if len(active_slots) < min_slot_types:
+        return None, {}, {
+            **base_metadata,
+            "query_anchor_financial_reasoning_active": False,
+            "query_anchor_financial_reasoning_reason": "too_few_slot_types",
+            "query_anchor_financial_metric_anchor_count": len(slots["metric"]),
+            "query_anchor_financial_year_anchor_count": len(slots["year"]),
+            "query_anchor_financial_entity_anchor_count": len(slots["entity"]),
+            "query_anchor_financial_slot_type_count": len(active_slots),
+            "query_anchor_financial_bundle_page_match_count": 0,
+            "query_anchor_financial_bundle_dropped_broad": False,
+        }
+
+    matched_pages: dict[str, float] = {}
+    for uid, record in records.items():
+        doc_support = doc_anchor_weights.get(record.doc_id, 0.0)
+        if str(args.query_anchor_scope) == "doc_conditioned" and doc_support <= 0:
+            continue
+        page_text = page_texts.get(uid, "")
+        if not page_text:
+            continue
+        matched_slot_count = 0
+        matched_anchor_count = 0
+        total_anchor_count = sum(len(values) for values in active_slots.values())
+        for slot, values in active_slots.items():
+            slot_matches = sum(1 for value in values if anchor_matches_page_text(value, page_text))
+            if slot_matches > 0:
+                matched_slot_count += 1
+                matched_anchor_count += slot_matches
+        if matched_slot_count < min_slot_types:
+            continue
+        slot_score = matched_slot_count / max(1.0, float(len(active_slots)))
+        anchor_score = matched_anchor_count / max(1.0, float(total_anchor_count))
+        support = doc_support if str(args.query_anchor_scope) == "doc_conditioned" else 1.0
+        matched_pages[uid] = support * (0.5 * slot_score + 0.5 * anchor_score)
+
+    max_matches = max(0, int(args.query_anchor_financial_max_page_matches))
+    dropped = bool(max_matches > 0 and len(matched_pages) > max_matches)
+    if dropped:
+        matched_pages = {}
+
+    node_id = financial_reasoning_node_id(
+        slots["metric"][:8] + slots["year"][:4] + slots["entity"][:4]
+    )
+    label_parts = []
+    for slot in ("metric", "year", "entity"):
+        if slots[slot]:
+            label_parts.append(f"{slot}={','.join(slots[slot][:4])}")
+    metadata = {
+        **base_metadata,
+        "query_anchor_financial_reasoning_active": bool(matched_pages),
+        "query_anchor_financial_reasoning_reason": "matched" if matched_pages else "no_page_matches",
+        "query_anchor_financial_metric_anchor_count": len(slots["metric"]),
+        "query_anchor_financial_year_anchor_count": len(slots["year"]),
+        "query_anchor_financial_entity_anchor_count": len(slots["entity"]),
+        "query_anchor_financial_slot_type_count": len(active_slots),
+        "query_anchor_financial_bundle_page_match_count": len(matched_pages),
+        "query_anchor_financial_bundle_dropped_broad": dropped,
+        "query_anchor_financial_bundle_label": " | ".join(label_parts),
+    }
+    return node_id if matched_pages else None, matched_pages, metadata
+
+
 def query_anchor_node_id(anchor: str) -> str:
     digest = hashlib.sha1(anchor.lower().encode("utf-8")).hexdigest()[:12]
     return f"query_anchor::{digest}"
@@ -2366,6 +2571,15 @@ def build_query_anchor_evidence_policy(
     anchor_labels: dict[str, str] = {}
     anchors: list[str] = []
     dropped_broad_anchor_count = 0
+    financial_metadata: dict[str, object] = {
+        "query_anchor_reasoning_mode": str(args.query_anchor_reasoning_mode),
+        "query_anchor_financial_reasoning_active": False,
+        "query_anchor_financial_reasoning_reason": "disabled",
+        "query_anchor_financial_metric_anchor_count": 0,
+        "query_anchor_financial_year_anchor_count": 0,
+        "query_anchor_financial_entity_anchor_count": 0,
+        "query_anchor_financial_bundle_page_match_count": 0,
+    }
     if mode != "none" and page_texts:
         anchors = extract_query_anchors(
             question,
@@ -2407,6 +2621,39 @@ def build_query_anchor_evidence_policy(
                     candidate_count=candidate_count,
                     args=args,
                 )
+        if str(args.query_anchor_reasoning_mode) == "financial_slots":
+            if query_has_financial_reasoning_cue(question):
+                bundle_node, bundle_pages, financial_metadata = build_financial_reasoning_bundle(
+                    anchors=anchors,
+                    records=records,
+                    page_texts=page_texts,
+                    doc_anchor_weights=doc_anchor_weights,
+                    args=args,
+                )
+                if bundle_node and bundle_pages:
+                    anchor_page_weights[bundle_node] = bundle_pages
+                    anchor_node_weights[bundle_node] = max(
+                        0.0, float(args.query_anchor_financial_bundle_weight)
+                    )
+                    anchor_labels[bundle_node] = (
+                        "financial_slots: "
+                        + str(financial_metadata.get("query_anchor_financial_bundle_label", ""))
+                    )
+            else:
+                financial_metadata.update(
+                    {
+                        "query_anchor_financial_reasoning_reason": "no_financial_cue",
+                        "query_anchor_financial_bundle_weight": float(
+                            args.query_anchor_financial_bundle_weight
+                        ),
+                        "query_anchor_financial_min_slot_types": int(
+                            args.query_anchor_financial_min_slot_types
+                        ),
+                        "query_anchor_financial_max_page_matches": int(
+                            args.query_anchor_financial_max_page_matches
+                        ),
+                    }
+                )
 
     page_match_count = sum(len(pages) for pages in anchor_page_weights.values())
     metadata: dict[str, object] = {
@@ -2430,6 +2677,7 @@ def build_query_anchor_evidence_policy(
         "query_anchor_page_text_available": bool(page_texts),
         "query_anchor_text_fields": list(args.query_anchor_text_field),
         "query_anchor_labels": [anchor_labels[node_id] for node_id in sorted(anchor_labels)],
+        **financial_metadata,
     }
     return QueryAnchorEvidencePolicy(
         anchor_page_weights=anchor_page_weights,
@@ -3249,6 +3497,16 @@ def main() -> None:
                 "query_anchor_weight_mode": args.query_anchor_weight_mode,
                 "query_anchor_min_node_weight": float(args.query_anchor_min_node_weight),
                 "query_anchor_max_page_matches": int(args.query_anchor_max_page_matches),
+                "query_anchor_reasoning_mode": args.query_anchor_reasoning_mode,
+                "query_anchor_financial_bundle_weight": float(
+                    args.query_anchor_financial_bundle_weight
+                ),
+                "query_anchor_financial_min_slot_types": int(
+                    args.query_anchor_financial_min_slot_types
+                ),
+                "query_anchor_financial_max_page_matches": int(
+                    args.query_anchor_financial_max_page_matches
+                ),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -3382,6 +3640,10 @@ def main() -> None:
         "query_anchor_weight_mode": args.query_anchor_weight_mode,
         "query_anchor_min_node_weight": float(args.query_anchor_min_node_weight),
         "query_anchor_max_page_matches": int(args.query_anchor_max_page_matches),
+        "query_anchor_reasoning_mode": args.query_anchor_reasoning_mode,
+        "query_anchor_financial_bundle_weight": float(args.query_anchor_financial_bundle_weight),
+        "query_anchor_financial_min_slot_types": int(args.query_anchor_financial_min_slot_types),
+        "query_anchor_financial_max_page_matches": int(args.query_anchor_financial_max_page_matches),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -3766,6 +4028,19 @@ def main() -> None:
         "mean_query_anchor_restart_seed_node_count": (
             statistics.fmean(
                 float(row["graph"].get("query_anchor_restart_seed_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "query_anchor_financial_reasoning_qid_count": sum(
+            1
+            for row in per_qid
+            if bool(row["graph"].get("query_anchor_financial_reasoning_active", False))
+        ),
+        "mean_query_anchor_financial_bundle_page_match_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_financial_bundle_page_match_count", 0.0))
                 for row in per_qid
             )
             if per_qid

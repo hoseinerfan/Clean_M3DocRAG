@@ -143,6 +143,25 @@ If neutral:
 - Try top-doc restriction: `QUERY_ANCHOR_DOC_TOP_K=4` or `10`.
 - Audit recovered/lost qids by domain and metadata type.
 
+Financial audit from the current best query-anchor run:
+
+```text
+Financial report qids: 344
+Recovered/lost: 2 / 0
+Improved/worsened ranks: 35 / 29
+Active financial qids: 303
+Gold-anchor match among active financial qids: 280
+```
+
+Next financial-specific test:
+
+- Add `QUERY_ANCHOR_REASONING_MODE=financial_slots`.
+- Keep the same query-anchor edge/restart setting.
+- Reward pages only when multiple financial evidence slots co-occur, e.g. metric + year,
+  metric + entity, or multiple metric terms.
+- This is a retrieval-time reasoning signal, not answer leakage: it uses only the query,
+  retrieved candidate docs/pages, and corpus page text.
+
 ### 2. Page-Type / Modality Nodes
 
 Purpose: help table/chart/figure failures by adding page-level type evidence.
