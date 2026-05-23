@@ -337,6 +337,9 @@ def main() -> None:
                 "financial_bundle_label": str(
                     graph.get("query_anchor_financial_bundle_label", "")
                 ),
+                "financial_mean_table_score": graph.get(
+                    "query_anchor_financial_mean_table_score"
+                ),
             }
         )
 
@@ -391,6 +394,15 @@ def main() -> None:
             if rows
             else 0.0
         ),
+        "mean_financial_table_score": (
+            statistics.fmean(
+                float(row["financial_mean_table_score"])
+                for row in rows
+                if row["financial_mean_table_score"] is not None
+            )
+            if any(row["financial_mean_table_score"] is not None for row in rows)
+            else None
+        ),
         "filter": {
             "field": args.filter_field,
             "values": list(args.filter_value),
@@ -426,6 +438,14 @@ def main() -> None:
                 [
                     "mean_bundle_page_matches",
                     f"{payload['mean_financial_bundle_page_match_count']:.1f}",
+                ],
+                [
+                    "mean_table_score",
+                    (
+                        ""
+                        if payload["mean_financial_table_score"] is None
+                        else f"{payload['mean_financial_table_score']:.3f}"
+                    ),
                 ],
             ],
         ),
@@ -538,6 +558,7 @@ def main() -> None:
                 f"  - financial_reasoning: active={row['financial_reasoning_active']} "
                 f"reason={row['financial_reasoning_reason']} "
                 f"matches={row['financial_bundle_page_match_count']} "
+                f"table_score={row['financial_mean_table_score']} "
                 f"bundle={row['financial_bundle_label']}",
             ]
         )
@@ -553,6 +574,7 @@ def main() -> None:
                 f"  - financial_reasoning: active={row['financial_reasoning_active']} "
                 f"reason={row['financial_reasoning_reason']} "
                 f"matches={row['financial_bundle_page_match_count']} "
+                f"table_score={row['financial_mean_table_score']} "
                 f"bundle={row['financial_bundle_label']}",
             ]
         )
@@ -568,6 +590,7 @@ def main() -> None:
                 f"  - financial_reasoning: active={row['financial_reasoning_active']} "
                 f"reason={row['financial_reasoning_reason']} "
                 f"matches={row['financial_bundle_page_match_count']} "
+                f"table_score={row['financial_mean_table_score']} "
                 f"bundle={row['financial_bundle_label']}",
             ]
         )
@@ -583,6 +606,7 @@ def main() -> None:
                 f"  - financial_reasoning: active={row['financial_reasoning_active']} "
                 f"reason={row['financial_reasoning_reason']} "
                 f"matches={row['financial_bundle_page_match_count']} "
+                f"table_score={row['financial_mean_table_score']} "
                 f"bundle={row['financial_bundle_label']}",
             ]
         )

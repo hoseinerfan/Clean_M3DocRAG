@@ -567,6 +567,18 @@ def parse_args() -> argparse.Namespace:
         help="Drop financial bundle evidence if it matches more than this many pages. Use 0 to disable.",
     )
     parser.add_argument(
+        "--query-anchor-financial-table-bonus",
+        type=float,
+        default=0.0,
+        help="Extra multiplier for financial bundle page edges based on numeric/table-like page text.",
+    )
+    parser.add_argument(
+        "--query-anchor-financial-table-min-score",
+        type=float,
+        default=0.0,
+        help="Require this minimum table-likeness score for financial bundle pages. Use 0 to disable.",
+    )
+    parser.add_argument(
         "--splade-index-pt",
         default="",
         help=(
@@ -2305,6 +2317,43 @@ FINANCIAL_METRIC_TERMS = {
     "total",
 }
 
+FINANCIAL_METRIC_PHRASES = {
+    "board of directors",
+    "cash flow",
+    "common stock",
+    "core revenue growth",
+    "cumulative shareholder return",
+    "days payable outstanding",
+    "dividend income",
+    "effective tax rate",
+    "executive compensation",
+    "fixed asset turnover",
+    "full-time employees",
+    "ghg emissions",
+    "gross margin",
+    "gross margin percentage",
+    "gross profit",
+    "interest expense",
+    "long-term debt",
+    "market capitalization",
+    "net discrete tax gains",
+    "net income",
+    "net revenues",
+    "operating cash flow",
+    "operating expenses",
+    "operating profit margin",
+    "repurchasing of common stock",
+    "return on equity",
+    "sales and revenues",
+    "shareholder return",
+    "total assets",
+    "total debt",
+    "total debt ratio",
+    "total ghg emissions",
+    "total liabilities",
+    "total revenue",
+}
+
 FINANCIAL_REASONING_TRIGGERS = FINANCIAL_METRIC_TERMS | {
     "fy",
     "fiscal",
@@ -2312,6 +2361,18 @@ FINANCIAL_REASONING_TRIGGERS = FINANCIAL_METRIC_TERMS | {
     "billion",
     "percentage",
     "percent",
+    "round",
+    "year",
+}
+
+FINANCIAL_ENTITY_STOPWORDS = QUERY_ANCHOR_STOPWORDS | FINANCIAL_METRIC_TERMS | {
+    "answer",
+    "before",
+    "company",
+    "companies",
+    "financial",
+    "fiscal",
+    "long-term",
     "round",
     "year",
 }
@@ -2398,26 +2459,121 @@ def query_has_financial_reasoning_cue(question: str) -> bool:
     return bool(tokens & FINANCIAL_REASONING_TRIGGERS)
 
 
-def financial_anchor_slots(anchors: list[str]) -> dict[str, list[str]]:
+def add_financial_slot_value(
+    slots: dict[str, list[str]],
+    seen: dict[str, set[str]],
+    slot: str,
+    value: str,
+) -> None:
+    normalized = normalize_query_anchor(value)
+    lower = normalized.lower()
+    if normalized and lower not in seen[slot]:
+        slots[slot].append(normalized)
+        seen[slot].add(lower)
+
+
+def dedupe_specific_financial_values(values: list[str]) -> list[str]:
+    ordered = sorted(
+        [normalize_query_anchor(value) for value in values if normalize_query_anchor(value)],
+        key=lambda value: (-len(value.split()), -len(value), value.lower()),
+    )
+    kept: list[str] = []
+    for value in ordered:
+        lower = value.lower()
+        if any(
+            re.search(rf"(?<![a-z0-9]){re.escape(lower)}(?![a-z0-9])", other.lower())
+            for other in kept
+            if other.lower() != lower
+        ):
+            continue
+        kept.append(value)
+    return kept
+
+
+def extract_financial_year_values(question: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    for match in re.finditer(r"\bFY\s*'?(\d{2}|\d{4})\b", str(question or ""), flags=re.IGNORECASE):
+        raw_digits = match.group(1)
+        normalized = f"FY{raw_digits}"
+        for value in [normalized, f"20{raw_digits}" if len(raw_digits) == 2 else raw_digits]:
+            if value.lower() not in seen:
+                values.append(value)
+                seen.add(value.lower())
+    for match in re.finditer(r"\b20\d{2}\b", str(question or "")):
+        value = match.group(0)
+        if value.lower() not in seen:
+            values.append(value)
+            seen.add(value.lower())
+    return values
+
+
+def extract_financial_metric_values(question: str) -> list[str]:
+    query = str(question or "")
+    query_lower = query.lower()
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        normalized = normalize_query_anchor(value)
+        lower = normalized.lower()
+        if normalized and lower not in seen:
+            values.append(normalized)
+            seen.add(lower)
+
+    for phrase in sorted(FINANCIAL_METRIC_PHRASES, key=lambda item: (-len(item.split()), item)):
+        if re.search(rf"(?<![a-z0-9]){re.escape(phrase)}(?![a-z0-9])", query_lower):
+            add(phrase)
+
+    tokens = re.findall(r"[a-z0-9&./+-]+", query_lower)
+    stopwords = FINANCIAL_ENTITY_STOPWORDS | {"did", "does", "much", "many"}
+    for ngram_len in range(4, 0, -1):
+        for start in range(0, max(0, len(tokens) - ngram_len + 1)):
+            ngram = tokens[start : start + ngram_len]
+            if any(re.fullmatch(r"(?:fy)?\d{2,4}", token) for token in ngram):
+                continue
+            if not (set(ngram) & FINANCIAL_METRIC_TERMS):
+                continue
+            while ngram and ngram[0] in stopwords:
+                ngram = ngram[1:]
+            while ngram and ngram[-1] in stopwords:
+                ngram = ngram[:-1]
+            if not ngram or not (set(ngram) & FINANCIAL_METRIC_TERMS):
+                continue
+            if len(ngram) == 1 and ngram[0] in {"total", "gross", "net", "operating"}:
+                continue
+            add(" ".join(ngram))
+
+    return dedupe_specific_financial_values(values)[:12]
+
+
+def financial_anchor_slots(question: str, anchors: list[str]) -> dict[str, list[str]]:
     slots: dict[str, list[str]] = {"metric": [], "year": [], "entity": []}
     seen: dict[str, set[str]] = {key: set() for key in slots}
+    for value in extract_financial_metric_values(question):
+        add_financial_slot_value(slots, seen, "metric", value)
+    for value in extract_financial_year_values(question):
+        add_financial_slot_value(slots, seen, "year", value)
     for anchor in anchors:
         normalized = normalize_query_anchor(anchor)
         lower = normalized.lower()
         if not normalized:
             continue
         anchor_tokens = set(re.findall(r"[a-z][a-z0-9&./+-]*", lower))
-        if re.search(r"\b(?:fy)?20\d{2}\b", lower):
+        if re.fullmatch(r"(?:fy\s*'?(\d{2}|\d{4})|20\d{2})", lower):
             slot = "year"
+        elif re.search(r"\b(?:fy\s*'?(\d{2}|\d{4})|20\d{2})\b", lower):
+            continue
         elif anchor_tokens & FINANCIAL_METRIC_TERMS:
             slot = "metric"
-        elif re.search(r"[A-Z]", normalized) and lower not in QUERY_ANCHOR_STOPWORDS:
+        elif re.search(r"[A-Z]", normalized) and lower not in FINANCIAL_ENTITY_STOPWORDS:
             slot = "entity"
         else:
             continue
-        if lower not in seen[slot]:
-            slots[slot].append(normalized)
-            seen[slot].add(lower)
+        add_financial_slot_value(slots, seen, slot, normalized)
+    slots["metric"] = dedupe_specific_financial_values(slots["metric"])[:12]
+    slots["year"] = dedupe_specific_financial_values(slots["year"])[:6]
+    slots["entity"] = dedupe_specific_financial_values(slots["entity"])[:6]
     return slots
 
 
@@ -2427,8 +2583,34 @@ def financial_reasoning_node_id(anchors: list[str]) -> str:
     return f"financial_reasoning::{digest}"
 
 
+def financial_table_likeness(page_text: str) -> float:
+    text = str(page_text or "")
+    if not text:
+        return 0.0
+    numeric_hits = len(
+        re.findall(
+            r"(?:\$|€|£)?\(?\d[\d,]*(?:\.\d+)?\)?%?|\b20\d{2}\b|\bFY\s*'?[\d]{2,4}\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+    )
+    percent_hits = len(re.findall(r"\d(?:\.\d+)?\s*%", text))
+    currency_hits = len(re.findall(r"[$€£]\s*\(?\d", text))
+    delimiter_hits = text.count("|") + text.count("\t")
+    financial_term_hits = sum(
+        1
+        for term in FINANCIAL_METRIC_TERMS
+        if re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text)
+    )
+    numeric_score = clamp(numeric_hits / 45.0, 0.0, 1.0)
+    marker_score = clamp((percent_hits + currency_hits + delimiter_hits) / 20.0, 0.0, 1.0)
+    term_score = clamp(financial_term_hits / 12.0, 0.0, 1.0)
+    return clamp(0.55 * numeric_score + 0.25 * marker_score + 0.20 * term_score, 0.0, 1.0)
+
+
 def build_financial_reasoning_bundle(
     *,
+    question: str,
     anchors: list[str],
     records: dict[str, PageRecord],
     page_texts: dict[str, str],
@@ -2437,7 +2619,7 @@ def build_financial_reasoning_bundle(
 ) -> tuple[str | None, dict[str, float], dict[str, object]]:
     if str(args.query_anchor_reasoning_mode) != "financial_slots":
         return None, {}, {}
-    slots = financial_anchor_slots(anchors)
+    slots = financial_anchor_slots(question, anchors)
     active_slots = {slot: values for slot, values in slots.items() if values}
     min_slot_types = max(1, int(args.query_anchor_financial_min_slot_types))
     base_metadata: dict[str, object] = {
@@ -2462,6 +2644,9 @@ def build_financial_reasoning_bundle(
         }
 
     matched_pages: dict[str, float] = {}
+    matched_table_scores: list[float] = []
+    table_bonus = max(0.0, float(args.query_anchor_financial_table_bonus))
+    table_min_score = clamp(float(args.query_anchor_financial_table_min_score), 0.0, 1.0)
     for uid, record in records.items():
         doc_support = doc_anchor_weights.get(record.doc_id, 0.0)
         if str(args.query_anchor_scope) == "doc_conditioned" and doc_support <= 0:
@@ -2482,7 +2667,12 @@ def build_financial_reasoning_bundle(
         slot_score = matched_slot_count / max(1.0, float(len(active_slots)))
         anchor_score = matched_anchor_count / max(1.0, float(total_anchor_count))
         support = doc_support if str(args.query_anchor_scope) == "doc_conditioned" else 1.0
-        matched_pages[uid] = support * (0.5 * slot_score + 0.5 * anchor_score)
+        table_score = financial_table_likeness(page_text)
+        if table_score < table_min_score:
+            continue
+        matched_table_scores.append(table_score)
+        base_score = support * (0.5 * slot_score + 0.5 * anchor_score)
+        matched_pages[uid] = base_score * (1.0 + table_bonus * table_score)
 
     max_matches = max(0, int(args.query_anchor_financial_max_page_matches))
     dropped = bool(max_matches > 0 and len(matched_pages) > max_matches)
@@ -2507,6 +2697,11 @@ def build_financial_reasoning_bundle(
         "query_anchor_financial_bundle_page_match_count": len(matched_pages),
         "query_anchor_financial_bundle_dropped_broad": dropped,
         "query_anchor_financial_bundle_label": " | ".join(label_parts),
+        "query_anchor_financial_table_bonus": table_bonus,
+        "query_anchor_financial_table_min_score": table_min_score,
+        "query_anchor_financial_mean_table_score": (
+            statistics.fmean(matched_table_scores) if matched_table_scores else None
+        ),
     }
     return node_id if matched_pages else None, matched_pages, metadata
 
@@ -2624,6 +2819,7 @@ def build_query_anchor_evidence_policy(
         if str(args.query_anchor_reasoning_mode) == "financial_slots":
             if query_has_financial_reasoning_cue(question):
                 bundle_node, bundle_pages, financial_metadata = build_financial_reasoning_bundle(
+                    question=question,
                     anchors=anchors,
                     records=records,
                     page_texts=page_texts,
@@ -3507,6 +3703,12 @@ def main() -> None:
                 "query_anchor_financial_max_page_matches": int(
                     args.query_anchor_financial_max_page_matches
                 ),
+                "query_anchor_financial_table_bonus": float(
+                    args.query_anchor_financial_table_bonus
+                ),
+                "query_anchor_financial_table_min_score": float(
+                    args.query_anchor_financial_table_min_score
+                ),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -3644,6 +3846,8 @@ def main() -> None:
         "query_anchor_financial_bundle_weight": float(args.query_anchor_financial_bundle_weight),
         "query_anchor_financial_min_slot_types": int(args.query_anchor_financial_min_slot_types),
         "query_anchor_financial_max_page_matches": int(args.query_anchor_financial_max_page_matches),
+        "query_anchor_financial_table_bonus": float(args.query_anchor_financial_table_bonus),
+        "query_anchor_financial_table_min_score": float(args.query_anchor_financial_table_min_score),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -4044,6 +4248,18 @@ def main() -> None:
                 for row in per_qid
             )
             if per_qid
+            else None
+        ),
+        "mean_query_anchor_financial_table_score": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_financial_mean_table_score", 0.0))
+                for row in per_qid
+                if row["graph"].get("query_anchor_financial_mean_table_score") is not None
+            )
+            if any(
+                row["graph"].get("query_anchor_financial_mean_table_score") is not None
+                for row in per_qid
+            )
             else None
         ),
         "per_qid": per_qid,

@@ -162,6 +162,12 @@ Next financial-specific test:
 - This is a retrieval-time reasoning signal, not answer leakage: it uses only the query,
   retrieved candidate docs/pages, and corpus page text.
 
+First financial-slot run was neutral overall: it matched `anchor_r010` on page/doc hit.
+Audit showed the layer activated on 128 / 344 financial qids with mean 45 bundle pages,
+but the slot extractor missed lowercase metric phrases and still included broad bundles.
+The next revision adds lowercase financial metric phrase extraction and optional
+numeric/table-likeness weighting via `QUERY_ANCHOR_FINANCIAL_TABLE_BONUS`.
+
 ### 2. Page-Type / Modality Nodes
 
 Purpose: help table/chart/figure failures by adding page-level type evidence.
