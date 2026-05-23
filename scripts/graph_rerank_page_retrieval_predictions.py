@@ -99,11 +99,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sparse-weight", type=float, default=1.0)
     parser.add_argument(
         "--adaptive-source-weight-mode",
-        choices=["none", "agreement"],
+        choices=["none", "agreement", "reciprocal"],
         default="none",
         help=(
             "Optional query-adaptive source weighting. 'agreement' increases dense weight "
-            "and decreases sparse weight when dense/SPLADE overlap is low."
+            "and decreases sparse weight when dense/SPLADE overlap is low. 'reciprocal' "
+            "estimates dense and sparse reliability separately from rank-weighted reciprocal support."
         ),
     )
     parser.add_argument(
@@ -155,6 +156,38 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--adaptive-source-max-dense-mult", type=float, default=1.5)
     parser.add_argument("--adaptive-source-min-sparse-mult", type=float, default=0.5)
     parser.add_argument("--adaptive-source-max-sparse-mult", type=float, default=1.0)
+    parser.add_argument(
+        "--adaptive-source-reciprocal-top-pages",
+        type=int,
+        default=20,
+        help="Top source pages used for reciprocal support reliability. Default: 20.",
+    )
+    parser.add_argument(
+        "--adaptive-source-reciprocal-lookup-pages",
+        type=int,
+        default=1000,
+        help="Target source pages used to look up reciprocal support. Default: 1000.",
+    )
+    parser.add_argument(
+        "--adaptive-source-reciprocal-doc-weight",
+        type=float,
+        default=0.7,
+        help="Reliability weight for reciprocal doc support. Default: 0.7.",
+    )
+    parser.add_argument(
+        "--adaptive-source-reciprocal-page-weight",
+        type=float,
+        default=0.3,
+        help="Reliability weight for reciprocal page support. Default: 0.3.",
+    )
+    parser.add_argument("--adaptive-source-reciprocal-min-mult", type=float, default=0.75)
+    parser.add_argument("--adaptive-source-reciprocal-max-mult", type=float, default=1.25)
+    parser.add_argument(
+        "--adaptive-source-reciprocal-preserve-total",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Preserve base dense+sparse source weight total in reciprocal mode. Default: true.",
+    )
     parser.add_argument(
         "--adaptive-restart-mode",
         choices=["none", "agreement"],
@@ -547,6 +580,56 @@ def jaccard(left: set[str], right: set[str]) -> float:
     return len(left & right) / len(union)
 
 
+def page_rank_map(
+    pages: list[tuple[str, int, float, int]],
+    limit: int,
+) -> dict[str, int]:
+    ranks: dict[str, int] = {}
+    for doc_id, page_idx, _score, rank in pages[: max(0, int(limit))]:
+        ranks.setdefault(page_uid(doc_id, page_idx), int(rank))
+    return ranks
+
+
+def doc_rank_map(
+    pages: list[tuple[str, int, float, int]],
+    limit: int,
+) -> dict[str, int]:
+    ranks: dict[str, int] = {}
+    for doc_id, _page_idx, _score, _rank in pages[: max(0, int(limit))]:
+        if doc_id not in ranks:
+            ranks[doc_id] = len(ranks) + 1
+    return ranks
+
+
+def reciprocal_rank_support(
+    *,
+    source_pages: list[tuple[str, int, float, int]],
+    target_page_ranks: dict[str, int],
+    target_doc_ranks: dict[str, int],
+    source_top_pages: int,
+    rrf_k: float,
+) -> tuple[float, float]:
+    total_source_importance = 0.0
+    page_support = 0.0
+    doc_support = 0.0
+    reciprocal_scale = float(rrf_k) + 1.0
+    for doc_id, page_idx, _score, rank in source_pages[: max(0, int(source_top_pages))]:
+        source_importance = 1.0 / (float(rrf_k) + float(rank))
+        total_source_importance += source_importance
+        page_rank = target_page_ranks.get(page_uid(doc_id, page_idx))
+        if page_rank is not None:
+            page_support += source_importance * reciprocal_scale / (float(rrf_k) + float(page_rank))
+        doc_rank = target_doc_ranks.get(doc_id)
+        if doc_rank is not None:
+            doc_support += source_importance * reciprocal_scale / (float(rrf_k) + float(doc_rank))
+    if total_source_importance <= 0:
+        return 0.0, 0.0
+    return (
+        clamp(page_support / total_source_importance, 0.0, 1.0),
+        clamp(doc_support / total_source_importance, 0.0, 1.0),
+    )
+
+
 def compute_source_agreement(
     *,
     dense_pages: list[tuple[str, int, float, int]],
@@ -614,6 +697,8 @@ def compute_source_agreement(
 def compute_source_weights(
     *,
     agreement: SourceAgreement,
+    dense_pages: list[tuple[str, int, float, int]],
+    sparse_pages: list[tuple[str, int, float, int]],
     args: argparse.Namespace,
 ) -> SourceWeights:
     base_dense_weight = float(args.dense_weight)
@@ -629,6 +714,89 @@ def compute_source_weights(
     }
     if mode == "none":
         return SourceWeights(base_dense_weight, base_sparse_weight, metadata)
+
+    if mode == "reciprocal":
+        source_top_pages = max(0, int(args.adaptive_source_reciprocal_top_pages))
+        lookup_pages = max(0, int(args.adaptive_source_reciprocal_lookup_pages))
+        sparse_page_ranks = page_rank_map(sparse_pages, lookup_pages)
+        dense_page_ranks = page_rank_map(dense_pages, lookup_pages)
+        sparse_doc_ranks = doc_rank_map(sparse_pages, lookup_pages)
+        dense_doc_ranks = doc_rank_map(dense_pages, lookup_pages)
+        dense_page_support, dense_doc_support = reciprocal_rank_support(
+            source_pages=dense_pages,
+            target_page_ranks=sparse_page_ranks,
+            target_doc_ranks=sparse_doc_ranks,
+            source_top_pages=source_top_pages,
+            rrf_k=float(args.rrf_k),
+        )
+        sparse_page_support, sparse_doc_support = reciprocal_rank_support(
+            source_pages=sparse_pages,
+            target_page_ranks=dense_page_ranks,
+            target_doc_ranks=dense_doc_ranks,
+            source_top_pages=source_top_pages,
+            rrf_k=float(args.rrf_k),
+        )
+        doc_weight = max(0.0, float(args.adaptive_source_reciprocal_doc_weight))
+        page_weight = max(0.0, float(args.adaptive_source_reciprocal_page_weight))
+        support_denominator = doc_weight + page_weight
+        if support_denominator <= 0:
+            dense_reliability = 0.0
+            sparse_reliability = 0.0
+        else:
+            dense_reliability = clamp(
+                (doc_weight * dense_doc_support + page_weight * dense_page_support)
+                / support_denominator,
+                0.0,
+                1.0,
+            )
+            sparse_reliability = clamp(
+                (doc_weight * sparse_doc_support + page_weight * sparse_page_support)
+                / support_denominator,
+                0.0,
+                1.0,
+            )
+        min_mult = float(args.adaptive_source_reciprocal_min_mult)
+        max_mult = float(args.adaptive_source_reciprocal_max_mult)
+        dense_mult = clamp(min_mult + (max_mult - min_mult) * dense_reliability, min_mult, max_mult)
+        sparse_mult = clamp(
+            min_mult + (max_mult - min_mult) * sparse_reliability,
+            min_mult,
+            max_mult,
+        )
+        effective_dense_weight = base_dense_weight * dense_mult
+        effective_sparse_weight = base_sparse_weight * sparse_mult
+        if bool(args.adaptive_source_reciprocal_preserve_total):
+            raw_total = effective_dense_weight + effective_sparse_weight
+            base_total = base_dense_weight + base_sparse_weight
+            if raw_total > 0 and base_total > 0:
+                total_scale = base_total / raw_total
+                effective_dense_weight *= total_scale
+                effective_sparse_weight *= total_scale
+        else:
+            total_scale = 1.0
+        metadata.update(
+            {
+                "adaptive_source_reciprocal_top_pages": source_top_pages,
+                "adaptive_source_reciprocal_lookup_pages": lookup_pages,
+                "adaptive_source_reciprocal_doc_weight": doc_weight,
+                "adaptive_source_reciprocal_page_weight": page_weight,
+                "adaptive_source_dense_page_reciprocal_support": dense_page_support,
+                "adaptive_source_dense_doc_reciprocal_support": dense_doc_support,
+                "adaptive_source_sparse_page_reciprocal_support": sparse_page_support,
+                "adaptive_source_sparse_doc_reciprocal_support": sparse_doc_support,
+                "adaptive_source_dense_reliability": dense_reliability,
+                "adaptive_source_sparse_reliability": sparse_reliability,
+                "adaptive_source_dense_multiplier": dense_mult,
+                "adaptive_source_sparse_multiplier": sparse_mult,
+                "adaptive_source_reciprocal_preserve_total": bool(
+                    args.adaptive_source_reciprocal_preserve_total
+                ),
+                "adaptive_source_reciprocal_total_scale": total_scale,
+                "effective_dense_weight": effective_dense_weight,
+                "effective_sparse_weight": effective_sparse_weight,
+            }
+        )
+        return SourceWeights(effective_dense_weight, effective_sparse_weight, metadata)
 
     disagreement = agreement.disagreement_score
     gamma = max(0.0, float(args.adaptive_source_gamma))
@@ -1040,6 +1208,8 @@ def build_qid_graph_ranking(
     )
     source_weights = compute_source_weights(
         agreement=source_agreement,
+        dense_pages=dense_pages,
+        sparse_pages=sparse_pages,
         args=args,
     )
     expansion_pages: list[tuple[str, int, float, int]] = []
@@ -1380,6 +1550,27 @@ def main() -> None:
                 "adaptive_source_max_dense_mult": float(args.adaptive_source_max_dense_mult),
                 "adaptive_source_min_sparse_mult": float(args.adaptive_source_min_sparse_mult),
                 "adaptive_source_max_sparse_mult": float(args.adaptive_source_max_sparse_mult),
+                "adaptive_source_reciprocal_top_pages": int(
+                    args.adaptive_source_reciprocal_top_pages
+                ),
+                "adaptive_source_reciprocal_lookup_pages": int(
+                    args.adaptive_source_reciprocal_lookup_pages
+                ),
+                "adaptive_source_reciprocal_doc_weight": float(
+                    args.adaptive_source_reciprocal_doc_weight
+                ),
+                "adaptive_source_reciprocal_page_weight": float(
+                    args.adaptive_source_reciprocal_page_weight
+                ),
+                "adaptive_source_reciprocal_min_mult": float(
+                    args.adaptive_source_reciprocal_min_mult
+                ),
+                "adaptive_source_reciprocal_max_mult": float(
+                    args.adaptive_source_reciprocal_max_mult
+                ),
+                "adaptive_source_reciprocal_preserve_total": bool(
+                    args.adaptive_source_reciprocal_preserve_total
+                ),
                 "adaptive_restart_mode": args.adaptive_restart_mode,
                 "adaptive_restart_source_strength": float(args.adaptive_restart_source_strength),
                 "adaptive_restart_gamma": float(args.adaptive_restart_gamma),
@@ -1446,6 +1637,15 @@ def main() -> None:
         "adaptive_source_max_dense_mult": float(args.adaptive_source_max_dense_mult),
         "adaptive_source_min_sparse_mult": float(args.adaptive_source_min_sparse_mult),
         "adaptive_source_max_sparse_mult": float(args.adaptive_source_max_sparse_mult),
+        "adaptive_source_reciprocal_top_pages": int(args.adaptive_source_reciprocal_top_pages),
+        "adaptive_source_reciprocal_lookup_pages": int(args.adaptive_source_reciprocal_lookup_pages),
+        "adaptive_source_reciprocal_doc_weight": float(args.adaptive_source_reciprocal_doc_weight),
+        "adaptive_source_reciprocal_page_weight": float(args.adaptive_source_reciprocal_page_weight),
+        "adaptive_source_reciprocal_min_mult": float(args.adaptive_source_reciprocal_min_mult),
+        "adaptive_source_reciprocal_max_mult": float(args.adaptive_source_reciprocal_max_mult),
+        "adaptive_source_reciprocal_preserve_total": bool(
+            args.adaptive_source_reciprocal_preserve_total
+        ),
         "adaptive_restart_mode": args.adaptive_restart_mode,
         "adaptive_restart_source_strength": float(args.adaptive_restart_source_strength),
         "adaptive_restart_gamma": float(args.adaptive_restart_gamma),
@@ -1524,6 +1724,38 @@ def main() -> None:
             1
             for row in per_qid
             if row["graph"].get("adaptive_source_dense_top1_in_sparse_lookup") is True
+        ),
+        "mean_adaptive_source_dense_reliability": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_source_dense_reliability", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_source_sparse_reliability": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_source_sparse_reliability", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_source_dense_doc_reciprocal_support": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_source_dense_doc_reciprocal_support", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_source_sparse_doc_reciprocal_support": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_source_sparse_doc_reciprocal_support", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
         ),
         "mean_effective_restart_dense_weight": (
             statistics.fmean(
