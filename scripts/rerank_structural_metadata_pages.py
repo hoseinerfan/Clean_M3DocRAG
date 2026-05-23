@@ -12,6 +12,16 @@ from pathlib import Path
 from typing import Any
 
 
+PAGE_REFERENCE_TOKEN_RE = r"(?:pages?|pg\.?|p\.|slides?)"
+PAGE_REFERENCE_RANGE_RE = (
+    rf"\b{PAGE_REFERENCE_TOKEN_RE}\s*(?:no\.?|number|#)?\s*"
+    r"(\d{1,4})\s*(?:-|to|and)\s*(\d{1,4})\b"
+)
+PAGE_REFERENCE_SINGLE_RE = (
+    rf"\b{PAGE_REFERENCE_TOKEN_RE}\s*(?:no\.?|number|#)?\s*(\d{{1,4}})\b"
+)
+
+
 @dataclass
 class DocPageCatalog:
     page_counts: dict[str, int]
@@ -242,20 +252,14 @@ def detect_structural_intents(question: str) -> tuple[dict[str, float], list[int
     intents: dict[str, float] = {}
     raw_pages: list[int] = []
 
-    for match in re.finditer(
-        r"\b(?:pages?|pg|p|slides?)\.?\s*(?:no\.?|number|#)?\s*(\d{1,4})\s*(?:-|to|and)\s*(\d{1,4})\b",
-        query,
-    ):
+    for match in re.finditer(PAGE_REFERENCE_RANGE_RE, query):
         start_page = int(match.group(1))
         end_page = int(match.group(2))
         lo, hi = sorted((start_page, end_page))
         if hi - lo <= 20:
             for page_number in range(lo, hi + 1):
                 add_page_number(raw_pages, page_number)
-    for match in re.finditer(
-        r"\b(?:pages?|pg|p|slides?)\.?\s*(?:no\.?|number|#)?\s*(\d{1,4})\b",
-        query,
-    ):
+    for match in re.finditer(PAGE_REFERENCE_SINGLE_RE, query):
         add_page_number(raw_pages, int(match.group(1)))
     if raw_pages:
         add_intent(intents, "explicit_page", 1.0)

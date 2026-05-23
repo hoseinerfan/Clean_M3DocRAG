@@ -12,6 +12,16 @@ from pathlib import Path
 from typing import Iterable
 
 
+PAGE_REFERENCE_TOKEN_RE = r"(?:pages?|pg\.?|p\.|slides?)"
+PAGE_REFERENCE_RANGE_RE = (
+    rf"\b{PAGE_REFERENCE_TOKEN_RE}\s*(?:no\.?|number|#)?\s*"
+    r"(\d{1,4})\s*(?:-|to|and)\s*(\d{1,4})\b"
+)
+PAGE_REFERENCE_SINGLE_RE = (
+    rf"\b{PAGE_REFERENCE_TOKEN_RE}\s*(?:no\.?|number|#)?\s*(\d{{1,4}})\b"
+)
+
+
 @dataclass
 class PageRecord:
     doc_id: str
@@ -1832,10 +1842,7 @@ def extract_position_roles_from_question(question: str) -> tuple[dict[str, float
         add_query_role(role_weights, "late", 1.0)
 
     explicit_page_numbers: list[int] = []
-    for match in re.finditer(
-        r"\b(?:pages?|pg|p|slides?)\.?\s*(?:no\.?|number|#)?\s*(\d{1,4})\s*(?:-|to|and)\s*(\d{1,4})\b",
-        query,
-    ):
+    for match in re.finditer(PAGE_REFERENCE_RANGE_RE, query):
         start_page = int(match.group(1))
         end_page = int(match.group(2))
         lo, hi = sorted((start_page, end_page))
@@ -1848,10 +1855,7 @@ def extract_position_roles_from_question(question: str) -> tuple[dict[str, float
                 raw_page=raw_page,
             )
 
-    for match in re.finditer(
-        r"\b(?:pages?|pg|p|slides?)\.?\s*(?:no\.?|number|#)?\s*(\d{1,4})\b",
-        query,
-    ):
+    for match in re.finditer(PAGE_REFERENCE_SINGLE_RE, query):
         raw_page = int(match.group(1))
         add_explicit_position_page(
             role_weights=role_weights,
