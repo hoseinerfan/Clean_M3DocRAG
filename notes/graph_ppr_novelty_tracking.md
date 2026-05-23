@@ -82,6 +82,12 @@ Current result:
 Graph baseline: 1114 page_hit@4, 1353 doc_hit@4
 Query-anchor uniform w0.20 r0.05: 1117 page_hit@4, 1356 doc_hit@4
 Recovered/lost: 3 / 0
+Query-anchor uniform w0.20 r0.10: 1119 page_hit@4, 1358 doc_hit@4
+Recovered/lost: 5 / 0
+Improved/worsened ranks: 187 / 113
+Query-anchor r0.10 + tight structural metadata: 1123 page_hit@4, 1358 doc_hit@4
+Recovered/lost: 9 / 0
+Improved/worsened ranks: 183 / 127
 ```
 
 Audit observations:
@@ -93,7 +99,11 @@ mean page matches per active qid: 392
 active improved/worsened ranks: 115 / 67
 ```
 
-This confirms the mechanism is meaningful but too broad. The next run should use local-IDF node weights and/or max page-match caps.
+This confirms the mechanism is meaningful. Local-IDF/cap variants did not improve over
+uniform weighting, so the current best graph-native candidate is uniform query-anchor
+evidence with `QUERY_ANCHOR_EDGE_WEIGHT=0.20` and `QUERY_ANCHOR_RESTART_WEIGHT=0.10`.
+The best full system currently combines that graph-native query-anchor run with the
+tight structural metadata reranker.
 
 First runs:
 
