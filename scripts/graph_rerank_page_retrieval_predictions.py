@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import statistics
@@ -117,9 +118,17 @@ class PositionEvidencePolicy:
 
 
 @dataclass
+class QueryAnchorEvidencePolicy:
+    anchor_page_weights: dict[str, dict[str, float]]
+    anchor_labels: dict[str, str]
+    metadata: dict[str, object]
+
+
+@dataclass
 class DocPageCatalog:
     page_counts: dict[str, int]
     page_number_indices: dict[str, dict[int, set[int]]]
+    page_texts: dict[str, str]
 
 
 def parse_args() -> argparse.Namespace:
@@ -480,6 +489,33 @@ def parse_args() -> argparse.Namespace:
         help="Fraction of a document considered late for structural position roles.",
     )
     parser.add_argument(
+        "--query-anchor-evidence-mode",
+        choices=["none", "entity_numeric"],
+        default="none",
+        help=(
+            "Add query-anchor evidence nodes from entity-like and numeric query spans. "
+            "Requires --doc-pages-jsonl with page text fields."
+        ),
+    )
+    parser.add_argument(
+        "--query-anchor-text-field",
+        nargs="*",
+        default=["ocr_text", "vlm_text", "markdown", "text", "page_text", "content"],
+        help="doc_pages JSONL fields concatenated as page text for query-anchor evidence.",
+    )
+    parser.add_argument(
+        "--query-anchor-scope",
+        choices=["global", "doc_conditioned"],
+        default="doc_conditioned",
+        help="Whether query-anchor nodes connect to all matched candidate pages or only top supported docs.",
+    )
+    parser.add_argument("--query-anchor-doc-top-k", type=int, default=20)
+    parser.add_argument("--query-anchor-min-doc-support", type=float, default=0.0)
+    parser.add_argument("--query-anchor-edge-weight", type=float, default=0.15)
+    parser.add_argument("--query-anchor-restart-weight", type=float, default=0.10)
+    parser.add_argument("--query-anchor-max-anchors", type=int, default=16)
+    parser.add_argument("--query-anchor-min-entity-len", type=int, default=3)
+    parser.add_argument(
         "--splade-index-pt",
         default="",
         help=(
@@ -770,9 +806,34 @@ def maybe_int(value: object) -> int | None:
         return None
 
 
-def load_doc_page_catalog(path: Path) -> DocPageCatalog:
+def normalize_manifest_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return re.sub(r"\s+", " ", value.replace("\x0c", " ").replace("\u0000", " ")).strip()
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return " ".join(
+            part for part in (normalize_manifest_text(item) for item in value) if part
+        ).strip()
+    if isinstance(value, dict):
+        return " ".join(
+            part for part in (normalize_manifest_text(item) for item in value.values()) if part
+        ).strip()
+    return re.sub(r"\s+", " ", str(value)).strip()
+
+
+def load_doc_page_catalog(
+    path: Path,
+    *,
+    text_fields: Iterable[str] = (),
+    load_page_texts: bool = False,
+) -> DocPageCatalog:
     counts: dict[str, int] = {}
     page_number_indices: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
+    page_texts: dict[str, str] = {}
+    text_field_names = [str(field).strip() for field in text_fields if str(field).strip()]
     if not path.exists():
         raise FileNotFoundError(f"doc_pages JSONL does not exist: {path}")
     with path.open("r", encoding="utf-8") as handle:
@@ -793,9 +854,20 @@ def load_doc_page_catalog(path: Path) -> DocPageCatalog:
                 page_number = maybe_int(row.get(field_name))
                 if page_number is not None:
                     page_number_indices[doc_id][page_number].add(page_idx)
+            if load_page_texts:
+                parts = []
+                seen_parts = set()
+                for field_name in text_field_names:
+                    text = normalize_manifest_text(row.get(field_name))
+                    if text and text not in seen_parts:
+                        parts.append(text)
+                        seen_parts.add(text)
+                if parts:
+                    page_texts[page_uid(doc_id, page_idx)] = " ".join(parts).lower()
     return DocPageCatalog(
         page_counts=counts,
         page_number_indices={doc_id: dict(values) for doc_id, values in page_number_indices.items()},
+        page_texts=page_texts,
     )
 
 
@@ -2093,6 +2165,258 @@ def add_position_evidence_restart(
     return added
 
 
+QUERY_ANCHOR_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "did",
+    "does",
+    "for",
+    "from",
+    "give",
+    "has",
+    "have",
+    "how",
+    "in",
+    "is",
+    "it",
+    "list",
+    "many",
+    "of",
+    "on",
+    "or",
+    "page",
+    "pages",
+    "please",
+    "report",
+    "section",
+    "the",
+    "there",
+    "this",
+    "to",
+    "was",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "with",
+    "write",
+}
+
+
+def normalize_query_anchor(anchor: str) -> str:
+    normalized = re.sub(r"\s+", " ", str(anchor or "").strip(" \t\n\r,.;:!?()[]{}\"'`"))
+    normalized = normalized.replace("’", "'")
+    if normalized.lower().endswith("'s"):
+        normalized = normalized[:-2]
+    return normalized.strip()
+
+
+def add_query_anchor(anchors: list[str], anchor: str, *, min_len: int) -> None:
+    normalized = normalize_query_anchor(anchor)
+    if not normalized:
+        return
+    lower = normalized.lower()
+    if len(lower) < min_len and not re.search(r"\d", lower):
+        return
+    if lower in QUERY_ANCHOR_STOPWORDS:
+        return
+    if lower not in {item.lower() for item in anchors}:
+        anchors.append(normalized)
+
+
+def extract_query_anchors(question: str, *, max_anchors: int, min_entity_len: int) -> list[str]:
+    query = str(question or "")
+    anchors: list[str] = []
+
+    for match in re.finditer(r"['\"]([^'\"]{3,80})['\"]", query):
+        add_query_anchor(anchors, match.group(1), min_len=min_entity_len)
+
+    numeric_pattern = (
+        r"\b(?:FY)?\d{4}\b"
+        r"|\b\d+(?:\.\d+)?\s*(?:%|percent|percentage|million|billion|thousand)\b"
+        r"|\b\d+\.\d+\b"
+    )
+    for match in re.finditer(numeric_pattern, query, flags=re.IGNORECASE):
+        add_query_anchor(anchors, match.group(0), min_len=1)
+
+    entity_token = r"[A-Z][A-Za-z0-9&./+-]*(?:'[sS])?"
+    entity_phrase_pattern = rf"\b{entity_token}(?:\s+{entity_token}){{0,4}}\b"
+    for match in re.finditer(entity_phrase_pattern, query):
+        phrase = normalize_query_anchor(match.group(0))
+        if not phrase:
+            continue
+        tokens = [normalize_query_anchor(token) for token in phrase.split()]
+        tokens = [token for token in tokens if token and token.lower() not in QUERY_ANCHOR_STOPWORDS]
+        if not tokens:
+            continue
+        if len(tokens) > 1:
+            add_query_anchor(anchors, " ".join(tokens), min_len=min_entity_len)
+        for token in tokens:
+            if re.search(r"[A-Z].*[A-Z]|\d", token) or len(token) >= max(4, min_entity_len):
+                add_query_anchor(anchors, token, min_len=min_entity_len)
+        if len(anchors) >= max_anchors:
+            break
+
+    return anchors[: max(0, int(max_anchors))]
+
+
+def anchor_matches_page_text(anchor: str, page_text: str) -> bool:
+    if not anchor or not page_text:
+        return False
+    normalized_anchor = normalize_query_anchor(anchor).lower()
+    if not normalized_anchor:
+        return False
+    if re.match(r"^[a-z0-9_.+-]+$", normalized_anchor):
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(normalized_anchor)}(?![a-z0-9])",
+                page_text,
+            )
+        )
+    return normalized_anchor in page_text
+
+
+def query_anchor_node_id(anchor: str) -> str:
+    digest = hashlib.sha1(anchor.lower().encode("utf-8")).hexdigest()[:12]
+    return f"query_anchor::{digest}"
+
+
+def build_query_anchor_doc_weights(
+    *,
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    raw_doc_weights: dict[str, float] = defaultdict(float)
+    for doc_id, rank in dense_doc_ranks.items():
+        raw_doc_weights[doc_id] += source_weights.dense_weight / (
+            float(args.rrf_k) + float(rank)
+        )
+    for doc_id, rank in sparse_doc_ranks.items():
+        raw_doc_weights[doc_id] += source_weights.sparse_weight / (
+            float(args.rrf_k) + float(rank)
+        )
+    if not raw_doc_weights:
+        return {}
+    sorted_docs = sorted(raw_doc_weights.items(), key=lambda item: (-item[1], item[0]))
+    top_k = max(0, int(args.query_anchor_doc_top_k))
+    if top_k > 0:
+        sorted_docs = sorted_docs[:top_k]
+    return max_scale(dict(sorted_docs))
+
+
+def build_query_anchor_evidence_policy(
+    *,
+    question: str,
+    records: dict[str, PageRecord],
+    page_texts: dict[str, str],
+    doc_anchor_weights: dict[str, float],
+    args: argparse.Namespace,
+) -> QueryAnchorEvidencePolicy:
+    mode = str(args.query_anchor_evidence_mode)
+    anchor_page_weights: dict[str, dict[str, float]] = {}
+    anchor_labels: dict[str, str] = {}
+    anchors: list[str] = []
+    if mode != "none" and page_texts:
+        anchors = extract_query_anchors(
+            question,
+            max_anchors=int(args.query_anchor_max_anchors),
+            min_entity_len=int(args.query_anchor_min_entity_len),
+        )
+        scope = str(args.query_anchor_scope)
+        min_doc_support = clamp(float(args.query_anchor_min_doc_support), 0.0, 1.0)
+        for anchor in anchors:
+            node_id = query_anchor_node_id(anchor)
+            anchor_labels[node_id] = anchor
+            for uid, record in records.items():
+                doc_support = 1.0
+                if scope == "doc_conditioned":
+                    doc_support = doc_anchor_weights.get(record.doc_id, 0.0)
+                    if doc_support < min_doc_support or doc_support <= 0:
+                        continue
+                page_text = page_texts.get(uid, "")
+                if anchor_matches_page_text(anchor, page_text):
+                    anchor_page_weights.setdefault(node_id, {})[uid] = doc_support
+
+    page_match_count = sum(len(pages) for pages in anchor_page_weights.values())
+    metadata: dict[str, object] = {
+        "query_anchor_evidence_mode": mode,
+        "query_anchor_scope": str(args.query_anchor_scope),
+        "query_anchor_active_anchor_count": len(anchors),
+        "query_anchor_matched_anchor_count": len(anchor_page_weights),
+        "query_anchor_page_match_count": page_match_count,
+        "query_anchor_doc_support_count": len(doc_anchor_weights),
+        "query_anchor_doc_top_k": int(args.query_anchor_doc_top_k),
+        "query_anchor_min_doc_support": float(args.query_anchor_min_doc_support),
+        "query_anchor_edge_weight": float(args.query_anchor_edge_weight),
+        "query_anchor_restart_weight": float(args.query_anchor_restart_weight),
+        "query_anchor_page_text_available": bool(page_texts),
+        "query_anchor_text_fields": list(args.query_anchor_text_field),
+        "query_anchor_labels": [anchor_labels[node_id] for node_id in sorted(anchor_labels)],
+    }
+    return QueryAnchorEvidencePolicy(
+        anchor_page_weights=anchor_page_weights,
+        anchor_labels=anchor_labels,
+        metadata=metadata,
+    )
+
+
+def add_query_anchor_evidence_edges(
+    *,
+    graph: dict[str, dict[str, float]],
+    policy: QueryAnchorEvidencePolicy,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    if str(args.query_anchor_evidence_mode) == "none":
+        return {
+            "query_anchor_edge_count_directed": 0,
+            "query_anchor_seed_node_count": 0,
+        }
+    edge_count = 0
+    seeded_node_count = 0
+    for anchor_node, pages in policy.anchor_page_weights.items():
+        if not pages:
+            continue
+        seeded_node_count += 1
+        for uid, page_weight in pages.items():
+            edge_weight = float(args.query_anchor_edge_weight) * float(page_weight)
+            if edge_weight > 0:
+                add_directed_edge(graph, anchor_node, uid, edge_weight)
+                edge_count += 1
+    return {
+        "query_anchor_edge_count_directed": edge_count,
+        "query_anchor_seed_node_count": seeded_node_count,
+    }
+
+
+def add_query_anchor_evidence_restart(
+    *,
+    seed: dict[str, float],
+    policy: QueryAnchorEvidencePolicy,
+    args: argparse.Namespace,
+) -> int:
+    if str(args.query_anchor_evidence_mode) == "none":
+        return 0
+    restart_weight = float(args.query_anchor_restart_weight)
+    if restart_weight <= 0:
+        return 0
+    added = 0
+    for anchor_node, pages in policy.anchor_page_weights.items():
+        if not pages:
+            continue
+        seed[anchor_node] = seed.get(anchor_node, 0.0) + restart_weight
+        added += 1
+    return added
+
+
 def add_undirected_edge(
     graph: dict[str, dict[str, float]],
     left: str,
@@ -2395,6 +2719,19 @@ def build_qid_graph_ranking(
         doc_position_weights=position_doc_weights,
         args=args,
     )
+    query_anchor_doc_weights = build_query_anchor_doc_weights(
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        source_weights=source_weights,
+        args=args,
+    )
+    query_anchor_policy = build_query_anchor_evidence_policy(
+        question=question,
+        records=records,
+        page_texts=doc_page_catalog.page_texts if doc_page_catalog is not None else {},
+        doc_anchor_weights=query_anchor_doc_weights,
+        args=args,
+    )
 
     graph: dict[str, dict[str, float]] = defaultdict(dict)
     base_page_to_doc_weight = effective_page_to_doc_edge_weight(args)
@@ -2423,6 +2760,11 @@ def build_qid_graph_ranking(
     position_evidence_metadata = add_position_evidence_edges(
         graph=graph,
         policy=position_policy,
+        args=args,
+    )
+    query_anchor_evidence_metadata = add_query_anchor_evidence_edges(
+        graph=graph,
+        policy=query_anchor_policy,
         args=args,
     )
     same_doc_window = int(args.same_doc_window)
@@ -2474,6 +2816,11 @@ def build_qid_graph_ranking(
     position_seed_node_count = add_position_evidence_restart(
         seed=restart_vector.seed,
         policy=position_policy,
+        args=args,
+    )
+    query_anchor_seed_node_count = add_query_anchor_evidence_restart(
+        seed=restart_vector.seed,
+        policy=query_anchor_policy,
         args=args,
     )
     ppr = run_ppr(
@@ -2570,7 +2917,10 @@ def build_qid_graph_ranking(
         **evidence_community_metadata,
         **position_policy.metadata,
         **position_evidence_metadata,
+        **query_anchor_policy.metadata,
+        **query_anchor_evidence_metadata,
         "position_evidence_restart_seed_node_count": position_seed_node_count,
+        "query_anchor_restart_seed_node_count": query_anchor_seed_node_count,
         "adaptive_adjacent_edge_count": len(adjacent_edge_multipliers),
         "mean_adaptive_adjacent_edge_multiplier": (
             statistics.fmean(adjacent_edge_multipliers) if adjacent_edge_multipliers else None
@@ -2645,7 +2995,11 @@ def main() -> None:
 
     doc_page_catalog: DocPageCatalog | None = None
     if args.doc_pages_jsonl:
-        doc_page_catalog = load_doc_page_catalog(Path(args.doc_pages_jsonl))
+        doc_page_catalog = load_doc_page_catalog(
+            Path(args.doc_pages_jsonl),
+            text_fields=args.query_anchor_text_field,
+            load_page_texts=str(args.query_anchor_evidence_mode) != "none",
+        )
 
     fused_payload: dict[str, dict] = {}
     per_qid: list[dict] = []
@@ -2811,6 +3165,15 @@ def main() -> None:
                 ),
                 "position_evidence_early_frac": float(args.position_evidence_early_frac),
                 "position_evidence_late_frac": float(args.position_evidence_late_frac),
+                "query_anchor_evidence_mode": args.query_anchor_evidence_mode,
+                "query_anchor_text_field": list(args.query_anchor_text_field),
+                "query_anchor_scope": args.query_anchor_scope,
+                "query_anchor_doc_top_k": int(args.query_anchor_doc_top_k),
+                "query_anchor_min_doc_support": float(args.query_anchor_min_doc_support),
+                "query_anchor_edge_weight": float(args.query_anchor_edge_weight),
+                "query_anchor_restart_weight": float(args.query_anchor_restart_weight),
+                "query_anchor_max_anchors": int(args.query_anchor_max_anchors),
+                "query_anchor_min_entity_len": int(args.query_anchor_min_entity_len),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -2915,6 +3278,9 @@ def main() -> None:
         "doc_page_number_lookup_doc_count": (
             len(doc_page_catalog.page_number_indices) if doc_page_catalog is not None else 0
         ),
+        "doc_page_text_page_count": (
+            len(doc_page_catalog.page_texts) if doc_page_catalog is not None else 0
+        ),
         "position_evidence_mode": args.position_evidence_mode,
         "position_evidence_scope": args.position_evidence_scope,
         "position_evidence_doc_top_k": int(args.position_evidence_doc_top_k),
@@ -2929,6 +3295,15 @@ def main() -> None:
         ),
         "position_evidence_early_frac": float(args.position_evidence_early_frac),
         "position_evidence_late_frac": float(args.position_evidence_late_frac),
+        "query_anchor_evidence_mode": args.query_anchor_evidence_mode,
+        "query_anchor_text_field": list(args.query_anchor_text_field),
+        "query_anchor_scope": args.query_anchor_scope,
+        "query_anchor_doc_top_k": int(args.query_anchor_doc_top_k),
+        "query_anchor_min_doc_support": float(args.query_anchor_min_doc_support),
+        "query_anchor_edge_weight": float(args.query_anchor_edge_weight),
+        "query_anchor_restart_weight": float(args.query_anchor_restart_weight),
+        "query_anchor_max_anchors": int(args.query_anchor_max_anchors),
+        "query_anchor_min_entity_len": int(args.query_anchor_min_entity_len),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -3251,6 +3626,51 @@ def main() -> None:
         "mean_position_evidence_restart_seed_node_count": (
             statistics.fmean(
                 float(row["graph"].get("position_evidence_restart_seed_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "query_anchor_evidence_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("query_anchor_matched_anchor_count", 0)) > 0
+        ),
+        "mean_query_anchor_active_anchor_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_active_anchor_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_anchor_matched_anchor_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_matched_anchor_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_anchor_page_match_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_page_match_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_anchor_edge_count_directed": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_edge_count_directed", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_anchor_restart_seed_node_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_restart_seed_node_count", 0.0))
                 for row in per_qid
             )
             if per_qid
