@@ -142,6 +142,25 @@ class PdfHyperlinkGraph:
 
 
 @dataclass
+class ExternalPageGraphEdge:
+    source_page_uid: str
+    target_page_uid: str | None = None
+    target_doc_id: str | None = None
+    score: float = 1.0
+    raw_weight: float = 1.0
+    edge_type: str = ""
+
+
+@dataclass
+class ExternalPageGraph:
+    by_source_page: dict[str, list[ExternalPageGraphEdge]]
+    edge_count: int
+    source_page_count: int
+    target_page_count: int
+    target_doc_count: int
+
+
+@dataclass
 class DocPageCatalog:
     page_counts: dict[str, int]
     page_number_indices: dict[str, dict[int, set[int]]]
@@ -629,6 +648,43 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap on hyperlink targets per source page. Use 0 for no cap.",
     )
     parser.add_argument(
+        "--external-page-graph-jsonl",
+        default="",
+        help=(
+            "Optional page graph edge JSONL. Rows may contain source_page_uid and "
+            "target_page_uid for page-page edges, or target_doc_id for page-doc edges. "
+            "This is intended for learned layout/semantic graph edges such as "
+            "LayoutLMv3 or DocGraphLM kNN links."
+        ),
+    )
+    parser.add_argument(
+        "--external-page-graph-edge-weight",
+        type=float,
+        default=0.0,
+        help="Base transition weight for external page graph edges. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--external-page-graph-direction",
+        choices=["as_directed", "bidirectional"],
+        default="as_directed",
+        help="Whether to use external edges as directed or add reverse transitions.",
+    )
+    parser.add_argument(
+        "--external-page-graph-weight-mode",
+        choices=["uniform", "score", "weight"],
+        default="score",
+        help=(
+            "Scale the base edge weight uniformly, by row score, or by row weight. "
+            "Missing score/weight values fall back to 1."
+        ),
+    )
+    parser.add_argument(
+        "--external-page-graph-max-edges-per-source",
+        type=int,
+        default=0,
+        help="Optional cap on external targets per source page. Use 0 for no cap.",
+    )
+    parser.add_argument(
         "--splade-index-pt",
         default="",
         help=(
@@ -835,6 +891,57 @@ def load_pdf_hyperlink_graph(path: Path) -> PdfHyperlinkGraph:
         by_source_page=dict(by_source_page),
         edge_count=edge_count,
         source_page_count=len(by_source_page),
+        target_doc_count=len(target_doc_ids),
+    )
+
+
+def load_external_page_graph(path: Path) -> ExternalPageGraph:
+    by_source_page: dict[str, list[ExternalPageGraphEdge]] = defaultdict(list)
+    target_page_uids: set[str] = set()
+    target_doc_ids: set[str] = set()
+    edge_count = 0
+    if not path.exists():
+        raise FileNotFoundError(f"External page graph JSONL does not exist: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            source_page_uid = str(row.get("source_page_uid", "")).strip()
+            target_page_uid = str(row.get("target_page_uid", "")).strip() or None
+            target_doc_id = str(row.get("target_doc_id", "")).strip() or None
+            if not source_page_uid or (not target_page_uid and not target_doc_id):
+                continue
+            try:
+                score = float(row.get("score", 1.0))
+            except (TypeError, ValueError):
+                score = 1.0
+            try:
+                raw_weight = float(row.get("weight", row.get("raw_weight", 1.0)))
+            except (TypeError, ValueError):
+                raw_weight = 1.0
+            edge_type = str(row.get("edge_type", row.get("type", ""))).strip()
+            by_source_page[source_page_uid].append(
+                ExternalPageGraphEdge(
+                    source_page_uid=source_page_uid,
+                    target_page_uid=target_page_uid,
+                    target_doc_id=target_doc_id,
+                    score=max(0.0, score),
+                    raw_weight=max(0.0, raw_weight),
+                    edge_type=edge_type,
+                )
+            )
+            if target_page_uid:
+                target_page_uids.add(target_page_uid)
+            if target_doc_id:
+                target_doc_ids.add(target_doc_id)
+            edge_count += 1
+    return ExternalPageGraph(
+        by_source_page=dict(by_source_page),
+        edge_count=edge_count,
+        source_page_count=len(by_source_page),
+        target_page_count=len(target_page_uids),
         target_doc_count=len(target_doc_ids),
     )
 
@@ -3099,6 +3206,105 @@ def add_pdf_hyperlink_edges(
     }
 
 
+def external_page_graph_edge_weight(
+    edge: ExternalPageGraphEdge,
+    args: argparse.Namespace,
+) -> float:
+    base_weight = float(args.external_page_graph_edge_weight)
+    if base_weight <= 0:
+        return 0.0
+    mode = str(args.external_page_graph_weight_mode)
+    if mode == "score":
+        return base_weight * max(0.0, float(edge.score))
+    if mode == "weight":
+        return base_weight * max(0.0, float(edge.raw_weight))
+    return base_weight
+
+
+def add_external_page_graph_edges(
+    *,
+    graph: dict[str, dict[str, float]],
+    records: dict[str, PageRecord],
+    external_page_graph: ExternalPageGraph | None,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    if (
+        external_page_graph is None
+        or not str(args.external_page_graph_jsonl)
+        or float(args.external_page_graph_edge_weight) <= 0
+    ):
+        return {
+            "external_page_graph_edge_count_directed": 0,
+            "external_page_graph_source_page_count": 0,
+            "external_page_graph_target_page_count": 0,
+            "external_page_graph_target_doc_count": 0,
+            "external_page_graph_loaded_edge_count": (
+                external_page_graph.edge_count if external_page_graph is not None else 0
+            ),
+        }
+
+    candidate_doc_ids = {record.doc_id for record in records.values()}
+    used_source_pages: set[str] = set()
+    used_target_pages: set[str] = set()
+    used_target_docs: set[str] = set()
+    edge_count = 0
+    max_edges_per_source = max(0, int(args.external_page_graph_max_edges_per_source))
+
+    for source_uid in sorted(records):
+        source_edges = external_page_graph.by_source_page.get(source_uid, [])
+        if not source_edges:
+            continue
+        ordered_edges = sorted(
+            source_edges,
+            key=lambda edge: (
+                -external_page_graph_edge_weight(edge, args),
+                edge.target_page_uid or "",
+                edge.target_doc_id or "",
+            ),
+        )
+        if max_edges_per_source > 0:
+            ordered_edges = ordered_edges[:max_edges_per_source]
+        for edge in ordered_edges:
+            weight = external_page_graph_edge_weight(edge, args)
+            if weight <= 0:
+                continue
+            target_node = None
+            if edge.target_page_uid:
+                if edge.target_page_uid not in records:
+                    continue
+                target_node = edge.target_page_uid
+                used_target_pages.add(edge.target_page_uid)
+                used_target_docs.add(records[edge.target_page_uid].doc_id)
+            elif edge.target_doc_id and edge.target_doc_id in candidate_doc_ids:
+                target_node = f"doc::{edge.target_doc_id}"
+                used_target_docs.add(edge.target_doc_id)
+            if target_node is None:
+                continue
+            add_directed_edge(graph, source_uid, target_node, weight)
+            edge_count += 1
+            used_source_pages.add(source_uid)
+            if str(args.external_page_graph_direction) == "bidirectional":
+                add_directed_edge(graph, target_node, source_uid, weight)
+                edge_count += 1
+
+    return {
+        "external_page_graph_edge_count_directed": edge_count,
+        "external_page_graph_source_page_count": len(used_source_pages),
+        "external_page_graph_target_page_count": len(used_target_pages),
+        "external_page_graph_target_doc_count": len(used_target_docs),
+        "external_page_graph_loaded_edge_count": external_page_graph.edge_count,
+        "external_page_graph_loaded_source_page_count": external_page_graph.source_page_count,
+        "external_page_graph_loaded_target_page_count": external_page_graph.target_page_count,
+        "external_page_graph_loaded_target_doc_count": external_page_graph.target_doc_count,
+        "external_page_graph_edge_weight": float(args.external_page_graph_edge_weight),
+        "external_page_graph_direction": str(args.external_page_graph_direction),
+        "external_page_graph_weight_mode": str(args.external_page_graph_weight_mode),
+        "external_page_graph_max_edges_per_source": int(
+            args.external_page_graph_max_edges_per_source
+        ),
+    }
+
+
 def add_undirected_edge(
     graph: dict[str, dict[str, float]],
     left: str,
@@ -3262,6 +3468,7 @@ def build_qid_graph_ranking(
     gold_row: dict | None = None,
     doc_page_catalog: DocPageCatalog | None = None,
     pdf_hyperlink_graph: PdfHyperlinkGraph | None = None,
+    external_page_graph: ExternalPageGraph | None = None,
 ) -> tuple[list[list[object]], dict]:
     question = str(dense_row.get("question") or sparse_row.get("question", ""))
     dense_pages = ranked_unique_pages(
@@ -3456,6 +3663,12 @@ def build_qid_graph_ranking(
         pdf_hyperlink_graph=pdf_hyperlink_graph,
         args=args,
     )
+    external_page_graph_metadata = add_external_page_graph_edges(
+        graph=graph,
+        records=records,
+        external_page_graph=external_page_graph,
+        args=args,
+    )
     same_doc_window = int(args.same_doc_window)
     adjacent_edge_multipliers: list[float] = []
     if same_doc_window > 0 and float(args.adjacent_page_edge_weight) > 0:
@@ -3609,6 +3822,7 @@ def build_qid_graph_ranking(
         **query_anchor_policy.metadata,
         **query_anchor_evidence_metadata,
         **pdf_hyperlink_metadata,
+        **external_page_graph_metadata,
         "position_evidence_restart_seed_node_count": position_seed_node_count,
         "query_anchor_restart_seed_node_count": query_anchor_seed_node_count,
         "adaptive_adjacent_edge_count": len(adjacent_edge_multipliers),
@@ -3674,6 +3888,9 @@ def main() -> None:
     pdf_hyperlink_graph = None
     if args.pdf_hyperlink_edges_jsonl:
         pdf_hyperlink_graph = load_pdf_hyperlink_graph(Path(args.pdf_hyperlink_edges_jsonl))
+    external_page_graph = None
+    if args.external_page_graph_jsonl:
+        external_page_graph = load_external_page_graph(Path(args.external_page_graph_jsonl))
     common_qids = sorted(set(dense_pred) & set(sparse_pred))
     if not common_qids:
         raise ValueError("Dense and sparse predictions have no qids in common.")
@@ -3707,6 +3924,7 @@ def main() -> None:
             gold_row=gold_row,
             doc_page_catalog=doc_page_catalog,
             pdf_hyperlink_graph=pdf_hyperlink_graph,
+            external_page_graph=external_page_graph,
         )
         question = dense_pred[qid].get("question") or sparse_pred[qid].get("question", "")
         dense_source_summary = summarize_prediction_rows(
@@ -3892,6 +4110,13 @@ def main() -> None:
                 "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
                 "pdf_hyperlink_weight_mode": args.pdf_hyperlink_weight_mode,
                 "pdf_hyperlink_max_edges_per_source": int(args.pdf_hyperlink_max_edges_per_source),
+                "external_page_graph_jsonl": args.external_page_graph_jsonl,
+                "external_page_graph_edge_weight": float(args.external_page_graph_edge_weight),
+                "external_page_graph_direction": args.external_page_graph_direction,
+                "external_page_graph_weight_mode": args.external_page_graph_weight_mode,
+                "external_page_graph_max_edges_per_source": int(
+                    args.external_page_graph_max_edges_per_source
+                ),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -4044,6 +4269,25 @@ def main() -> None:
         ),
         "pdf_hyperlink_loaded_target_doc_count": (
             pdf_hyperlink_graph.target_doc_count if pdf_hyperlink_graph is not None else 0
+        ),
+        "external_page_graph_jsonl": args.external_page_graph_jsonl,
+        "external_page_graph_edge_weight": float(args.external_page_graph_edge_weight),
+        "external_page_graph_direction": args.external_page_graph_direction,
+        "external_page_graph_weight_mode": args.external_page_graph_weight_mode,
+        "external_page_graph_max_edges_per_source": int(
+            args.external_page_graph_max_edges_per_source
+        ),
+        "external_page_graph_loaded_edge_count": (
+            external_page_graph.edge_count if external_page_graph is not None else 0
+        ),
+        "external_page_graph_loaded_source_page_count": (
+            external_page_graph.source_page_count if external_page_graph is not None else 0
+        ),
+        "external_page_graph_loaded_target_page_count": (
+            external_page_graph.target_page_count if external_page_graph is not None else 0
+        ),
+        "external_page_graph_loaded_target_doc_count": (
+            external_page_graph.target_doc_count if external_page_graph is not None else 0
         ),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
@@ -4466,6 +4710,43 @@ def main() -> None:
         "mean_pdf_hyperlink_raw_link_count": (
             statistics.fmean(
                 float(row["graph"].get("pdf_hyperlink_raw_link_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "external_page_graph_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("external_page_graph_edge_count_directed", 0)) > 0
+        ),
+        "mean_external_page_graph_edge_count_directed": (
+            statistics.fmean(
+                float(row["graph"].get("external_page_graph_edge_count_directed", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_external_page_graph_source_page_count": (
+            statistics.fmean(
+                float(row["graph"].get("external_page_graph_source_page_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_external_page_graph_target_page_count": (
+            statistics.fmean(
+                float(row["graph"].get("external_page_graph_target_page_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_external_page_graph_target_doc_count": (
+            statistics.fmean(
+                float(row["graph"].get("external_page_graph_target_doc_count", 0.0))
                 for row in per_qid
             )
             if per_qid
