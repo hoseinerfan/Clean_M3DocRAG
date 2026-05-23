@@ -22,7 +22,7 @@ All MMDocIR numbers below are page hit@4 unless otherwise noted.
 | Evidence community nodes | 1111-1114 / 1658 | -3 to 0 | Not useful yet |
 | Query-position graph nodes | 1114 / 1658 | 0 | Conceptually useful but empirically neutral so far |
 | Structural metadata reranker, conservative parser | 1118 / 1658 | +4, lost=0 | Best targeted gain, but rule-based/heuristic |
-| Query anchor evidence nodes | implemented, not evaluated | pending | Next non-heuristic/graph-native candidate |
+| Query anchor evidence nodes, uniform w0.20 r0.05 | 1117 / 1658 | +3, lost=0 | Best graph-native novelty result so far |
 
 Cross-dataset structural metadata sanity:
 
@@ -74,6 +74,26 @@ Current implementation:
 - Adds `query_anchor::*` nodes.
 - Connects anchor nodes to candidate pages containing the anchor.
 - Supports doc-conditioned matching to avoid global false positives.
+- Supports query-local IDF/specificity weighting to downweight broad anchors.
+
+Current result:
+
+```text
+Graph baseline: 1114 page_hit@4, 1353 doc_hit@4
+Query-anchor uniform w0.20 r0.05: 1117 page_hit@4, 1356 doc_hit@4
+Recovered/lost: 3 / 0
+```
+
+Audit observations:
+
+```text
+active qids: 1210 / 1658
+gold-anchor match among active qids: 1120 / 1210
+mean page matches per active qid: 392
+active improved/worsened ranks: 115 / 67
+```
+
+This confirms the mechanism is meaningful but too broad. The next run should use local-IDF node weights and/or max page-match caps.
 
 First runs:
 
@@ -83,6 +103,21 @@ QUERY_ANCHOR_SCOPE=doc_conditioned
 QUERY_ANCHOR_DOC_TOP_K=20
 QUERY_ANCHOR_EDGE_WEIGHT=0.10
 QUERY_ANCHOR_RESTART_WEIGHT=0.05
+```
+
+Selectivity runs:
+
+```bash
+QUERY_ANCHOR_WEIGHT_MODE=local_idf
+QUERY_ANCHOR_MIN_NODE_WEIGHT=0.10
+QUERY_ANCHOR_MAX_PAGE_MATCHES=0
+```
+
+and, if broad anchors remain noisy:
+
+```bash
+QUERY_ANCHOR_WEIGHT_MODE=local_idf
+QUERY_ANCHOR_MAX_PAGE_MATCHES=500
 ```
 
 Success criteria:

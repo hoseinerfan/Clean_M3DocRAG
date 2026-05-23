@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 import statistics
 from collections import defaultdict
@@ -120,6 +121,7 @@ class PositionEvidencePolicy:
 @dataclass
 class QueryAnchorEvidencePolicy:
     anchor_page_weights: dict[str, dict[str, float]]
+    anchor_node_weights: dict[str, float]
     anchor_labels: dict[str, str]
     metadata: dict[str, object]
 
@@ -515,6 +517,27 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--query-anchor-restart-weight", type=float, default=0.10)
     parser.add_argument("--query-anchor-max-anchors", type=int, default=16)
     parser.add_argument("--query-anchor-min-entity-len", type=int, default=3)
+    parser.add_argument(
+        "--query-anchor-weight-mode",
+        choices=["uniform", "local_idf"],
+        default="uniform",
+        help=(
+            "Weight matched query-anchor nodes. local_idf downweights anchors that match "
+            "many candidate pages for the current query."
+        ),
+    )
+    parser.add_argument(
+        "--query-anchor-min-node-weight",
+        type=float,
+        default=0.10,
+        help="Floor for local_idf query-anchor node weights.",
+    )
+    parser.add_argument(
+        "--query-anchor-max-page-matches",
+        type=int,
+        default=0,
+        help="Drop anchors matching more than this many candidate pages. Use 0 to disable.",
+    )
     parser.add_argument(
         "--splade-index-pt",
         default="",
@@ -2288,6 +2311,22 @@ def query_anchor_node_id(anchor: str) -> str:
     return f"query_anchor::{digest}"
 
 
+def query_anchor_specificity_weight(
+    *, match_count: int, candidate_count: int, args: argparse.Namespace
+) -> float:
+    if str(args.query_anchor_weight_mode) != "local_idf":
+        return 1.0
+    if match_count <= 0 or candidate_count <= 1:
+        return 1.0
+    try:
+        raw = math.log((float(candidate_count) + 1.0) / (float(match_count) + 1.0)) / math.log(
+            float(candidate_count) + 1.0
+        )
+    except (ValueError, ZeroDivisionError):
+        raw = 1.0
+    return clamp(raw, float(args.query_anchor_min_node_weight), 1.0)
+
+
 def build_query_anchor_doc_weights(
     *,
     dense_doc_ranks: dict[str, int],
@@ -2323,8 +2362,10 @@ def build_query_anchor_evidence_policy(
 ) -> QueryAnchorEvidencePolicy:
     mode = str(args.query_anchor_evidence_mode)
     anchor_page_weights: dict[str, dict[str, float]] = {}
+    anchor_node_weights: dict[str, float] = {}
     anchor_labels: dict[str, str] = {}
     anchors: list[str] = []
+    dropped_broad_anchor_count = 0
     if mode != "none" and page_texts:
         anchors = extract_query_anchors(
             question,
@@ -2333,9 +2374,20 @@ def build_query_anchor_evidence_policy(
         )
         scope = str(args.query_anchor_scope)
         min_doc_support = clamp(float(args.query_anchor_min_doc_support), 0.0, 1.0)
+        max_page_matches = max(0, int(args.query_anchor_max_page_matches))
+        if scope == "doc_conditioned":
+            candidate_count = sum(
+                1
+                for record in records.values()
+                if doc_anchor_weights.get(record.doc_id, 0.0) >= min_doc_support
+                and doc_anchor_weights.get(record.doc_id, 0.0) > 0
+            )
+        else:
+            candidate_count = len(records)
         for anchor in anchors:
             node_id = query_anchor_node_id(anchor)
             anchor_labels[node_id] = anchor
+            matched_pages: dict[str, float] = {}
             for uid, record in records.items():
                 doc_support = 1.0
                 if scope == "doc_conditioned":
@@ -2344,7 +2396,17 @@ def build_query_anchor_evidence_policy(
                         continue
                 page_text = page_texts.get(uid, "")
                 if anchor_matches_page_text(anchor, page_text):
-                    anchor_page_weights.setdefault(node_id, {})[uid] = doc_support
+                    matched_pages[uid] = doc_support
+            if max_page_matches > 0 and len(matched_pages) > max_page_matches:
+                dropped_broad_anchor_count += 1
+                continue
+            if matched_pages:
+                anchor_page_weights[node_id] = matched_pages
+                anchor_node_weights[node_id] = query_anchor_specificity_weight(
+                    match_count=len(matched_pages),
+                    candidate_count=candidate_count,
+                    args=args,
+                )
 
     page_match_count = sum(len(pages) for pages in anchor_page_weights.values())
     metadata: dict[str, object] = {
@@ -2352,18 +2414,26 @@ def build_query_anchor_evidence_policy(
         "query_anchor_scope": str(args.query_anchor_scope),
         "query_anchor_active_anchor_count": len(anchors),
         "query_anchor_matched_anchor_count": len(anchor_page_weights),
+        "query_anchor_dropped_broad_anchor_count": dropped_broad_anchor_count,
         "query_anchor_page_match_count": page_match_count,
         "query_anchor_doc_support_count": len(doc_anchor_weights),
         "query_anchor_doc_top_k": int(args.query_anchor_doc_top_k),
         "query_anchor_min_doc_support": float(args.query_anchor_min_doc_support),
         "query_anchor_edge_weight": float(args.query_anchor_edge_weight),
         "query_anchor_restart_weight": float(args.query_anchor_restart_weight),
+        "query_anchor_weight_mode": str(args.query_anchor_weight_mode),
+        "query_anchor_min_node_weight": float(args.query_anchor_min_node_weight),
+        "query_anchor_max_page_matches": int(args.query_anchor_max_page_matches),
+        "mean_query_anchor_node_weight": (
+            statistics.fmean(anchor_node_weights.values()) if anchor_node_weights else None
+        ),
         "query_anchor_page_text_available": bool(page_texts),
         "query_anchor_text_fields": list(args.query_anchor_text_field),
         "query_anchor_labels": [anchor_labels[node_id] for node_id in sorted(anchor_labels)],
     }
     return QueryAnchorEvidencePolicy(
         anchor_page_weights=anchor_page_weights,
+        anchor_node_weights=anchor_node_weights,
         anchor_labels=anchor_labels,
         metadata=metadata,
     )
@@ -2386,8 +2456,9 @@ def add_query_anchor_evidence_edges(
         if not pages:
             continue
         seeded_node_count += 1
+        node_weight = policy.anchor_node_weights.get(anchor_node, 1.0)
         for uid, page_weight in pages.items():
-            edge_weight = float(args.query_anchor_edge_weight) * float(page_weight)
+            edge_weight = float(args.query_anchor_edge_weight) * node_weight * float(page_weight)
             if edge_weight > 0:
                 add_directed_edge(graph, anchor_node, uid, edge_weight)
                 edge_count += 1
@@ -2412,7 +2483,8 @@ def add_query_anchor_evidence_restart(
     for anchor_node, pages in policy.anchor_page_weights.items():
         if not pages:
             continue
-        seed[anchor_node] = seed.get(anchor_node, 0.0) + restart_weight
+        node_weight = policy.anchor_node_weights.get(anchor_node, 1.0)
+        seed[anchor_node] = seed.get(anchor_node, 0.0) + restart_weight * node_weight
         added += 1
     return added
 
@@ -3174,6 +3246,9 @@ def main() -> None:
                 "query_anchor_restart_weight": float(args.query_anchor_restart_weight),
                 "query_anchor_max_anchors": int(args.query_anchor_max_anchors),
                 "query_anchor_min_entity_len": int(args.query_anchor_min_entity_len),
+                "query_anchor_weight_mode": args.query_anchor_weight_mode,
+                "query_anchor_min_node_weight": float(args.query_anchor_min_node_weight),
+                "query_anchor_max_page_matches": int(args.query_anchor_max_page_matches),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -3304,6 +3379,9 @@ def main() -> None:
         "query_anchor_restart_weight": float(args.query_anchor_restart_weight),
         "query_anchor_max_anchors": int(args.query_anchor_max_anchors),
         "query_anchor_min_entity_len": int(args.query_anchor_min_entity_len),
+        "query_anchor_weight_mode": args.query_anchor_weight_mode,
+        "query_anchor_min_node_weight": float(args.query_anchor_min_node_weight),
+        "query_anchor_max_page_matches": int(args.query_anchor_max_page_matches),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -3663,6 +3741,23 @@ def main() -> None:
         "mean_query_anchor_edge_count_directed": (
             statistics.fmean(
                 float(row["graph"].get("query_anchor_edge_count_directed", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_anchor_node_weight": (
+            statistics.fmean(
+                float(row["graph"].get("mean_query_anchor_node_weight", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_query_anchor_node_weight") is not None
+            )
+            if any(row["graph"].get("mean_query_anchor_node_weight") is not None for row in per_qid)
+            else None
+        ),
+        "mean_query_anchor_dropped_broad_anchor_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_dropped_broad_anchor_count", 0.0))
                 for row in per_qid
             )
             if per_qid
