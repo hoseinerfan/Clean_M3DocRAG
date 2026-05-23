@@ -493,6 +493,7 @@ def main() -> None:
         "by_type": {key: group_summary(group) for key, group in by_type.items()},
         "overall": group_summary(rows),
         "top_recovered": top_cases("recovered", int(args.topn)),
+        "top_lost": top_cases("lost", int(args.topn)),
         "top_improved_rank": top_cases("improved_rank", int(args.topn)),
         "top_worsened_rank": top_cases("worsened_rank", int(args.topn)),
         "top_missing_in_both": top_cases("missing_in_both", int(args.topn)),
@@ -588,6 +589,7 @@ def main() -> None:
             )
 
     add_case_section("Recovered", payload["top_recovered"])
+    add_case_section("Lost", payload["top_lost"])
     add_case_section("Top Improved Rank", payload["top_improved_rank"])
     add_case_section("Top Worsened Rank", payload["top_worsened_rank"])
     add_case_section("Top Missing In Both", payload["top_missing_in_both"])
