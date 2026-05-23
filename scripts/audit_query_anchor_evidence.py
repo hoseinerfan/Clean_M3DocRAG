@@ -240,6 +240,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--text-field", nargs="*", default=DEFAULT_TEXT_FIELDS)
     parser.add_argument("--hit-k", type=int, default=4)
     parser.add_argument("--topn", type=int, default=20)
+    parser.add_argument(
+        "--filter-field",
+        default="",
+        help="Optional dotted gold-row field to audit a subset, e.g. metadata.domain.",
+    )
+    parser.add_argument(
+        "--filter-value",
+        action="append",
+        default=[],
+        help="Allowed exact value for --filter-field. Repeat to allow multiple values.",
+    )
     parser.add_argument("--output-md", default="")
     parser.add_argument("--output-json", default="")
     return parser.parse_args()
@@ -261,6 +272,10 @@ def main() -> None:
     rows = []
     for qid in sorted(set(baseline) & set(candidate) & set(gold_by_qid)):
         gold_row = gold_by_qid[qid]
+        if args.filter_field:
+            field_value = metadata_value(gold_row, args.filter_field)
+            if args.filter_value and field_value not in set(args.filter_value):
+                continue
         gold_pages = gold_page_uids(gold_row)
         base_rank = first_rank(ranked_pages(baseline[qid]), gold_pages)
         cand_rank = first_rank(ranked_pages(candidate[qid]), gold_pages)
@@ -345,6 +360,10 @@ def main() -> None:
         "top_worsened_rank": top_cases("worsened_rank"),
         "page_text_available": bool(page_texts),
         "page_text_count": len(page_texts),
+        "filter": {
+            "field": args.filter_field,
+            "values": list(args.filter_value),
+        },
     }
 
     if args.output_json:
@@ -357,6 +376,8 @@ def main() -> None:
         f"- hit_k: `{int(args.hit_k)}`",
         f"- page_text_available: `{bool(page_texts)}`",
         f"- page_text_count: `{len(page_texts)}`",
+        f"- filter_field: `{args.filter_field or ''}`",
+        f"- filter_value: `{', '.join(args.filter_value) if args.filter_value else ''}`",
         "",
         "## Movement",
         "",
@@ -466,6 +487,28 @@ def main() -> None:
         )
     lines.extend(["", "## Top Lost", ""])
     for row in payload["top_lost"]:
+        lines.extend(
+            [
+                f"- `{row['qid']}` base={row['baseline_rank']} cand={row['candidate_rank']} "
+                f"type=`{row['metadata.type']}` domain=`{row['metadata.domain']}`",
+                f"  - question: {row['question']}",
+                f"  - anchors: {row['anchor_labels'][:12]}",
+                f"  - gold_anchor_match: {row['gold_anchor_match']} {row['matched_gold_anchors'][:12]}",
+            ]
+        )
+    lines.extend(["", "## Top Improved Rank", ""])
+    for row in payload["top_improved_rank"]:
+        lines.extend(
+            [
+                f"- `{row['qid']}` base={row['baseline_rank']} cand={row['candidate_rank']} "
+                f"type=`{row['metadata.type']}` domain=`{row['metadata.domain']}`",
+                f"  - question: {row['question']}",
+                f"  - anchors: {row['anchor_labels'][:12]}",
+                f"  - gold_anchor_match: {row['gold_anchor_match']} {row['matched_gold_anchors'][:12]}",
+            ]
+        )
+    lines.extend(["", "## Top Worsened Rank", ""])
+    for row in payload["top_worsened_rank"]:
         lines.extend(
             [
                 f"- `{row['qid']}` base={row['baseline_rank']} cand={row['candidate_rank']} "
