@@ -316,6 +316,27 @@ def main() -> None:
                 "anchor_labels": anchor_labels,
                 "gold_anchor_match": gold_anchor_match,
                 "matched_gold_anchors": matched_gold_anchors,
+                "financial_reasoning_active": bool(
+                    graph.get("query_anchor_financial_reasoning_active", False)
+                ),
+                "financial_reasoning_reason": str(
+                    graph.get("query_anchor_financial_reasoning_reason", "")
+                ),
+                "financial_metric_anchor_count": int(
+                    graph.get("query_anchor_financial_metric_anchor_count", 0) or 0
+                ),
+                "financial_year_anchor_count": int(
+                    graph.get("query_anchor_financial_year_anchor_count", 0) or 0
+                ),
+                "financial_entity_anchor_count": int(
+                    graph.get("query_anchor_financial_entity_anchor_count", 0) or 0
+                ),
+                "financial_bundle_page_match_count": int(
+                    graph.get("query_anchor_financial_bundle_page_match_count", 0) or 0
+                ),
+                "financial_bundle_label": str(
+                    graph.get("query_anchor_financial_bundle_label", "")
+                ),
             }
         )
 
@@ -333,6 +354,7 @@ def main() -> None:
         type_groups[row["metadata.type"]].append(row)
     by_domain = {key: summarize_group(group) for key, group in domain_groups.items()}
     by_type = {key: summarize_group(group) for key, group in type_groups.items()}
+    financial_reason_counts = Counter(row["financial_reasoning_reason"] for row in rows)
 
     def top_cases(name: str) -> list[dict[str, Any]]:
         selected = [row for row in rows if row["movement"] == name]
@@ -360,6 +382,15 @@ def main() -> None:
         "top_worsened_rank": top_cases("worsened_rank"),
         "page_text_available": bool(page_texts),
         "page_text_count": len(page_texts),
+        "financial_reasoning_active_count": sum(
+            1 for row in rows if row["financial_reasoning_active"]
+        ),
+        "financial_reasoning_reason_counts": dict(financial_reason_counts),
+        "mean_financial_bundle_page_match_count": (
+            statistics.fmean(row["financial_bundle_page_match_count"] for row in rows)
+            if rows
+            else 0.0
+        ),
         "filter": {
             "field": args.filter_field,
             "values": list(args.filter_value),
@@ -384,6 +415,27 @@ def main() -> None:
         markdown_table(
             ["movement", "count"],
             [[key, movement_counts.get(key, 0)] for key in sorted(movement_counts)],
+        ),
+        "",
+        "## Financial Reasoning",
+        "",
+        markdown_table(
+            ["metric", "value"],
+            [
+                ["active_count", payload["financial_reasoning_active_count"]],
+                [
+                    "mean_bundle_page_matches",
+                    f"{payload['mean_financial_bundle_page_match_count']:.1f}",
+                ],
+            ],
+        ),
+        "",
+        markdown_table(
+            ["reason", "count"],
+            [
+                [key or "missing", value]
+                for key, value in sorted(payload["financial_reasoning_reason_counts"].items())
+            ],
         ),
         "",
         "## Active vs Inactive",
@@ -483,6 +535,10 @@ def main() -> None:
                 f"  - question: {row['question']}",
                 f"  - anchors: {row['anchor_labels'][:12]}",
                 f"  - gold_anchor_match: {row['gold_anchor_match']} {row['matched_gold_anchors'][:12]}",
+                f"  - financial_reasoning: active={row['financial_reasoning_active']} "
+                f"reason={row['financial_reasoning_reason']} "
+                f"matches={row['financial_bundle_page_match_count']} "
+                f"bundle={row['financial_bundle_label']}",
             ]
         )
     lines.extend(["", "## Top Lost", ""])
@@ -494,6 +550,10 @@ def main() -> None:
                 f"  - question: {row['question']}",
                 f"  - anchors: {row['anchor_labels'][:12]}",
                 f"  - gold_anchor_match: {row['gold_anchor_match']} {row['matched_gold_anchors'][:12]}",
+                f"  - financial_reasoning: active={row['financial_reasoning_active']} "
+                f"reason={row['financial_reasoning_reason']} "
+                f"matches={row['financial_bundle_page_match_count']} "
+                f"bundle={row['financial_bundle_label']}",
             ]
         )
     lines.extend(["", "## Top Improved Rank", ""])
@@ -505,6 +565,10 @@ def main() -> None:
                 f"  - question: {row['question']}",
                 f"  - anchors: {row['anchor_labels'][:12]}",
                 f"  - gold_anchor_match: {row['gold_anchor_match']} {row['matched_gold_anchors'][:12]}",
+                f"  - financial_reasoning: active={row['financial_reasoning_active']} "
+                f"reason={row['financial_reasoning_reason']} "
+                f"matches={row['financial_bundle_page_match_count']} "
+                f"bundle={row['financial_bundle_label']}",
             ]
         )
     lines.extend(["", "## Top Worsened Rank", ""])
@@ -516,6 +580,10 @@ def main() -> None:
                 f"  - question: {row['question']}",
                 f"  - anchors: {row['anchor_labels'][:12]}",
                 f"  - gold_anchor_match: {row['gold_anchor_match']} {row['matched_gold_anchors'][:12]}",
+                f"  - financial_reasoning: active={row['financial_reasoning_active']} "
+                f"reason={row['financial_reasoning_reason']} "
+                f"matches={row['financial_bundle_page_match_count']} "
+                f"bundle={row['financial_bundle_label']}",
             ]
         )
 
