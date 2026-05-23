@@ -20,6 +20,18 @@ PAGE_REFERENCE_RANGE_RE = (
 PAGE_REFERENCE_SINGLE_RE = (
     rf"\b{PAGE_REFERENCE_TOKEN_RE}\s*(?:no\.?|number|#)?\s*(\d{{1,4}})\b"
 )
+DOCUMENT_COVER_TARGET_RE = (
+    r"(?:document|report|paper|article|brochure|guidebook|manual|book|chapter|"
+    r"newspaper|presentation|slides?|deck)"
+)
+FIRST_COVER_REFERENCE_RE = (
+    r"\b(?:first|opening)\s+page\b"
+    r"|\bfront\s+(?:page|cover)\b"
+    r"|\btitle\s+page\b"
+    r"|\bcover\s+page\b"
+    rf"|\b{DOCUMENT_COVER_TARGET_RE}(?:'s)?\s+cover\b"
+    rf"|\bcover\s+of\s+(?:the\s+|this\s+|that\s+|each\s+|a\s+|an\s+)?{DOCUMENT_COVER_TARGET_RE}\b"
+)
 
 
 @dataclass
@@ -266,7 +278,7 @@ def detect_structural_intents(question: str) -> tuple[dict[str, float], list[int
 
     if re.search(r"\b(how\s+many\s+pages|number\s+of\s+pages|page\s+count|total\s+pages)\b", query):
         add_intent(intents, "page_count", 1.0)
-    if re.search(r"\b(first|opening)\s+page\b|\bfront\s+page\b|\btitle\s+page\b|\bcover\b", query):
+    if re.search(FIRST_COVER_REFERENCE_RE, query):
         add_intent(intents, "first_cover", 0.9)
     if re.search(
         r"\b(last|final|ending|back)\s+page\b|\bend\s+of\s+(the\s+)?(document|report|paper)\b",

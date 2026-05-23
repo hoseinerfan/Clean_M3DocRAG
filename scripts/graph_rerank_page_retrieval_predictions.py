@@ -20,6 +20,18 @@ PAGE_REFERENCE_RANGE_RE = (
 PAGE_REFERENCE_SINGLE_RE = (
     rf"\b{PAGE_REFERENCE_TOKEN_RE}\s*(?:no\.?|number|#)?\s*(\d{{1,4}})\b"
 )
+DOCUMENT_COVER_TARGET_RE = (
+    r"(?:document|report|paper|article|brochure|guidebook|manual|book|chapter|"
+    r"newspaper|presentation|slides?|deck)"
+)
+FIRST_COVER_REFERENCE_RE = (
+    r"\b(?:first|opening)\s+page\b"
+    r"|\bfront\s+(?:page|cover)\b"
+    r"|\btitle\s+page\b"
+    r"|\bcover\s+page\b"
+    rf"|\b{DOCUMENT_COVER_TARGET_RE}(?:'s)?\s+cover\b"
+    rf"|\bcover\s+of\s+(?:the\s+|this\s+|that\s+|each\s+|a\s+|an\s+)?{DOCUMENT_COVER_TARGET_RE}\b"
+)
 
 
 @dataclass
@@ -415,7 +427,7 @@ def parse_args() -> argparse.Namespace:
         default="none",
         help=(
             "Add query-gated structural position evidence nodes. In query_gated mode, "
-            "lexical cues such as first page, last page, cover, references, or page/slide 17 "
+            "lexical cues such as first page, last page, cover page, references, or page/slide 17 "
             "seed role nodes that connect to candidate pages with matching document positions."
         ),
     )
@@ -1818,7 +1830,7 @@ def extract_position_roles_from_question(question: str) -> tuple[dict[str, float
     query = str(question or "").lower()
     role_weights: dict[str, float] = {}
 
-    if re.search(r"\b(first|opening)\s+page\b|\bfront\s+page\b|\btitle\s+page\b|\bcover\b", query):
+    if re.search(FIRST_COVER_REFERENCE_RE, query):
         add_query_role(role_weights, "first", 1.0)
         add_query_role(role_weights, "early", 0.5)
     if re.search(r"\btable\s+of\s+contents\b|\bcontents?\s+page\b", query):
