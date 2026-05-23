@@ -73,6 +73,12 @@ class TransitionPolicy:
     metadata: dict[str, object]
 
 
+@dataclass
+class AdjacentCoherencePolicy:
+    page_reliabilities: dict[str, float]
+    metadata: dict[str, object]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -311,6 +317,27 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Apply transition gating to directed doc->page edges. Default: true.",
+    )
+    parser.add_argument(
+        "--adaptive-adjacent-mode",
+        choices=["none", "reciprocal_coherence"],
+        default="none",
+        help=(
+            "Optional query-adaptive same-doc page-page edge gating. "
+            "'reciprocal_coherence' gates adjacent-page edges by per-page "
+            "dense/SPLADE reciprocal support."
+        ),
+    )
+    parser.add_argument("--adaptive-adjacent-min-mult", type=float, default=0.0)
+    parser.add_argument("--adaptive-adjacent-max-mult", type=float, default=1.0)
+    parser.add_argument(
+        "--adaptive-adjacent-power",
+        type=float,
+        default=0.5,
+        help=(
+            "Power for combining endpoint page reliabilities. Default 0.5 gives "
+            "sqrt(left_reliability * right_reliability)."
+        ),
     )
     parser.add_argument(
         "--splade-index-pt",
@@ -1428,6 +1455,62 @@ def build_transition_policy(
     return TransitionPolicy(multipliers, global_multiplier, metadata)
 
 
+def build_adjacent_coherence_policy(
+    *,
+    records: dict[str, PageRecord],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    args: argparse.Namespace,
+) -> AdjacentCoherencePolicy:
+    mode = str(args.adaptive_adjacent_mode)
+    page_reliabilities = {uid: 1.0 for uid in records}
+    metadata: dict[str, object] = {
+        "adaptive_adjacent_mode": mode,
+        "adaptive_adjacent_min_mult": float(args.adaptive_adjacent_min_mult),
+        "adaptive_adjacent_max_mult": float(args.adaptive_adjacent_max_mult),
+        "adaptive_adjacent_power": float(args.adaptive_adjacent_power),
+        "mean_adaptive_adjacent_page_reliability": 1.0 if records else None,
+    }
+    if mode == "none":
+        return AdjacentCoherencePolicy(page_reliabilities=page_reliabilities, metadata=metadata)
+
+    reliabilities = {
+        uid: record_reciprocal_transition_reliability(
+            record=record,
+            dense_doc_ranks=dense_doc_ranks,
+            sparse_doc_ranks=sparse_doc_ranks,
+            args=args,
+        )
+        for uid, record in records.items()
+    }
+    metadata["mean_adaptive_adjacent_page_reliability"] = (
+        statistics.fmean(reliabilities.values()) if reliabilities else None
+    )
+    return AdjacentCoherencePolicy(page_reliabilities=reliabilities, metadata=metadata)
+
+
+def adjacent_edge_multiplier(
+    *,
+    left_uid: str,
+    right_uid: str,
+    policy: AdjacentCoherencePolicy,
+    args: argparse.Namespace,
+) -> float:
+    if str(args.adaptive_adjacent_mode) == "none":
+        return 1.0
+    left_reliability = clamp(policy.page_reliabilities.get(left_uid, 0.0), 0.0, 1.0)
+    right_reliability = clamp(policy.page_reliabilities.get(right_uid, 0.0), 0.0, 1.0)
+    power = max(0.0, float(args.adaptive_adjacent_power))
+    coherence = clamp((left_reliability * right_reliability) ** power, 0.0, 1.0)
+    return clamp(
+        float(args.adaptive_adjacent_min_mult)
+        + (float(args.adaptive_adjacent_max_mult) - float(args.adaptive_adjacent_min_mult))
+        * coherence,
+        float(args.adaptive_adjacent_min_mult),
+        float(args.adaptive_adjacent_max_mult),
+    )
+
+
 def add_undirected_edge(
     graph: dict[str, dict[str, float]],
     left: str,
@@ -1697,6 +1780,12 @@ def build_qid_graph_ranking(
         sparse_doc_ranks=sparse_doc_ranks,
         args=args,
     )
+    adjacent_policy = build_adjacent_coherence_policy(
+        records=records,
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        args=args,
+    )
 
     graph: dict[str, dict[str, float]] = defaultdict(dict)
     base_page_to_doc_weight = effective_page_to_doc_edge_weight(args)
@@ -1720,6 +1809,7 @@ def build_qid_graph_ranking(
     for record in records.values():
         pages_by_doc[record.doc_id].append(record)
     same_doc_window = int(args.same_doc_window)
+    adjacent_edge_multipliers: list[float] = []
     if same_doc_window > 0 and float(args.adjacent_page_edge_weight) > 0:
         for doc_records in pages_by_doc.values():
             doc_records.sort(key=lambda item: item.page_idx)
@@ -1733,6 +1823,14 @@ def build_qid_graph_ranking(
                             transition_policy.page_doc_multipliers.get(left.page_uid, 1.0)
                             + transition_policy.page_doc_multipliers.get(right.page_uid, 1.0)
                         ) / 2.0
+                    adaptive_adjacent_multiplier = adjacent_edge_multiplier(
+                        left_uid=left.page_uid,
+                        right_uid=right.page_uid,
+                        policy=adjacent_policy,
+                        args=args,
+                    )
+                    adjacent_weight *= adaptive_adjacent_multiplier
+                    adjacent_edge_multipliers.append(adaptive_adjacent_multiplier)
                     add_undirected_edge(
                         graph,
                         left.page_uid,
@@ -1845,6 +1943,11 @@ def build_qid_graph_ranking(
         **source_weights.metadata,
         **restart_vector.metadata,
         **transition_policy.metadata,
+        **adjacent_policy.metadata,
+        "adaptive_adjacent_edge_count": len(adjacent_edge_multipliers),
+        "mean_adaptive_adjacent_edge_multiplier": (
+            statistics.fmean(adjacent_edge_multipliers) if adjacent_edge_multipliers else None
+        ),
     }
     if gold_row is not None:
         doc_gold = gold_doc_ids(gold_row)
@@ -2038,6 +2141,10 @@ def main() -> None:
                 "adaptive_transition_gate_doc_to_page": bool(
                     args.adaptive_transition_gate_doc_to_page
                 ),
+                "adaptive_adjacent_mode": args.adaptive_adjacent_mode,
+                "adaptive_adjacent_min_mult": float(args.adaptive_adjacent_min_mult),
+                "adaptive_adjacent_max_mult": float(args.adaptive_adjacent_max_mult),
+                "adaptive_adjacent_power": float(args.adaptive_adjacent_power),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -2124,6 +2231,10 @@ def main() -> None:
         "adaptive_transition_gate_page_doc": bool(args.adaptive_transition_gate_page_doc),
         "adaptive_transition_gate_page_to_doc": bool(args.adaptive_transition_gate_page_to_doc),
         "adaptive_transition_gate_doc_to_page": bool(args.adaptive_transition_gate_doc_to_page),
+        "adaptive_adjacent_mode": args.adaptive_adjacent_mode,
+        "adaptive_adjacent_min_mult": float(args.adaptive_adjacent_min_mult),
+        "adaptive_adjacent_max_mult": float(args.adaptive_adjacent_max_mult),
+        "adaptive_adjacent_power": float(args.adaptive_adjacent_power),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -2317,6 +2428,38 @@ def main() -> None:
         "mean_adaptive_transition_page_doc_multiplier": (
             statistics.fmean(
                 float(row["graph"].get("mean_adaptive_transition_page_doc_multiplier", 1.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_adjacent_page_reliability": (
+            statistics.fmean(
+                float(row["graph"].get("mean_adaptive_adjacent_page_reliability", 1.0))
+                for row in per_qid
+                if row["graph"].get("mean_adaptive_adjacent_page_reliability") is not None
+            )
+            if any(
+                row["graph"].get("mean_adaptive_adjacent_page_reliability") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_adaptive_adjacent_edge_multiplier": (
+            statistics.fmean(
+                float(row["graph"].get("mean_adaptive_adjacent_edge_multiplier", 1.0))
+                for row in per_qid
+                if row["graph"].get("mean_adaptive_adjacent_edge_multiplier") is not None
+            )
+            if any(
+                row["graph"].get("mean_adaptive_adjacent_edge_multiplier") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_adaptive_adjacent_edge_count": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_adjacent_edge_count", 0.0))
                 for row in per_qid
             )
             if per_qid
