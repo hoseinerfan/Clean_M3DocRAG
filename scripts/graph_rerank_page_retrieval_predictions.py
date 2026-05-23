@@ -79,6 +79,13 @@ class AdjacentCoherencePolicy:
     metadata: dict[str, object]
 
 
+@dataclass
+class EvidenceCommunityPolicy:
+    page_source_support: dict[str, float]
+    page_local_support: dict[str, float]
+    metadata: dict[str, object]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -338,6 +345,37 @@ def parse_args() -> argparse.Namespace:
             "Power for combining endpoint page reliabilities. Default 0.5 gives "
             "sqrt(left_reliability * right_reliability)."
         ),
+    )
+    parser.add_argument(
+        "--evidence-community-mode",
+        choices=["none", "source", "local", "source_local"],
+        default="none",
+        help=(
+            "Add query-specific intra-document evidence community nodes. 'source' links "
+            "pages to per-doc source-support communities, 'local' links pages to per-doc "
+            "local-neighborhood communities, and 'source_local' enables both."
+        ),
+    )
+    parser.add_argument("--evidence-community-source-edge-weight", type=float, default=0.25)
+    parser.add_argument("--evidence-community-local-edge-weight", type=float, default=0.25)
+    parser.add_argument("--evidence-community-min-page-support", type=float, default=0.05)
+    parser.add_argument(
+        "--evidence-community-local-window",
+        type=int,
+        default=2,
+        help="Same-document page window used to estimate local community support.",
+    )
+    parser.add_argument(
+        "--evidence-community-both-source-bonus",
+        type=float,
+        default=0.10,
+        help="Raw support bonus for pages present in both dense and sparse sources.",
+    )
+    parser.add_argument(
+        "--evidence-community-support-power",
+        type=float,
+        default=1.0,
+        help="Exponent applied to normalized page support before adding community edges.",
     )
     parser.add_argument(
         "--splade-index-pt",
@@ -1511,6 +1549,123 @@ def adjacent_edge_multiplier(
     )
 
 
+def build_evidence_community_policy(
+    *,
+    records: dict[str, PageRecord],
+    pages_by_doc: dict[str, list[PageRecord]],
+    source_weights: SourceWeights,
+    args: argparse.Namespace,
+) -> EvidenceCommunityPolicy:
+    mode = str(args.evidence_community_mode)
+    raw_source_support: dict[str, float] = {}
+    for uid, record in records.items():
+        dense_component = source_weights.dense_weight * reciprocal_rank_value(
+            record.dense_rank,
+            float(args.rrf_k),
+        )
+        sparse_component = source_weights.sparse_weight * reciprocal_rank_value(
+            record.sparse_rank,
+            float(args.rrf_k),
+        )
+        both_bonus = (
+            float(args.evidence_community_both_source_bonus)
+            if record.dense_rank is not None and record.sparse_rank is not None
+            else 0.0
+        )
+        raw_source_support[uid] = dense_component + sparse_component + both_bonus
+
+    page_source_support = max_scale(raw_source_support)
+    raw_local_support: dict[str, float] = {uid: 0.0 for uid in records}
+    local_window = max(0, int(args.evidence_community_local_window))
+    if local_window > 0:
+        for doc_records in pages_by_doc.values():
+            by_page_idx = {int(record.page_idx): record for record in doc_records}
+            for record in doc_records:
+                support = 0.0
+                for delta in range(1, local_window + 1):
+                    for neighbor_idx in (int(record.page_idx) - delta, int(record.page_idx) + delta):
+                        neighbor = by_page_idx.get(neighbor_idx)
+                        if neighbor is None:
+                            continue
+                        support += raw_source_support.get(neighbor.page_uid, 0.0) / float(delta + 1)
+                raw_local_support[record.page_uid] = support
+    page_local_support = max_scale(raw_local_support)
+    metadata: dict[str, object] = {
+        "evidence_community_mode": mode,
+        "evidence_community_source_edge_weight": float(args.evidence_community_source_edge_weight),
+        "evidence_community_local_edge_weight": float(args.evidence_community_local_edge_weight),
+        "evidence_community_min_page_support": float(args.evidence_community_min_page_support),
+        "evidence_community_local_window": int(args.evidence_community_local_window),
+        "evidence_community_both_source_bonus": float(args.evidence_community_both_source_bonus),
+        "evidence_community_support_power": float(args.evidence_community_support_power),
+        "mean_evidence_community_source_support": (
+            statistics.fmean(page_source_support.values()) if page_source_support else None
+        ),
+        "mean_evidence_community_local_support": (
+            statistics.fmean(page_local_support.values()) if page_local_support else None
+        ),
+    }
+    return EvidenceCommunityPolicy(
+        page_source_support=page_source_support,
+        page_local_support=page_local_support,
+        metadata=metadata,
+    )
+
+
+def add_evidence_community_edges(
+    *,
+    graph: dict[str, dict[str, float]],
+    records: dict[str, PageRecord],
+    policy: EvidenceCommunityPolicy,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    mode = str(args.evidence_community_mode)
+    if mode == "none":
+        return {
+            "evidence_community_node_count": 0,
+            "evidence_community_edge_count_directed": 0,
+            "evidence_community_source_edge_count_directed": 0,
+            "evidence_community_local_edge_count_directed": 0,
+        }
+
+    enabled_source = mode in {"source", "source_local"}
+    enabled_local = mode in {"local", "source_local"}
+    min_support = clamp(float(args.evidence_community_min_page_support), 0.0, 1.0)
+    support_power = max(0.0, float(args.evidence_community_support_power))
+    community_nodes: set[str] = set()
+    source_edge_count = 0
+    local_edge_count = 0
+
+    for uid, record in records.items():
+        if enabled_source:
+            support = policy.page_source_support.get(uid, 0.0)
+            if support >= min_support:
+                weighted_support = support**support_power if support_power != 1.0 else support
+                node = f"community::source::{record.doc_id}"
+                community_nodes.add(node)
+                edge_weight = float(args.evidence_community_source_edge_weight) * weighted_support
+                if edge_weight > 0:
+                    add_undirected_edge(graph, uid, node, edge_weight)
+                    source_edge_count += 2
+        if enabled_local:
+            support = policy.page_local_support.get(uid, 0.0)
+            if support >= min_support:
+                weighted_support = support**support_power if support_power != 1.0 else support
+                node = f"community::local::{record.doc_id}"
+                community_nodes.add(node)
+                edge_weight = float(args.evidence_community_local_edge_weight) * weighted_support
+                if edge_weight > 0:
+                    add_undirected_edge(graph, uid, node, edge_weight)
+                    local_edge_count += 2
+
+    return {
+        "evidence_community_node_count": len(community_nodes),
+        "evidence_community_edge_count_directed": source_edge_count + local_edge_count,
+        "evidence_community_source_edge_count_directed": source_edge_count,
+        "evidence_community_local_edge_count_directed": local_edge_count,
+    }
+
+
 def add_undirected_edge(
     graph: dict[str, dict[str, float]],
     left: str,
@@ -1786,6 +1941,15 @@ def build_qid_graph_ranking(
         sparse_doc_ranks=sparse_doc_ranks,
         args=args,
     )
+    pages_by_doc: dict[str, list[PageRecord]] = defaultdict(list)
+    for record in records.values():
+        pages_by_doc[record.doc_id].append(record)
+    evidence_policy = build_evidence_community_policy(
+        records=records,
+        pages_by_doc=pages_by_doc,
+        source_weights=source_weights,
+        args=args,
+    )
 
     graph: dict[str, dict[str, float]] = defaultdict(dict)
     base_page_to_doc_weight = effective_page_to_doc_edge_weight(args)
@@ -1805,9 +1969,12 @@ def build_qid_graph_ranking(
         add_directed_edge(graph, uid, doc_node, page_to_doc_weight)
         add_directed_edge(graph, doc_node, uid, doc_to_page_weight)
 
-    pages_by_doc: dict[str, list[PageRecord]] = defaultdict(list)
-    for record in records.values():
-        pages_by_doc[record.doc_id].append(record)
+    evidence_community_metadata = add_evidence_community_edges(
+        graph=graph,
+        records=records,
+        policy=evidence_policy,
+        args=args,
+    )
     same_doc_window = int(args.same_doc_window)
     adjacent_edge_multipliers: list[float] = []
     if same_doc_window > 0 and float(args.adjacent_page_edge_weight) > 0:
@@ -1944,6 +2111,8 @@ def build_qid_graph_ranking(
         **restart_vector.metadata,
         **transition_policy.metadata,
         **adjacent_policy.metadata,
+        **evidence_policy.metadata,
+        **evidence_community_metadata,
         "adaptive_adjacent_edge_count": len(adjacent_edge_multipliers),
         "mean_adaptive_adjacent_edge_multiplier": (
             statistics.fmean(adjacent_edge_multipliers) if adjacent_edge_multipliers else None
@@ -2145,6 +2314,23 @@ def main() -> None:
                 "adaptive_adjacent_min_mult": float(args.adaptive_adjacent_min_mult),
                 "adaptive_adjacent_max_mult": float(args.adaptive_adjacent_max_mult),
                 "adaptive_adjacent_power": float(args.adaptive_adjacent_power),
+                "evidence_community_mode": args.evidence_community_mode,
+                "evidence_community_source_edge_weight": float(
+                    args.evidence_community_source_edge_weight
+                ),
+                "evidence_community_local_edge_weight": float(
+                    args.evidence_community_local_edge_weight
+                ),
+                "evidence_community_min_page_support": float(
+                    args.evidence_community_min_page_support
+                ),
+                "evidence_community_local_window": int(args.evidence_community_local_window),
+                "evidence_community_both_source_bonus": float(
+                    args.evidence_community_both_source_bonus
+                ),
+                "evidence_community_support_power": float(
+                    args.evidence_community_support_power
+                ),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -2235,6 +2421,13 @@ def main() -> None:
         "adaptive_adjacent_min_mult": float(args.adaptive_adjacent_min_mult),
         "adaptive_adjacent_max_mult": float(args.adaptive_adjacent_max_mult),
         "adaptive_adjacent_power": float(args.adaptive_adjacent_power),
+        "evidence_community_mode": args.evidence_community_mode,
+        "evidence_community_source_edge_weight": float(args.evidence_community_source_edge_weight),
+        "evidence_community_local_edge_weight": float(args.evidence_community_local_edge_weight),
+        "evidence_community_min_page_support": float(args.evidence_community_min_page_support),
+        "evidence_community_local_window": int(args.evidence_community_local_window),
+        "evidence_community_both_source_bonus": float(args.evidence_community_both_source_bonus),
+        "evidence_community_support_power": float(args.evidence_community_support_power),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -2460,6 +2653,46 @@ def main() -> None:
         "mean_adaptive_adjacent_edge_count": (
             statistics.fmean(
                 float(row["graph"].get("adaptive_adjacent_edge_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_evidence_community_source_support": (
+            statistics.fmean(
+                float(row["graph"].get("mean_evidence_community_source_support", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_evidence_community_source_support") is not None
+            )
+            if any(
+                row["graph"].get("mean_evidence_community_source_support") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_evidence_community_local_support": (
+            statistics.fmean(
+                float(row["graph"].get("mean_evidence_community_local_support", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_evidence_community_local_support") is not None
+            )
+            if any(
+                row["graph"].get("mean_evidence_community_local_support") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_evidence_community_node_count": (
+            statistics.fmean(
+                float(row["graph"].get("evidence_community_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_evidence_community_edge_count_directed": (
+            statistics.fmean(
+                float(row["graph"].get("evidence_community_edge_count_directed", 0.0))
                 for row in per_qid
             )
             if per_qid
