@@ -279,6 +279,18 @@ def parse_args() -> argparse.Namespace:
         help="Apply transition gating to page-doc edges. Default: true.",
     )
     parser.add_argument(
+        "--adaptive-transition-gate-page-to-doc",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply transition gating to directed page->doc edges. Default: true.",
+    )
+    parser.add_argument(
+        "--adaptive-transition-gate-doc-to-page",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply transition gating to directed doc->page edges. Default: true.",
+    )
+    parser.add_argument(
         "--splade-index-pt",
         default="",
         help=(
@@ -377,6 +389,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--restart-prob", type=float, default=0.20)
     parser.add_argument("--ppr-iters", type=int, default=30)
     parser.add_argument("--page-doc-edge-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--page-to-doc-edge-weight",
+        type=float,
+        default=None,
+        help=(
+            "Directed page->doc transition weight. Defaults to --page-doc-edge-weight "
+            "to preserve the original symmetric graph."
+        ),
+    )
+    parser.add_argument(
+        "--doc-to-page-edge-weight",
+        type=float,
+        default=None,
+        help=(
+            "Directed doc->page transition weight. Defaults to --page-doc-edge-weight "
+            "to preserve the original symmetric graph."
+        ),
+    )
     parser.add_argument("--adjacent-page-edge-weight", type=float, default=0.25)
     parser.add_argument(
         "--same-doc-window",
@@ -611,6 +641,20 @@ def clamp(value: float, low: float, high: float) -> float:
     if high < low:
         low, high = high, low
     return min(max(float(value), float(low)), float(high))
+
+
+def effective_page_to_doc_edge_weight(args: argparse.Namespace) -> float:
+    value = args.page_to_doc_edge_weight
+    if value is None:
+        return float(args.page_doc_edge_weight)
+    return float(value)
+
+
+def effective_doc_to_page_edge_weight(args: argparse.Namespace) -> float:
+    value = args.doc_to_page_edge_weight
+    if value is None:
+        return float(args.page_doc_edge_weight)
+    return float(value)
 
 
 def jaccard(left: set[str], right: set[str]) -> float:
@@ -1138,6 +1182,8 @@ def build_transition_policy(
         "adaptive_transition_mode": mode,
         "adaptive_transition_gate_adjacent": bool(args.adaptive_transition_gate_adjacent),
         "adaptive_transition_gate_page_doc": bool(args.adaptive_transition_gate_page_doc),
+        "adaptive_transition_gate_page_to_doc": bool(args.adaptive_transition_gate_page_to_doc),
+        "adaptive_transition_gate_doc_to_page": bool(args.adaptive_transition_gate_doc_to_page),
         "adaptive_transition_global_multiplier": 1.0,
         "mean_adaptive_transition_page_doc_multiplier": 1.0 if records else None,
     }
@@ -1213,8 +1259,21 @@ def add_undirected_edge(
 ) -> None:
     if weight <= 0 or left == right:
         return
-    graph[left][right] = graph[left].get(right, 0.0) + float(weight)
-    graph[right][left] = graph[right].get(left, 0.0) + float(weight)
+    add_directed_edge(graph, left, right, weight)
+    add_directed_edge(graph, right, left, weight)
+
+
+def add_directed_edge(
+    graph: dict[str, dict[str, float]],
+    source: str,
+    target: str,
+    weight: float,
+) -> None:
+    if weight <= 0 or source == target:
+        return
+    graph.setdefault(source, {})
+    graph.setdefault(target, {})
+    graph[source][target] = graph[source].get(target, 0.0) + float(weight)
 
 
 def normalize_nonnegative(values: dict[str, float]) -> dict[str, float]:
@@ -1463,14 +1522,22 @@ def build_qid_graph_ranking(
     )
 
     graph: dict[str, dict[str, float]] = defaultdict(dict)
+    base_page_to_doc_weight = effective_page_to_doc_edge_weight(args)
+    base_doc_to_page_weight = effective_doc_to_page_edge_weight(args)
     for uid, record in records.items():
         doc_node = f"doc::{record.doc_id}"
         graph.setdefault(uid, {})
         graph.setdefault(doc_node, {})
-        page_doc_weight = float(args.page_doc_edge_weight)
+        transition_multiplier = transition_policy.page_doc_multipliers.get(uid, 1.0)
+        page_to_doc_weight = base_page_to_doc_weight
+        doc_to_page_weight = base_doc_to_page_weight
         if bool(args.adaptive_transition_gate_page_doc):
-            page_doc_weight *= transition_policy.page_doc_multipliers.get(uid, 1.0)
-        add_undirected_edge(graph, uid, doc_node, page_doc_weight)
+            if bool(args.adaptive_transition_gate_page_to_doc):
+                page_to_doc_weight *= transition_multiplier
+            if bool(args.adaptive_transition_gate_doc_to_page):
+                doc_to_page_weight *= transition_multiplier
+        add_directed_edge(graph, uid, doc_node, page_to_doc_weight)
+        add_directed_edge(graph, doc_node, uid, doc_to_page_weight)
 
     pages_by_doc: dict[str, list[PageRecord]] = defaultdict(list)
     for record in records.values():
@@ -1587,7 +1654,16 @@ def build_qid_graph_ranking(
         "neighbor_candidate_page_count": len(neighbor_pages),
         "output_page_count": len(final_rows),
         "graph_node_count": len(graph),
+        "graph_edge_count_directed": sum(len(neighbors) for neighbors in graph.values()),
         "graph_edge_count_undirected": sum(len(neighbors) for neighbors in graph.values()) // 2,
+        "graph_has_asymmetric_page_doc_edges": (
+            abs(base_page_to_doc_weight - base_doc_to_page_weight) > 1e-12
+            or (
+                bool(args.adaptive_transition_gate_page_doc)
+                and bool(args.adaptive_transition_gate_page_to_doc)
+                != bool(args.adaptive_transition_gate_doc_to_page)
+            )
+        ),
         "top_graph_pages": trace_top,
         **source_weights.metadata,
         **restart_vector.metadata,
@@ -1776,6 +1852,12 @@ def main() -> None:
                 "adaptive_transition_local_weight": float(args.adaptive_transition_local_weight),
                 "adaptive_transition_gate_adjacent": bool(args.adaptive_transition_gate_adjacent),
                 "adaptive_transition_gate_page_doc": bool(args.adaptive_transition_gate_page_doc),
+                "adaptive_transition_gate_page_to_doc": bool(
+                    args.adaptive_transition_gate_page_to_doc
+                ),
+                "adaptive_transition_gate_doc_to_page": bool(
+                    args.adaptive_transition_gate_doc_to_page
+                ),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -1789,6 +1871,8 @@ def main() -> None:
                 "restart_prob": float(args.restart_prob),
                 "ppr_iters": int(args.ppr_iters),
                 "page_doc_edge_weight": float(args.page_doc_edge_weight),
+                "page_to_doc_edge_weight": effective_page_to_doc_edge_weight(args),
+                "doc_to_page_edge_weight": effective_doc_to_page_edge_weight(args),
                 "adjacent_page_edge_weight": float(args.adjacent_page_edge_weight),
                 "same_doc_window": int(args.same_doc_window),
                 "final_page_seed_weight": float(args.final_page_seed_weight),
@@ -1857,6 +1941,8 @@ def main() -> None:
         "adaptive_transition_local_weight": float(args.adaptive_transition_local_weight),
         "adaptive_transition_gate_adjacent": bool(args.adaptive_transition_gate_adjacent),
         "adaptive_transition_gate_page_doc": bool(args.adaptive_transition_gate_page_doc),
+        "adaptive_transition_gate_page_to_doc": bool(args.adaptive_transition_gate_page_to_doc),
+        "adaptive_transition_gate_doc_to_page": bool(args.adaptive_transition_gate_doc_to_page),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -1870,6 +1956,8 @@ def main() -> None:
         "restart_prob": float(args.restart_prob),
         "ppr_iters": int(args.ppr_iters),
         "page_doc_edge_weight": float(args.page_doc_edge_weight),
+        "page_to_doc_edge_weight": effective_page_to_doc_edge_weight(args),
+        "doc_to_page_edge_weight": effective_doc_to_page_edge_weight(args),
         "adjacent_page_edge_weight": float(args.adjacent_page_edge_weight),
         "same_doc_window": int(args.same_doc_window),
         "final_page_seed_weight": float(args.final_page_seed_weight),
