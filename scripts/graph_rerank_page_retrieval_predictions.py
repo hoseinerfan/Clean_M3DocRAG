@@ -52,6 +52,13 @@ class RestartVector:
     metadata: dict[str, object]
 
 
+@dataclass
+class TransitionPolicy:
+    page_doc_multipliers: dict[str, float]
+    global_multiplier: float
+    metadata: dict[str, object]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -235,6 +242,41 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Multiplier for inherited neighbor restart mass in adaptive restart mode.",
+    )
+    parser.add_argument(
+        "--adaptive-transition-mode",
+        choices=["none", "agreement", "reciprocal"],
+        default="none",
+        help=(
+            "Optional query-adaptive transition matrix. 'agreement' gates all graph edges "
+            "by dense/SPLADE agreement. 'reciprocal' also gates page-doc edges by local "
+            "rank-weighted reciprocal support."
+        ),
+    )
+    parser.add_argument("--adaptive-transition-agreement-min-mult", type=float, default=0.75)
+    parser.add_argument("--adaptive-transition-agreement-max-mult", type=float, default=1.0)
+    parser.add_argument("--adaptive-transition-local-min-mult", type=float, default=0.75)
+    parser.add_argument("--adaptive-transition-local-max-mult", type=float, default=1.0)
+    parser.add_argument(
+        "--adaptive-transition-local-weight",
+        type=float,
+        default=0.5,
+        help=(
+            "Blend weight for local reciprocal support in reciprocal transition mode. "
+            "0 uses only global agreement; 1 uses only local support."
+        ),
+    )
+    parser.add_argument(
+        "--adaptive-transition-gate-adjacent",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply transition gating to same-doc adjacent-page edges. Default: true.",
+    )
+    parser.add_argument(
+        "--adaptive-transition-gate-page-doc",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply transition gating to page-doc edges. Default: true.",
     )
     parser.add_argument(
         "--splade-index-pt",
@@ -628,6 +670,12 @@ def reciprocal_rank_support(
         clamp(page_support / total_source_importance, 0.0, 1.0),
         clamp(doc_support / total_source_importance, 0.0, 1.0),
     )
+
+
+def reciprocal_rank_value(rank: int | None, rrf_k: float) -> float:
+    if rank is None:
+        return 0.0
+    return clamp((float(rrf_k) + 1.0) / (float(rrf_k) + float(rank)), 0.0, 1.0)
 
 
 def compute_source_agreement(
@@ -1044,6 +1092,119 @@ def build_restart_vector(
     )
 
 
+def record_reciprocal_transition_reliability(
+    *,
+    record: PageRecord,
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    args: argparse.Namespace,
+) -> float:
+    doc_weight = max(0.0, float(args.adaptive_source_reciprocal_doc_weight))
+    page_weight = max(0.0, float(args.adaptive_source_reciprocal_page_weight))
+    denominator = doc_weight + page_weight
+    if denominator <= 0:
+        return 0.0
+
+    values: list[float] = []
+    if record.dense_rank is not None:
+        page_support = reciprocal_rank_value(record.sparse_rank, float(args.rrf_k))
+        doc_support = reciprocal_rank_value(sparse_doc_ranks.get(record.doc_id), float(args.rrf_k))
+        values.append((doc_weight * doc_support + page_weight * page_support) / denominator)
+    if record.sparse_rank is not None:
+        page_support = reciprocal_rank_value(record.dense_rank, float(args.rrf_k))
+        doc_support = reciprocal_rank_value(dense_doc_ranks.get(record.doc_id), float(args.rrf_k))
+        values.append((doc_weight * doc_support + page_weight * page_support) / denominator)
+    if record.expansion_rank is not None and not values:
+        values.append(0.5)
+    if record.neighbor_seed_score > 0 and not values:
+        values.append(0.5)
+    if not values:
+        return 0.0
+    return clamp(statistics.fmean(values), 0.0, 1.0)
+
+
+def build_transition_policy(
+    *,
+    records: dict[str, PageRecord],
+    agreement: SourceAgreement,
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    args: argparse.Namespace,
+) -> TransitionPolicy:
+    mode = str(args.adaptive_transition_mode)
+    global_multiplier = 1.0
+    page_doc_multipliers = {uid: 1.0 for uid in records}
+    metadata: dict[str, object] = {
+        "adaptive_transition_mode": mode,
+        "adaptive_transition_gate_adjacent": bool(args.adaptive_transition_gate_adjacent),
+        "adaptive_transition_gate_page_doc": bool(args.adaptive_transition_gate_page_doc),
+        "adaptive_transition_global_multiplier": 1.0,
+        "mean_adaptive_transition_page_doc_multiplier": 1.0 if records else None,
+    }
+    if mode == "none":
+        return TransitionPolicy(page_doc_multipliers, global_multiplier, metadata)
+
+    agreement_min = float(args.adaptive_transition_agreement_min_mult)
+    agreement_max = float(args.adaptive_transition_agreement_max_mult)
+    global_multiplier = clamp(
+        agreement_min + (agreement_max - agreement_min) * agreement.agreement_score,
+        agreement_min,
+        agreement_max,
+    )
+    if mode == "agreement":
+        page_doc_multipliers = {uid: global_multiplier for uid in records}
+        metadata.update(
+            {
+                "adaptive_transition_agreement_min_mult": agreement_min,
+                "adaptive_transition_agreement_max_mult": agreement_max,
+                "adaptive_transition_global_multiplier": global_multiplier,
+                "mean_adaptive_transition_page_doc_multiplier": global_multiplier if records else None,
+                "mean_adaptive_transition_local_reliability": None,
+            }
+        )
+        return TransitionPolicy(page_doc_multipliers, global_multiplier, metadata)
+
+    local_min = float(args.adaptive_transition_local_min_mult)
+    local_max = float(args.adaptive_transition_local_max_mult)
+    local_weight = clamp(float(args.adaptive_transition_local_weight), 0.0, 1.0)
+    local_reliabilities: dict[str, float] = {}
+    multipliers: dict[str, float] = {}
+    for uid, record in records.items():
+        local_reliability = record_reciprocal_transition_reliability(
+            record=record,
+            dense_doc_ranks=dense_doc_ranks,
+            sparse_doc_ranks=sparse_doc_ranks,
+            args=args,
+        )
+        local_reliabilities[uid] = local_reliability
+        local_multiplier = clamp(
+            local_min + (local_max - local_min) * local_reliability,
+            local_min,
+            local_max,
+        )
+        multipliers[uid] = (
+            (1.0 - local_weight) * global_multiplier
+            + local_weight * local_multiplier
+        )
+    metadata.update(
+        {
+            "adaptive_transition_agreement_min_mult": agreement_min,
+            "adaptive_transition_agreement_max_mult": agreement_max,
+            "adaptive_transition_local_min_mult": local_min,
+            "adaptive_transition_local_max_mult": local_max,
+            "adaptive_transition_local_weight": local_weight,
+            "adaptive_transition_global_multiplier": global_multiplier,
+            "mean_adaptive_transition_local_reliability": (
+                statistics.fmean(local_reliabilities.values()) if local_reliabilities else None
+            ),
+            "mean_adaptive_transition_page_doc_multiplier": (
+                statistics.fmean(multipliers.values()) if multipliers else None
+            ),
+        }
+    )
+    return TransitionPolicy(multipliers, global_multiplier, metadata)
+
+
 def add_undirected_edge(
     graph: dict[str, dict[str, float]],
     left: str,
@@ -1293,12 +1454,23 @@ def build_qid_graph_ranking(
             / (float(args.rrf_k) + float(rank))
         )
 
+    transition_policy = build_transition_policy(
+        records=records,
+        agreement=source_agreement,
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        args=args,
+    )
+
     graph: dict[str, dict[str, float]] = defaultdict(dict)
     for uid, record in records.items():
         doc_node = f"doc::{record.doc_id}"
         graph.setdefault(uid, {})
         graph.setdefault(doc_node, {})
-        add_undirected_edge(graph, uid, doc_node, float(args.page_doc_edge_weight))
+        page_doc_weight = float(args.page_doc_edge_weight)
+        if bool(args.adaptive_transition_gate_page_doc):
+            page_doc_weight *= transition_policy.page_doc_multipliers.get(uid, 1.0)
+        add_undirected_edge(graph, uid, doc_node, page_doc_weight)
 
     pages_by_doc: dict[str, list[PageRecord]] = defaultdict(list)
     for record in records.values():
@@ -1311,11 +1483,17 @@ def build_qid_graph_ranking(
                 for right in doc_records[left_idx + 1 :]:
                     if right.page_idx - left.page_idx > same_doc_window:
                         break
+                    adjacent_weight = float(args.adjacent_page_edge_weight)
+                    if bool(args.adaptive_transition_gate_adjacent):
+                        adjacent_weight *= (
+                            transition_policy.page_doc_multipliers.get(left.page_uid, 1.0)
+                            + transition_policy.page_doc_multipliers.get(right.page_uid, 1.0)
+                        ) / 2.0
                     add_undirected_edge(
                         graph,
                         left.page_uid,
                         right.page_uid,
-                        float(args.adjacent_page_edge_weight),
+                        adjacent_weight,
                     )
 
     restart_vector = build_restart_vector(
@@ -1413,6 +1591,7 @@ def build_qid_graph_ranking(
         "top_graph_pages": trace_top,
         **source_weights.metadata,
         **restart_vector.metadata,
+        **transition_policy.metadata,
     }
     if gold_row is not None:
         doc_gold = gold_doc_ids(gold_row)
@@ -1585,6 +1764,18 @@ def main() -> None:
                 "adaptive_restart_neighbor_seed_weight": float(
                     args.adaptive_restart_neighbor_seed_weight
                 ),
+                "adaptive_transition_mode": args.adaptive_transition_mode,
+                "adaptive_transition_agreement_min_mult": float(
+                    args.adaptive_transition_agreement_min_mult
+                ),
+                "adaptive_transition_agreement_max_mult": float(
+                    args.adaptive_transition_agreement_max_mult
+                ),
+                "adaptive_transition_local_min_mult": float(args.adaptive_transition_local_min_mult),
+                "adaptive_transition_local_max_mult": float(args.adaptive_transition_local_max_mult),
+                "adaptive_transition_local_weight": float(args.adaptive_transition_local_weight),
+                "adaptive_transition_gate_adjacent": bool(args.adaptive_transition_gate_adjacent),
+                "adaptive_transition_gate_page_doc": bool(args.adaptive_transition_gate_page_doc),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -1658,6 +1849,14 @@ def main() -> None:
         "adaptive_restart_min_doc_mult": float(args.adaptive_restart_min_doc_mult),
         "adaptive_restart_max_doc_mult": float(args.adaptive_restart_max_doc_mult),
         "adaptive_restart_neighbor_seed_weight": float(args.adaptive_restart_neighbor_seed_weight),
+        "adaptive_transition_mode": args.adaptive_transition_mode,
+        "adaptive_transition_agreement_min_mult": float(args.adaptive_transition_agreement_min_mult),
+        "adaptive_transition_agreement_max_mult": float(args.adaptive_transition_agreement_max_mult),
+        "adaptive_transition_local_min_mult": float(args.adaptive_transition_local_min_mult),
+        "adaptive_transition_local_max_mult": float(args.adaptive_transition_local_max_mult),
+        "adaptive_transition_local_weight": float(args.adaptive_transition_local_weight),
+        "adaptive_transition_gate_adjacent": bool(args.adaptive_transition_gate_adjacent),
+        "adaptive_transition_gate_page_doc": bool(args.adaptive_transition_gate_page_doc),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -1791,6 +1990,34 @@ def main() -> None:
         ),
         "mean_restart_vector_doc_node_count": (
             statistics.fmean(float(row["graph"].get("restart_vector_doc_node_count", 0)) for row in per_qid)
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_transition_global_multiplier": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_transition_global_multiplier", 1.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_transition_local_reliability": (
+            statistics.fmean(
+                float(row["graph"].get("mean_adaptive_transition_local_reliability", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_adaptive_transition_local_reliability") is not None
+            )
+            if any(
+                row["graph"].get("mean_adaptive_transition_local_reliability") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_adaptive_transition_page_doc_multiplier": (
+            statistics.fmean(
+                float(row["graph"].get("mean_adaptive_transition_page_doc_multiplier", 1.0))
+                for row in per_qid
+            )
             if per_qid
             else None
         ),
