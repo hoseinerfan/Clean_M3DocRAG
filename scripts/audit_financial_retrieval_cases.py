@@ -49,6 +49,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--show-top-pages", type=int, default=8)
     parser.add_argument("--topn", type=int, default=20)
     parser.add_argument("--line-window", type=int, default=3)
+    parser.add_argument(
+        "--financial-scoring-mode",
+        choices=["soft", "strict"],
+        default="soft",
+        help="Evidence scorer mode passed to scripts/rerank_financial_evidence_pages.py.",
+    )
     parser.add_argument("--broad-positive-threshold", type=int, default=500)
     parser.add_argument("--output-md", required=True)
     parser.add_argument("--output-json", required=True)
@@ -226,11 +232,13 @@ def score_page(
     page_uid_value: str,
     page_texts: dict[str, str],
     line_window: int,
+    scoring_mode: str,
 ) -> dict[str, Any]:
     score, meta = FIN.financial_evidence_score(
         question,
         page_texts.get(page_uid_value, ""),
         int(line_window),
+        str(scoring_mode),
     )
     slots = meta.get("slots", {})
     return {
@@ -241,8 +249,11 @@ def score_page(
         "slots": slots,
         "best_line_score": meta.get("best_line_score"),
         "best_window_score": meta.get("best_window_score"),
+        "best_strict_line_score": meta.get("best_strict_line_score"),
+        "best_strict_window_score": meta.get("best_strict_window_score"),
         "table_score": meta.get("table_score"),
         "page_slot_score": meta.get("page_slot_score"),
+        "scoring_mode": meta.get("scoring_mode"),
     }
 
 
@@ -251,8 +262,12 @@ def score_page_list(
     page_uids: list[str],
     page_texts: dict[str, str],
     line_window: int,
+    scoring_mode: str,
 ) -> list[dict[str, Any]]:
-    scored = [score_page(question, uid, page_texts, line_window) for uid in page_uids]
+    scored = [
+        score_page(question, uid, page_texts, line_window, scoring_mode)
+        for uid in page_uids
+    ]
     return sorted(scored, key=lambda row: (-float(row["evidence_score"]), row["page_uid"]))
 
 
@@ -332,12 +347,24 @@ def main() -> None:
         cand_top_uids = [row["page_uid"] for row in cand_top]
         scored_cand_top = {
             row["page_uid"]: row
-            for row in score_page_list(question, cand_top_uids, page_texts, int(args.line_window))
+            for row in score_page_list(
+                question,
+                cand_top_uids,
+                page_texts,
+                int(args.line_window),
+                str(args.financial_scoring_mode),
+            )
         }
         for top_row in cand_top:
             top_row.update(scored_cand_top.get(top_row["page_uid"], {}))
 
-        gold_scores = score_page_list(question, sorted(gold_pages), page_texts, int(args.line_window))
+        gold_scores = score_page_list(
+            question,
+            sorted(gold_pages),
+            page_texts,
+            int(args.line_window),
+            str(args.financial_scoring_mode),
+        )
         gold_best = gold_scores[0] if gold_scores else {"evidence_score": 0.0}
         gold_rank_among_cand_top = None
         for index, top_uid in enumerate(
@@ -459,6 +486,8 @@ def main() -> None:
     payload = {
         "n_qids": len(rows),
         "hit_k": hit_k,
+        "financial_scoring_mode": str(args.financial_scoring_mode),
+        "line_window": int(args.line_window),
         "movement_counts": dict(movement_counts),
         "limitation_counts": dict(limitation_counts),
         "by_type": {key: group_summary(group) for key, group in by_type.items()},
@@ -478,6 +507,8 @@ def main() -> None:
         f"- hit_k: `{hit_k}`",
         f"- filter: `{args.filter_field} == {args.filter_value}`",
         f"- page_text_count: `{len(page_texts)}`",
+        f"- financial_scoring_mode: `{args.financial_scoring_mode}`",
+        f"- line_window: `{args.line_window}`",
         "",
         "## Movement",
         "",

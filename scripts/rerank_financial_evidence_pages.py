@@ -51,6 +51,31 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--line-window", type=int, default=3)
     parser.add_argument(
+        "--scoring-mode",
+        choices=["soft", "strict"],
+        default="soft",
+        help=(
+            "soft keeps the original page/window/table blend. strict requires metric "
+            "and numeric evidence, plus available year/entity evidence, in a local "
+            "line window before a page receives a bonus."
+        ),
+    )
+    parser.add_argument(
+        "--doc-prior-mode",
+        choices=["none", "rank"],
+        default="none",
+        help=(
+            "Optionally multiply evidence by a document prior estimated from the "
+            "input ranking. rank uses first document occurrence in the candidate list."
+        ),
+    )
+    parser.add_argument(
+        "--doc-prior-rrf-k",
+        type=float,
+        default=10.0,
+        help="RRF-style damping constant for --doc-prior-mode rank.",
+    )
+    parser.add_argument(
         "--min-evidence-score",
         type=float,
         default=0.0,
@@ -197,6 +222,23 @@ def numeric_density_score(text: str) -> float:
     return GRAPH.clamp(hits / 12.0, 0.0, 1.0)
 
 
+def financial_value_density_score(text: str) -> float:
+    hits = 0
+    for match in re.finditer(
+        r"(?:\$|€|£)?\(?\d[\d,]*(?:\.\d+)?\)?%?",
+        text,
+        flags=re.IGNORECASE,
+    ):
+        token = match.group(0).strip()
+        bare = token.strip("()$€£%").replace(",", "")
+        if re.fullmatch(r"20\d{2}", bare):
+            continue
+        if re.fullmatch(r"\d{1,2}", bare) and re.search(r"\bFY\s*'?\s*" + re.escape(bare) + r"\b", text, re.IGNORECASE):
+            continue
+        hits += 1
+    return GRAPH.clamp(hits / 8.0, 0.0, 1.0)
+
+
 def split_lines(text: str) -> list[str]:
     lines = []
     for raw_line in re.split(r"[\n\r]+", text):
@@ -208,17 +250,27 @@ def split_lines(text: str) -> list[str]:
     return lines
 
 
-def evidence_window_score(slots: dict[str, list[str]], window_text: str) -> float:
+def evidence_window_features(slots: dict[str, list[str]], window_text: str) -> dict[str, Any]:
     available_slots = [slot for slot in ("metric", "year", "entity") if slots.get(slot)]
     if not available_slots:
-        return 0.0
+        return {
+            "score": 0.0,
+            "slot_scores": {},
+            "slot_coverage": 0.0,
+            "slot_strength": 0.0,
+            "numeric_score": 0.0,
+            "value_numeric_score": 0.0,
+            "matched_slot_count": 0,
+        }
     slot_scores = {
         slot: best_slot_match(slots.get(slot, []), window_text)
         for slot in available_slots
     }
-    slot_coverage = sum(1 for value in slot_scores.values() if value > 0) / len(available_slots)
+    matched_slot_count = sum(1 for value in slot_scores.values() if value > 0)
+    slot_coverage = matched_slot_count / len(available_slots)
     slot_strength = sum(slot_scores.values()) / len(available_slots)
     numeric_score = numeric_density_score(window_text)
+    value_numeric_score = financial_value_density_score(window_text)
     combo_bonus = 0.0
     if slot_scores.get("metric", 0.0) > 0 and slot_scores.get("year", 0.0) > 0:
         combo_bonus += 0.20
@@ -226,10 +278,46 @@ def evidence_window_score(slots: dict[str, list[str]], window_text: str) -> floa
         combo_bonus += 0.15
     if slot_scores.get("year", 0.0) > 0 and numeric_score > 0:
         combo_bonus += 0.10
-    return GRAPH.clamp(0.45 * slot_coverage + 0.25 * slot_strength + 0.20 * numeric_score + combo_bonus, 0.0, 1.0)
+    score = GRAPH.clamp(
+        0.45 * slot_coverage + 0.25 * slot_strength + 0.20 * numeric_score + combo_bonus,
+        0.0,
+        1.0,
+    )
+    return {
+        "score": score,
+        "slot_scores": slot_scores,
+        "slot_coverage": slot_coverage,
+        "slot_strength": slot_strength,
+        "numeric_score": numeric_score,
+        "value_numeric_score": value_numeric_score,
+        "matched_slot_count": matched_slot_count,
+    }
 
 
-def financial_evidence_score(question: str, page_text: str, line_window: int) -> tuple[float, dict[str, Any]]:
+def evidence_window_score(slots: dict[str, list[str]], window_text: str) -> float:
+    return float(evidence_window_features(slots, window_text)["score"])
+
+
+def strict_financial_window_score(slots: dict[str, list[str]], window_text: str) -> float:
+    features = evidence_window_features(slots, window_text)
+    slot_scores = features["slot_scores"]
+    if slot_scores.get("metric", 0.0) <= 0:
+        return 0.0
+    if features["value_numeric_score"] <= 0:
+        return 0.0
+    has_context_slot = bool(slots.get("year") or slots.get("entity"))
+    has_context_match = slot_scores.get("year", 0.0) > 0 or slot_scores.get("entity", 0.0) > 0
+    if has_context_slot and not has_context_match:
+        return 0.0
+    return float(features["score"])
+
+
+def financial_evidence_score(
+    question: str,
+    page_text: str,
+    line_window: int,
+    scoring_mode: str = "soft",
+) -> tuple[float, dict[str, Any]]:
     anchors = GRAPH.extract_query_anchors(question, max_anchors=16, min_entity_len=3)
     slots = GRAPH.financial_anchor_slots(question, anchors)
     active_slots = {slot: values for slot, values in slots.items() if values}
@@ -245,27 +333,51 @@ def financial_evidence_score(question: str, page_text: str, line_window: int) ->
     table_score = GRAPH.financial_table_likeness(text.lower())
     lines = split_lines(text)
     best_line_score = max((evidence_window_score(slots, line) for line in lines), default=0.0)
+    best_strict_line_score = max(
+        (strict_financial_window_score(slots, line) for line in lines),
+        default=0.0,
+    )
     window = max(1, int(line_window))
     best_window_score = 0.0
+    best_strict_window_score = 0.0
     for start in range(len(lines)):
         chunk = "\n".join(lines[start : start + window])
         best_window_score = max(best_window_score, evidence_window_score(slots, chunk))
-    score = GRAPH.clamp(
-        0.25 * page_slot_score
-        + 0.35 * best_window_score
-        + 0.25 * best_line_score
-        + 0.15 * table_score,
-        0.0,
-        1.0,
-    )
+        best_strict_window_score = max(
+            best_strict_window_score,
+            strict_financial_window_score(slots, chunk),
+        )
+    if str(scoring_mode) == "strict":
+        if best_strict_window_score <= 0:
+            score = 0.0
+        else:
+            score = GRAPH.clamp(
+                0.70 * best_strict_window_score
+                + 0.20 * best_strict_line_score
+                + 0.10 * table_score,
+                0.0,
+                1.0,
+            )
+    else:
+        score = GRAPH.clamp(
+            0.25 * page_slot_score
+            + 0.35 * best_window_score
+            + 0.25 * best_line_score
+            + 0.15 * table_score,
+            0.0,
+            1.0,
+        )
     return score, {
         "active": True,
         "reason": "scored",
         "slots": slots,
         "anchor_count": len(anchors),
+        "scoring_mode": str(scoring_mode),
         "page_slot_score": page_slot_score,
         "best_line_score": best_line_score,
         "best_window_score": best_window_score,
+        "best_strict_line_score": best_strict_line_score,
+        "best_strict_window_score": best_strict_window_score,
         "table_score": table_score,
     }
 
@@ -355,6 +467,13 @@ def rerank_row(
         limit = len(retrieval_rows)
     head = retrieval_rows[:limit]
     tail = retrieval_rows[limit:]
+    doc_first_ranks: dict[str, int] = {}
+    for rank, page_row in enumerate(head, start=1):
+        parsed = parse_page_row(page_row)
+        if parsed is None:
+            continue
+        if parsed[0] not in doc_first_ranks:
+            doc_first_ranks[parsed[0]] = len(doc_first_ranks) + 1
     scored_rows = []
     evidence_scores = []
     active = False
@@ -369,13 +488,23 @@ def rerank_row(
             question,
             page_texts.get(uid, ""),
             int(args.line_window),
+            str(args.scoring_mode),
         )
         if evidence_score < float(args.min_evidence_score):
             evidence_score = 0.0
+        doc_prior = 1.0
+        if str(args.doc_prior_mode) == "rank":
+            doc_rank = doc_first_ranks.get(parsed[0])
+            if doc_rank is None:
+                doc_prior = 0.0
+            else:
+                k = max(0.0, float(args.doc_prior_rrf_k))
+                doc_prior = (k + 1.0) / (k + float(doc_rank))
+        evidence_meta["doc_prior"] = doc_prior
         active = active or bool(evidence_meta.get("active", False))
         evidence_scores.append(evidence_score)
         base_score = 1.0 / (float(args.rrf_k) + float(rank))
-        combined_score = base_score + float(args.evidence_weight) * evidence_score
+        combined_score = base_score + float(args.evidence_weight) * evidence_score * doc_prior
         scored_rows.append((combined_score, rank, page_row, evidence_score, evidence_meta))
         if evidence_score > 0:
             top_evidence.append((evidence_score, uid, evidence_meta))
@@ -401,7 +530,10 @@ def rerank_row(
             "slots": meta.get("slots", {}),
             "best_line_score": meta.get("best_line_score"),
             "best_window_score": meta.get("best_window_score"),
+            "best_strict_line_score": meta.get("best_strict_line_score"),
+            "best_strict_window_score": meta.get("best_strict_window_score"),
             "table_score": meta.get("table_score"),
+            "doc_prior": meta.get("doc_prior"),
         }
         for score, uid, meta in sorted(top_evidence, key=lambda item: (-item[0], item[1]))[:10]
     ]
@@ -484,6 +616,9 @@ def main() -> None:
             "rrf_k": float(args.rrf_k),
             "evidence_weight": float(args.evidence_weight),
             "line_window": int(args.line_window),
+            "scoring_mode": str(args.scoring_mode),
+            "doc_prior_mode": str(args.doc_prior_mode),
+            "doc_prior_rrf_k": float(args.doc_prior_rrf_k),
             "min_evidence_score": float(args.min_evidence_score),
         },
         "per_qid": per_qid,
