@@ -46,6 +46,20 @@ class SourceAgreement:
 
 
 @dataclass
+class ReciprocalSourceReliability:
+    source_top_pages: int
+    lookup_pages: int
+    doc_weight: float
+    page_weight: float
+    dense_page_support: float
+    dense_doc_support: float
+    sparse_page_support: float
+    sparse_doc_support: float
+    dense_reliability: float
+    sparse_reliability: float
+
+
+@dataclass
 class RestartVector:
     seed: dict[str, float]
     doc_ppr_nodes: set[str]
@@ -197,11 +211,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--adaptive-restart-mode",
-        choices=["none", "agreement"],
+        choices=["none", "agreement", "reciprocal"],
         default="none",
         help=(
             "Optional query-adaptive PPR restart vector. 'agreement' shifts restart mass "
-            "toward dense pages and gates doc-node restart mass by dense/SPLADE agreement."
+            "toward dense pages and gates doc-node restart mass by dense/SPLADE agreement. "
+            "'reciprocal' estimates dense and sparse restart reliability separately from "
+            "rank-weighted reciprocal support."
         ),
     )
     parser.add_argument(
@@ -242,6 +258,12 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="Multiplier for inherited neighbor restart mass in adaptive restart mode.",
+    )
+    parser.add_argument(
+        "--adaptive-restart-preserve-source-total",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Preserve dense+sparse restart source weight total in reciprocal restart mode. Default: true.",
     )
     parser.add_argument(
         "--adaptive-transition-mode",
@@ -786,6 +808,65 @@ def compute_source_agreement(
     )
 
 
+def compute_reciprocal_source_reliability(
+    *,
+    dense_pages: list[tuple[str, int, float, int]],
+    sparse_pages: list[tuple[str, int, float, int]],
+    args: argparse.Namespace,
+) -> ReciprocalSourceReliability:
+    source_top_pages = max(0, int(args.adaptive_source_reciprocal_top_pages))
+    lookup_pages = max(0, int(args.adaptive_source_reciprocal_lookup_pages))
+    sparse_page_ranks = page_rank_map(sparse_pages, lookup_pages)
+    dense_page_ranks = page_rank_map(dense_pages, lookup_pages)
+    sparse_doc_ranks = doc_rank_map(sparse_pages, lookup_pages)
+    dense_doc_ranks = doc_rank_map(dense_pages, lookup_pages)
+    dense_page_support, dense_doc_support = reciprocal_rank_support(
+        source_pages=dense_pages,
+        target_page_ranks=sparse_page_ranks,
+        target_doc_ranks=sparse_doc_ranks,
+        source_top_pages=source_top_pages,
+        rrf_k=float(args.rrf_k),
+    )
+    sparse_page_support, sparse_doc_support = reciprocal_rank_support(
+        source_pages=sparse_pages,
+        target_page_ranks=dense_page_ranks,
+        target_doc_ranks=dense_doc_ranks,
+        source_top_pages=source_top_pages,
+        rrf_k=float(args.rrf_k),
+    )
+    doc_weight = max(0.0, float(args.adaptive_source_reciprocal_doc_weight))
+    page_weight = max(0.0, float(args.adaptive_source_reciprocal_page_weight))
+    support_denominator = doc_weight + page_weight
+    if support_denominator <= 0:
+        dense_reliability = 0.0
+        sparse_reliability = 0.0
+    else:
+        dense_reliability = clamp(
+            (doc_weight * dense_doc_support + page_weight * dense_page_support)
+            / support_denominator,
+            0.0,
+            1.0,
+        )
+        sparse_reliability = clamp(
+            (doc_weight * sparse_doc_support + page_weight * sparse_page_support)
+            / support_denominator,
+            0.0,
+            1.0,
+        )
+    return ReciprocalSourceReliability(
+        source_top_pages=source_top_pages,
+        lookup_pages=lookup_pages,
+        doc_weight=doc_weight,
+        page_weight=page_weight,
+        dense_page_support=dense_page_support,
+        dense_doc_support=dense_doc_support,
+        sparse_page_support=sparse_page_support,
+        sparse_doc_support=sparse_doc_support,
+        dense_reliability=dense_reliability,
+        sparse_reliability=sparse_reliability,
+    )
+
+
 def compute_source_weights(
     *,
     agreement: SourceAgreement,
@@ -808,50 +889,20 @@ def compute_source_weights(
         return SourceWeights(base_dense_weight, base_sparse_weight, metadata)
 
     if mode == "reciprocal":
-        source_top_pages = max(0, int(args.adaptive_source_reciprocal_top_pages))
-        lookup_pages = max(0, int(args.adaptive_source_reciprocal_lookup_pages))
-        sparse_page_ranks = page_rank_map(sparse_pages, lookup_pages)
-        dense_page_ranks = page_rank_map(dense_pages, lookup_pages)
-        sparse_doc_ranks = doc_rank_map(sparse_pages, lookup_pages)
-        dense_doc_ranks = doc_rank_map(dense_pages, lookup_pages)
-        dense_page_support, dense_doc_support = reciprocal_rank_support(
-            source_pages=dense_pages,
-            target_page_ranks=sparse_page_ranks,
-            target_doc_ranks=sparse_doc_ranks,
-            source_top_pages=source_top_pages,
-            rrf_k=float(args.rrf_k),
+        reliability = compute_reciprocal_source_reliability(
+            dense_pages=dense_pages,
+            sparse_pages=sparse_pages,
+            args=args,
         )
-        sparse_page_support, sparse_doc_support = reciprocal_rank_support(
-            source_pages=sparse_pages,
-            target_page_ranks=dense_page_ranks,
-            target_doc_ranks=dense_doc_ranks,
-            source_top_pages=source_top_pages,
-            rrf_k=float(args.rrf_k),
-        )
-        doc_weight = max(0.0, float(args.adaptive_source_reciprocal_doc_weight))
-        page_weight = max(0.0, float(args.adaptive_source_reciprocal_page_weight))
-        support_denominator = doc_weight + page_weight
-        if support_denominator <= 0:
-            dense_reliability = 0.0
-            sparse_reliability = 0.0
-        else:
-            dense_reliability = clamp(
-                (doc_weight * dense_doc_support + page_weight * dense_page_support)
-                / support_denominator,
-                0.0,
-                1.0,
-            )
-            sparse_reliability = clamp(
-                (doc_weight * sparse_doc_support + page_weight * sparse_page_support)
-                / support_denominator,
-                0.0,
-                1.0,
-            )
         min_mult = float(args.adaptive_source_reciprocal_min_mult)
         max_mult = float(args.adaptive_source_reciprocal_max_mult)
-        dense_mult = clamp(min_mult + (max_mult - min_mult) * dense_reliability, min_mult, max_mult)
+        dense_mult = clamp(
+            min_mult + (max_mult - min_mult) * reliability.dense_reliability,
+            min_mult,
+            max_mult,
+        )
         sparse_mult = clamp(
-            min_mult + (max_mult - min_mult) * sparse_reliability,
+            min_mult + (max_mult - min_mult) * reliability.sparse_reliability,
             min_mult,
             max_mult,
         )
@@ -868,16 +919,16 @@ def compute_source_weights(
             total_scale = 1.0
         metadata.update(
             {
-                "adaptive_source_reciprocal_top_pages": source_top_pages,
-                "adaptive_source_reciprocal_lookup_pages": lookup_pages,
-                "adaptive_source_reciprocal_doc_weight": doc_weight,
-                "adaptive_source_reciprocal_page_weight": page_weight,
-                "adaptive_source_dense_page_reciprocal_support": dense_page_support,
-                "adaptive_source_dense_doc_reciprocal_support": dense_doc_support,
-                "adaptive_source_sparse_page_reciprocal_support": sparse_page_support,
-                "adaptive_source_sparse_doc_reciprocal_support": sparse_doc_support,
-                "adaptive_source_dense_reliability": dense_reliability,
-                "adaptive_source_sparse_reliability": sparse_reliability,
+                "adaptive_source_reciprocal_top_pages": reliability.source_top_pages,
+                "adaptive_source_reciprocal_lookup_pages": reliability.lookup_pages,
+                "adaptive_source_reciprocal_doc_weight": reliability.doc_weight,
+                "adaptive_source_reciprocal_page_weight": reliability.page_weight,
+                "adaptive_source_dense_page_reciprocal_support": reliability.dense_page_support,
+                "adaptive_source_dense_doc_reciprocal_support": reliability.dense_doc_support,
+                "adaptive_source_sparse_page_reciprocal_support": reliability.sparse_page_support,
+                "adaptive_source_sparse_doc_reciprocal_support": reliability.sparse_doc_support,
+                "adaptive_source_dense_reliability": reliability.dense_reliability,
+                "adaptive_source_sparse_reliability": reliability.sparse_reliability,
                 "adaptive_source_dense_multiplier": dense_mult,
                 "adaptive_source_sparse_multiplier": sparse_mult,
                 "adaptive_source_reciprocal_preserve_total": bool(
@@ -1044,6 +1095,132 @@ def build_restart_vector(
                 "adaptive_restart_mode": mode,
                 "restart_vector_page_node_count": len(page_seed),
                 "restart_vector_doc_node_count": len(doc_seed),
+            },
+        )
+
+    if mode == "reciprocal":
+        reliability = compute_reciprocal_source_reliability(
+            dense_pages=dense_pages,
+            sparse_pages=sparse_pages,
+            args=args,
+        )
+        dense_mult = clamp(
+            float(args.adaptive_restart_min_dense_mult)
+            + (
+                float(args.adaptive_restart_max_dense_mult)
+                - float(args.adaptive_restart_min_dense_mult)
+            )
+            * reliability.dense_reliability,
+            float(args.adaptive_restart_min_dense_mult),
+            float(args.adaptive_restart_max_dense_mult),
+        )
+        sparse_mult = clamp(
+            float(args.adaptive_restart_min_sparse_mult)
+            + (
+                float(args.adaptive_restart_max_sparse_mult)
+                - float(args.adaptive_restart_min_sparse_mult)
+            )
+            * reliability.sparse_reliability,
+            float(args.adaptive_restart_min_sparse_mult),
+            float(args.adaptive_restart_max_sparse_mult),
+        )
+        restart_dense_weight = source_weights.dense_weight * dense_mult
+        restart_sparse_weight = source_weights.sparse_weight * sparse_mult
+        if bool(args.adaptive_restart_preserve_source_total):
+            raw_total = restart_dense_weight + restart_sparse_weight
+            base_total = source_weights.dense_weight + source_weights.sparse_weight
+            if raw_total > 0 and base_total > 0:
+                total_scale = base_total / raw_total
+                restart_dense_weight *= total_scale
+                restart_sparse_weight *= total_scale
+            else:
+                total_scale = 1.0
+        else:
+            total_scale = 1.0
+
+        doc_reliability = (reliability.dense_reliability + reliability.sparse_reliability) / 2.0
+        doc_mult = clamp(
+            float(args.adaptive_restart_min_doc_mult)
+            + (float(args.adaptive_restart_max_doc_mult) - float(args.adaptive_restart_min_doc_mult))
+            * doc_reliability,
+            float(args.adaptive_restart_min_doc_mult),
+            float(args.adaptive_restart_max_doc_mult),
+        )
+        restart_doc_seed_weight = float(args.adaptive_restart_doc_seed_weight) * doc_mult
+        restart_page_seed_weight = float(args.adaptive_restart_page_seed_weight)
+
+        seed: dict[str, float] = defaultdict(float)
+        for source_weight, source_pages, source_score_norm in [
+            (restart_dense_weight, dense_pages, dense_score_norm),
+            (restart_sparse_weight, sparse_pages, sparse_score_norm),
+            (float(args.expansion_weight), expansion_pages, expansion_score_norm),
+        ]:
+            for doc_id, page_idx, _score, rank in source_pages:
+                uid = page_uid(doc_id, page_idx)
+                seed[uid] += restart_page_seed_weight * source_weight / (
+                    float(args.rrf_k) + float(rank)
+                )
+                seed[uid] += (
+                    restart_page_seed_weight
+                    * source_weight
+                    * float(args.score_seed_weight)
+                    * source_score_norm.get(uid, 0.0)
+                )
+        for uid, seed_score in neighbor_seed.items():
+            seed[uid] += (
+                restart_page_seed_weight
+                * float(args.adaptive_restart_neighbor_seed_weight)
+                * float(seed_score)
+            )
+
+        doc_ppr_nodes: set[str] = set()
+        if restart_doc_seed_weight > 0:
+            for doc_id, rank in dense_doc_ranks.items():
+                node = f"doc::{doc_id}"
+                seed[node] += (
+                    restart_doc_seed_weight
+                    * restart_dense_weight
+                    / (float(args.rrf_k) + float(rank))
+                )
+                doc_ppr_nodes.add(node)
+            for doc_id, rank in sparse_doc_ranks.items():
+                node = f"doc::{doc_id}"
+                seed[node] += (
+                    restart_doc_seed_weight
+                    * restart_sparse_weight
+                    / (float(args.rrf_k) + float(rank))
+                )
+                doc_ppr_nodes.add(node)
+
+        return RestartVector(
+            seed=dict(seed),
+            doc_ppr_nodes=doc_ppr_nodes,
+            metadata={
+                "adaptive_restart_mode": mode,
+                "adaptive_restart_reciprocal_top_pages": reliability.source_top_pages,
+                "adaptive_restart_reciprocal_lookup_pages": reliability.lookup_pages,
+                "adaptive_restart_reciprocal_doc_weight": reliability.doc_weight,
+                "adaptive_restart_reciprocal_page_weight": reliability.page_weight,
+                "adaptive_restart_dense_page_reciprocal_support": reliability.dense_page_support,
+                "adaptive_restart_dense_doc_reciprocal_support": reliability.dense_doc_support,
+                "adaptive_restart_sparse_page_reciprocal_support": reliability.sparse_page_support,
+                "adaptive_restart_sparse_doc_reciprocal_support": reliability.sparse_doc_support,
+                "adaptive_restart_dense_reliability": reliability.dense_reliability,
+                "adaptive_restart_sparse_reliability": reliability.sparse_reliability,
+                "adaptive_restart_dense_multiplier": dense_mult,
+                "adaptive_restart_sparse_multiplier": sparse_mult,
+                "adaptive_restart_doc_multiplier": doc_mult,
+                "adaptive_restart_preserve_source_total": bool(
+                    args.adaptive_restart_preserve_source_total
+                ),
+                "adaptive_restart_total_scale": total_scale,
+                "effective_restart_dense_weight": restart_dense_weight,
+                "effective_restart_sparse_weight": restart_sparse_weight,
+                "effective_restart_doc_seed_weight": restart_doc_seed_weight,
+                "restart_vector_page_node_count": sum(
+                    1 for node in seed if not node.startswith("doc::")
+                ),
+                "restart_vector_doc_node_count": len(doc_ppr_nodes),
             },
         )
 
@@ -1840,6 +2017,9 @@ def main() -> None:
                 "adaptive_restart_neighbor_seed_weight": float(
                     args.adaptive_restart_neighbor_seed_weight
                 ),
+                "adaptive_restart_preserve_source_total": bool(
+                    args.adaptive_restart_preserve_source_total
+                ),
                 "adaptive_transition_mode": args.adaptive_transition_mode,
                 "adaptive_transition_agreement_min_mult": float(
                     args.adaptive_transition_agreement_min_mult
@@ -1933,6 +2113,7 @@ def main() -> None:
         "adaptive_restart_min_doc_mult": float(args.adaptive_restart_min_doc_mult),
         "adaptive_restart_max_doc_mult": float(args.adaptive_restart_max_doc_mult),
         "adaptive_restart_neighbor_seed_weight": float(args.adaptive_restart_neighbor_seed_weight),
+        "adaptive_restart_preserve_source_total": bool(args.adaptive_restart_preserve_source_total),
         "adaptive_transition_mode": args.adaptive_transition_mode,
         "adaptive_transition_agreement_min_mult": float(args.adaptive_transition_agreement_min_mult),
         "adaptive_transition_agreement_max_mult": float(args.adaptive_transition_agreement_max_mult),
@@ -2039,6 +2220,38 @@ def main() -> None:
         "mean_adaptive_source_sparse_doc_reciprocal_support": (
             statistics.fmean(
                 float(row["graph"].get("adaptive_source_sparse_doc_reciprocal_support", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_restart_dense_reliability": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_restart_dense_reliability", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_restart_sparse_reliability": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_restart_sparse_reliability", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_restart_dense_doc_reciprocal_support": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_restart_dense_doc_reciprocal_support", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_adaptive_restart_sparse_doc_reciprocal_support": (
+            statistics.fmean(
+                float(row["graph"].get("adaptive_restart_sparse_doc_reciprocal_support", 0.0))
                 for row in per_qid
             )
             if per_qid
