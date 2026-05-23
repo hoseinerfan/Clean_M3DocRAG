@@ -94,6 +94,12 @@ class PositionEvidencePolicy:
     metadata: dict[str, object]
 
 
+@dataclass
+class DocPageCatalog:
+    page_counts: dict[str, int]
+    page_number_indices: dict[str, dict[int, set[int]]]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -733,8 +739,18 @@ def load_gold_rows(path: Path, question_type: str = "") -> dict[str, dict]:
     return rows
 
 
-def load_doc_page_counts(path: Path) -> dict[str, int]:
+def maybe_int(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def load_doc_page_catalog(path: Path) -> DocPageCatalog:
     counts: dict[str, int] = {}
+    page_number_indices: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
     if not path.exists():
         raise FileNotFoundError(f"doc_pages JSONL does not exist: {path}")
     with path.open("r", encoding="utf-8") as handle:
@@ -747,14 +763,18 @@ def load_doc_page_counts(path: Path) -> dict[str, int]:
             if not doc_id:
                 continue
             raw_page_idx = row.get("page_idx", row.get("page_id", row.get("page_number")))
-            if raw_page_idx is None:
-                continue
-            try:
-                page_idx = int(raw_page_idx)
-            except (TypeError, ValueError):
+            page_idx = maybe_int(raw_page_idx)
+            if page_idx is None:
                 continue
             counts[doc_id] = max(counts.get(doc_id, 0), page_idx + 1)
-    return counts
+            for field_name in ("page_number", "source_page_number"):
+                page_number = maybe_int(row.get(field_name))
+                if page_number is not None:
+                    page_number_indices[doc_id][page_number].add(page_idx)
+    return DocPageCatalog(
+        page_counts=counts,
+        page_number_indices={doc_id: dict(values) for doc_id, values in page_number_indices.items()},
+    )
 
 
 def page_uid(doc_id: str, page_idx: int) -> str:
@@ -1770,7 +1790,21 @@ def add_query_role(role_weights: dict[str, float], role: str, weight: float) -> 
     role_weights[role] = max(role_weights.get(role, 0.0), float(weight))
 
 
-def extract_position_roles_from_question(question: str) -> tuple[dict[str, float], list[int]]:
+def add_explicit_position_page(
+    *,
+    role_weights: dict[str, float],
+    explicit_page_numbers: list[int],
+    raw_page: int,
+) -> None:
+    if raw_page < 0:
+        return
+    if raw_page not in explicit_page_numbers:
+        explicit_page_numbers.append(raw_page)
+    target_idx = raw_page - 1 if raw_page > 0 else 0
+    add_query_role(role_weights, f"page_{target_idx}", 1.0)
+
+
+def extract_position_roles_from_question(question: str) -> tuple[dict[str, float], list[int], list[int]]:
     query = str(question or "").lower()
     role_weights: dict[str, float] = {}
 
@@ -1797,27 +1831,46 @@ def extract_position_roles_from_question(question: str) -> tuple[dict[str, float
     if re.search(r"\b(references|bibliography|appendix|appendices|acknowledg(e)?ments?)\b", query):
         add_query_role(role_weights, "late", 1.0)
 
-    explicit_page_indices: list[int] = []
+    explicit_page_numbers: list[int] = []
+    for match in re.finditer(
+        r"\b(?:pages?|pg|p|slides?)\.?\s*(?:no\.?|number|#)?\s*(\d{1,4})\s*(?:-|to|and)\s*(\d{1,4})\b",
+        query,
+    ):
+        start_page = int(match.group(1))
+        end_page = int(match.group(2))
+        lo, hi = sorted((start_page, end_page))
+        if hi - lo > 20:
+            continue
+        for raw_page in range(lo, hi + 1):
+            add_explicit_position_page(
+                role_weights=role_weights,
+                explicit_page_numbers=explicit_page_numbers,
+                raw_page=raw_page,
+            )
+
     for match in re.finditer(
         r"\b(?:pages?|pg|p|slides?)\.?\s*(?:no\.?|number|#)?\s*(\d{1,4})\b",
         query,
     ):
         raw_page = int(match.group(1))
-        target_idx = raw_page - 1 if raw_page > 0 else 0
-        if target_idx not in explicit_page_indices:
-            explicit_page_indices.append(target_idx)
-        add_query_role(role_weights, f"page_{target_idx}", 1.0)
+        add_explicit_position_page(
+            role_weights=role_weights,
+            explicit_page_numbers=explicit_page_numbers,
+            raw_page=raw_page,
+        )
 
-    return role_weights, explicit_page_indices
+    explicit_page_indices = [raw_page - 1 if raw_page > 0 else 0 for raw_page in explicit_page_numbers]
+    return role_weights, explicit_page_indices, explicit_page_numbers
 
 
 def record_position_roles(
     *,
     record: PageRecord,
     doc_page_counts: dict[str, int],
+    doc_page_number_indices: dict[str, dict[int, set[int]]],
     early_frac: float,
     late_frac: float,
-    explicit_page_indices: set[int],
+    explicit_page_numbers: set[int],
 ) -> set[str]:
     roles: set[str] = set()
     page_idx = int(record.page_idx)
@@ -1840,8 +1893,11 @@ def record_position_roles(
         if page_idx >= late_start:
             roles.add("late")
 
-    if page_idx in explicit_page_indices:
-        roles.add(f"page_{page_idx}")
+    page_number_lookup = doc_page_number_indices.get(record.doc_id, {})
+    for raw_page in explicit_page_numbers:
+        target_idx = raw_page - 1 if raw_page > 0 else 0
+        if page_idx == target_idx or page_idx in page_number_lookup.get(raw_page, set()):
+            roles.add(f"page_{target_idx}")
     return roles
 
 
@@ -1850,16 +1906,20 @@ def build_position_evidence_policy(
     question: str,
     records: dict[str, PageRecord],
     doc_page_counts: dict[str, int],
+    doc_page_number_indices: dict[str, dict[int, set[int]]],
     doc_position_weights: dict[str, float],
     args: argparse.Namespace,
 ) -> PositionEvidencePolicy:
     mode = str(args.position_evidence_mode)
     active_role_weights: dict[str, float] = {}
     explicit_page_indices: list[int] = []
+    explicit_page_numbers: list[int] = []
     role_page_weights: dict[str, dict[str, float]] = {}
     if mode != "none":
-        active_role_weights, explicit_page_indices = extract_position_roles_from_question(question)
-        explicit_set = set(explicit_page_indices)
+        active_role_weights, explicit_page_indices, explicit_page_numbers = (
+            extract_position_roles_from_question(question)
+        )
+        explicit_number_set = set(explicit_page_numbers)
         early_frac = float(args.position_evidence_early_frac)
         late_frac = float(args.position_evidence_late_frac)
         scope = str(args.position_evidence_scope)
@@ -1873,9 +1933,10 @@ def build_position_evidence_policy(
             page_roles = record_position_roles(
                 record=record,
                 doc_page_counts=doc_page_counts,
+                doc_page_number_indices=doc_page_number_indices,
                 early_frac=early_frac,
                 late_frac=late_frac,
-                explicit_page_indices=explicit_set,
+                explicit_page_numbers=explicit_number_set,
             )
             for role in page_roles:
                 if role in active_role_weights:
@@ -1888,6 +1949,7 @@ def build_position_evidence_policy(
         "position_evidence_active_roles": sorted(active_role_weights),
         "position_evidence_active_role_count": len(active_role_weights),
         "position_evidence_explicit_page_indices": explicit_page_indices,
+        "position_evidence_explicit_page_numbers": explicit_page_numbers,
         "position_evidence_role_node_count": len(role_page_weights),
         "position_evidence_page_match_count": page_match_count,
         "position_evidence_doc_support_count": len(doc_position_weights),
@@ -2176,7 +2238,7 @@ def build_qid_graph_ranking(
     args: argparse.Namespace,
     sparse_index: SparsePageIndex | None = None,
     gold_row: dict | None = None,
-    doc_page_counts: dict[str, int] | None = None,
+    doc_page_catalog: DocPageCatalog | None = None,
 ) -> tuple[list[list[object]], dict]:
     question = str(dense_row.get("question") or sparse_row.get("question", ""))
     dense_pages = ranked_unique_pages(
@@ -2310,7 +2372,10 @@ def build_qid_graph_ranking(
     position_policy = build_position_evidence_policy(
         question=question,
         records=records,
-        doc_page_counts=doc_page_counts or {},
+        doc_page_counts=doc_page_catalog.page_counts if doc_page_catalog is not None else {},
+        doc_page_number_indices=(
+            doc_page_catalog.page_number_indices if doc_page_catalog is not None else {}
+        ),
         doc_position_weights=position_doc_weights,
         args=args,
     )
@@ -2562,9 +2627,9 @@ def main() -> None:
     else:
         qids = common_qids
 
-    doc_page_counts: dict[str, int] = {}
+    doc_page_catalog: DocPageCatalog | None = None
     if args.doc_pages_jsonl:
-        doc_page_counts = load_doc_page_counts(Path(args.doc_pages_jsonl))
+        doc_page_catalog = load_doc_page_catalog(Path(args.doc_pages_jsonl))
 
     fused_payload: dict[str, dict] = {}
     per_qid: list[dict] = []
@@ -2577,7 +2642,7 @@ def main() -> None:
             args=args,
             sparse_index=sparse_index,
             gold_row=gold_row,
-            doc_page_counts=doc_page_counts,
+            doc_page_catalog=doc_page_catalog,
         )
         question = dense_pred[qid].get("question") or sparse_pred[qid].get("question", "")
         dense_source_summary = summarize_prediction_rows(
@@ -2828,7 +2893,12 @@ def main() -> None:
         "evidence_community_both_source_bonus": float(args.evidence_community_both_source_bonus),
         "evidence_community_support_power": float(args.evidence_community_support_power),
         "doc_pages_jsonl": args.doc_pages_jsonl,
-        "doc_page_count_doc_count": len(doc_page_counts),
+        "doc_page_count_doc_count": (
+            len(doc_page_catalog.page_counts) if doc_page_catalog is not None else 0
+        ),
+        "doc_page_number_lookup_doc_count": (
+            len(doc_page_catalog.page_number_indices) if doc_page_catalog is not None else 0
+        ),
         "position_evidence_mode": args.position_evidence_mode,
         "position_evidence_scope": args.position_evidence_scope,
         "position_evidence_doc_top_k": int(args.position_evidence_doc_top_k),
