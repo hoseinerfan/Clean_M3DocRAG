@@ -685,6 +685,24 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap on external targets per source page. Use 0 for no cap.",
     )
     parser.add_argument(
+        "--external-page-graph-source-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Only emit external edges from pages whose best dense/SPLADE/expansion "
+            "rank is within this cutoff. Use 0 for no source-rank gate."
+        ),
+    )
+    parser.add_argument(
+        "--external-page-graph-target-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Only emit page-target external edges to pages whose best dense/SPLADE/"
+            "expansion rank is within this cutoff. Use 0 for no target-rank gate."
+        ),
+    )
+    parser.add_argument(
         "--splade-index-pt",
         default="",
         help=(
@@ -3221,6 +3239,22 @@ def external_page_graph_edge_weight(
     return base_weight
 
 
+def external_page_graph_record_rank(record: PageRecord) -> int | None:
+    ranks = [
+        rank
+        for rank in (record.dense_rank, record.sparse_rank, record.expansion_rank)
+        if rank is not None
+    ]
+    return min(ranks) if ranks else None
+
+
+def external_page_graph_passes_rank_gate(record: PageRecord, cutoff: int) -> bool:
+    if cutoff <= 0:
+        return True
+    rank = external_page_graph_record_rank(record)
+    return rank is not None and rank <= cutoff
+
+
 def add_external_page_graph_edges(
     *,
     graph: dict[str, dict[str, float]],
@@ -3238,6 +3272,10 @@ def add_external_page_graph_edges(
             "external_page_graph_source_page_count": 0,
             "external_page_graph_target_page_count": 0,
             "external_page_graph_target_doc_count": 0,
+            "external_page_graph_source_top_k": int(args.external_page_graph_source_top_k),
+            "external_page_graph_target_top_k": int(args.external_page_graph_target_top_k),
+            "external_page_graph_skipped_source_rank_gate": 0,
+            "external_page_graph_skipped_target_rank_gate": 0,
             "external_page_graph_loaded_edge_count": (
                 external_page_graph.edge_count if external_page_graph is not None else 0
             ),
@@ -3249,10 +3287,18 @@ def add_external_page_graph_edges(
     used_target_docs: set[str] = set()
     edge_count = 0
     max_edges_per_source = max(0, int(args.external_page_graph_max_edges_per_source))
+    source_top_k = max(0, int(args.external_page_graph_source_top_k))
+    target_top_k = max(0, int(args.external_page_graph_target_top_k))
+    skipped_source_rank_gate = 0
+    skipped_target_rank_gate = 0
 
     for source_uid in sorted(records):
         source_edges = external_page_graph.by_source_page.get(source_uid, [])
         if not source_edges:
+            continue
+        source_record = records[source_uid]
+        if not external_page_graph_passes_rank_gate(source_record, source_top_k):
+            skipped_source_rank_gate += 1
             continue
         ordered_edges = sorted(
             source_edges,
@@ -3270,11 +3316,15 @@ def add_external_page_graph_edges(
                 continue
             target_node = None
             if edge.target_page_uid:
-                if edge.target_page_uid not in records:
+                target_record = records.get(edge.target_page_uid)
+                if target_record is None:
+                    continue
+                if not external_page_graph_passes_rank_gate(target_record, target_top_k):
+                    skipped_target_rank_gate += 1
                     continue
                 target_node = edge.target_page_uid
                 used_target_pages.add(edge.target_page_uid)
-                used_target_docs.add(records[edge.target_page_uid].doc_id)
+                used_target_docs.add(target_record.doc_id)
             elif edge.target_doc_id and edge.target_doc_id in candidate_doc_ids:
                 target_node = f"doc::{edge.target_doc_id}"
                 used_target_docs.add(edge.target_doc_id)
@@ -3302,6 +3352,10 @@ def add_external_page_graph_edges(
         "external_page_graph_max_edges_per_source": int(
             args.external_page_graph_max_edges_per_source
         ),
+        "external_page_graph_source_top_k": int(args.external_page_graph_source_top_k),
+        "external_page_graph_target_top_k": int(args.external_page_graph_target_top_k),
+        "external_page_graph_skipped_source_rank_gate": skipped_source_rank_gate,
+        "external_page_graph_skipped_target_rank_gate": skipped_target_rank_gate,
     }
 
 
@@ -4117,6 +4171,8 @@ def main() -> None:
                 "external_page_graph_max_edges_per_source": int(
                     args.external_page_graph_max_edges_per_source
                 ),
+                "external_page_graph_source_top_k": int(args.external_page_graph_source_top_k),
+                "external_page_graph_target_top_k": int(args.external_page_graph_target_top_k),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -4277,6 +4333,8 @@ def main() -> None:
         "external_page_graph_max_edges_per_source": int(
             args.external_page_graph_max_edges_per_source
         ),
+        "external_page_graph_source_top_k": int(args.external_page_graph_source_top_k),
+        "external_page_graph_target_top_k": int(args.external_page_graph_target_top_k),
         "external_page_graph_loaded_edge_count": (
             external_page_graph.edge_count if external_page_graph is not None else 0
         ),
