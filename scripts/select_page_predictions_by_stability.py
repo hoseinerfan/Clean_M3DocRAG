@@ -189,16 +189,34 @@ def support_vote_threshold(variant_count: int, support_policy: str) -> int:
     return variant_count // 2 + 1
 
 
-def dedupe_paths(paths: list[str]) -> list[Path]:
-    deduped: list[Path] = []
+def parse_labeled_path(value: str) -> tuple[str, Path]:
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError("Empty prediction path")
+    if "=" in raw:
+        raw_label, raw_path = raw.split("=", 1)
+        label = raw_label.strip()
+        path = Path(raw_path.strip())
+    else:
+        path = Path(raw)
+        label = path.stem
+    if not label:
+        label = path.stem
+    return label, path
+
+
+def dedupe_labeled_paths(values: list[tuple[str, Path]]) -> list[tuple[str, Path]]:
+    deduped: list[tuple[str, Path]] = []
     seen: set[str] = set()
-    for raw_path in paths:
-        path = Path(raw_path)
+    label_counts: Counter[str] = Counter()
+    for label, path in values:
         key = str(path.expanduser())
         if key in seen:
             continue
         seen.add(key)
-        deduped.append(path)
+        label_counts[label] += 1
+        unique_label = label if label_counts[label] == 1 else f"{label}_{label_counts[label]}"
+        deduped.append((unique_label, path))
     return deduped
 
 
@@ -206,8 +224,9 @@ def choose_prediction(
     *,
     reference_row: dict[str, Any],
     primary_row: dict[str, Any],
-    variant_rows: list[dict[str, Any]],
+    support_view_rows: list[tuple[str, dict[str, Any]]],
     topk: int,
+    support_topk: int,
     selection_mode: str,
     support_policy: str,
     min_variant_count: int,
@@ -219,14 +238,18 @@ def choose_prediction(
     promoted_pages = [uid for uid in primary_top if uid not in reference_top_set]
     demoted_pages = [uid for uid in reference_top if uid not in primary_top_set]
 
-    variant_top_sets = [
-        set(ranked_page_uids(prediction_rows(row), topk))
-        for row in variant_rows
+    support_view_top_sets = [
+        (label, set(ranked_page_uids(prediction_rows(row), support_topk)))
+        for label, row in support_view_rows
     ]
-    variant_count = len(variant_top_sets)
+    variant_count = len(support_view_top_sets)
     required_votes = support_vote_threshold(variant_count, support_policy)
     promoted_vote_counts = {
-        uid: sum(1 for top_set in variant_top_sets if uid in top_set)
+        uid: sum(1 for _label, top_set in support_view_top_sets if uid in top_set)
+        for uid in promoted_pages
+    }
+    promoted_vote_sources = {
+        uid: [label for label, top_set in support_view_top_sets if uid in top_set]
         for uid in promoted_pages
     }
     stable_promoted_pages = [
@@ -262,6 +285,7 @@ def choose_prediction(
         "stable_promoted_pages": stable_promoted_pages,
         "unstable_promoted_pages": unstable_promoted_pages,
         "promoted_page_vote_counts": promoted_vote_counts,
+        "promoted_page_vote_sources": promoted_vote_sources,
         "variant_count": variant_count,
         "required_votes": required_votes,
         "promoted_page_count": len(promoted_pages),
@@ -426,9 +450,9 @@ def build_top_examples(
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Select between a reference prediction and query-local candidate predictions using "
-            "label-free final-output stability. Gold labels are optional and are used only for "
-            "reporting, never for selection."
+            "Select between a reference prediction and a candidate prediction using label-free "
+            "final-output stability across support graph views. Gold labels are optional and "
+            "are used only for reporting, never for selection."
         )
     )
     parser.add_argument(
@@ -446,13 +470,31 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help=(
-            "Additional query-local prediction JSON used only for stability votes. "
-            "The primary candidate is always included automatically."
+            "Backward-compatible alias for --support-prediction. Additional prediction JSON "
+            "used only for support votes."
+        ),
+    )
+    parser.add_argument(
+        "--support-prediction",
+        action="append",
+        default=[],
+        help=(
+            "Independent graph-view prediction JSON used for consensus support votes. "
+            "Use either path or label=path. Repeat for multiple views."
         ),
     )
     parser.add_argument("--baseline", default="", help="Optional baseline prediction for movement reporting.")
     parser.add_argument("--gold", default="", help="Optional gold JSONL for recall and movement reporting.")
     parser.add_argument("--topk", type=int, default=4, help="Top-k boundary used by the selector.")
+    parser.add_argument(
+        "--support-topk",
+        type=int,
+        default=0,
+        help=(
+            "Rank window used when counting support votes from graph views. "
+            "Default 0 means use --topk."
+        ),
+    )
     parser.add_argument("--topn", type=int, default=20, help="Number of recovered examples to store.")
     parser.add_argument(
         "--recall-k-values",
@@ -472,15 +514,23 @@ def parse_args() -> argparse.Namespace:
         "--support-policy",
         choices=["strict_majority", "unanimity"],
         default="strict_majority",
-        help="Vote requirement across query-local variants.",
+        help="Vote requirement across support graph views.",
     )
     parser.add_argument(
         "--min-variant-count",
         type=int,
         default=2,
         help=(
-            "Minimum available query-local variants, including the primary candidate, required "
-            "before the selector can choose the candidate."
+            "Minimum available support views required before the selector can choose the candidate. "
+            "By default this includes the primary candidate as one support view."
+        ),
+    )
+    parser.add_argument(
+        "--exclude-primary-from-support",
+        action="store_true",
+        help=(
+            "Do not count the primary candidate as a support vote. This is stricter and useful "
+            "when support files are independent graph views rather than perturbations."
         ),
     )
     parser.add_argument("--output-prediction-json", required=True)
@@ -492,8 +542,13 @@ def main() -> None:
     args = parse_args()
     reference = load_prediction(Path(args.reference))
     primary = load_prediction(Path(args.primary_candidate))
-    variant_paths = dedupe_paths([args.primary_candidate, *args.candidate_variant])
-    variants = [(path, load_prediction(path)) for path in variant_paths]
+    support_inputs: list[tuple[str, Path]] = []
+    if not bool(args.exclude_primary_from_support):
+        support_inputs.append(("primary_candidate", Path(args.primary_candidate)))
+    support_inputs.extend(parse_labeled_path(value) for value in args.candidate_variant)
+    support_inputs.extend(parse_labeled_path(value) for value in args.support_prediction)
+    support_paths = dedupe_labeled_paths(support_inputs)
+    support_views = [(label, path, load_prediction(path)) for label, path in support_paths]
     baseline = load_prediction(Path(args.baseline)) if args.baseline else None
     gold_by_qid = (
         {str(row["qid"]): row for row in read_jsonl(Path(args.gold))}
@@ -515,11 +570,16 @@ def main() -> None:
         "selection_mode": args.selection_mode,
         "support_policy": args.support_policy,
         "topk": int(args.topk),
+        "support_topk": int(args.support_topk) if int(args.support_topk) > 0 else int(args.topk),
         "min_variant_count": int(args.min_variant_count),
+        "include_primary_candidate_in_support": not bool(args.exclude_primary_from_support),
         "reference_prediction_json": args.reference,
         "primary_candidate_prediction_json": args.primary_candidate,
-        "candidate_variant_prediction_jsons": [str(path) for path in variant_paths],
+        "support_prediction_jsons": [
+            {"label": label, "path": str(path)} for label, path in support_paths
+        ],
     }
+    support_topk = int(selector_metadata["support_topk"])
 
     selected: dict[str, dict[str, Any]] = {}
     per_qid: list[dict[str, Any]] = []
@@ -530,12 +590,17 @@ def main() -> None:
     min_vote_fractions: list[float] = []
 
     for qid in qids:
-        variant_rows = [prediction[qid] for _path, prediction in variants if qid in prediction]
+        support_view_rows = [
+            (label, prediction[qid])
+            for label, _path, prediction in support_views
+            if qid in prediction
+        ]
         decision = choose_prediction(
             reference_row=reference[qid],
             primary_row=primary[qid],
-            variant_rows=variant_rows,
+            support_view_rows=support_view_rows,
             topk=int(args.topk),
+            support_topk=support_topk,
             selection_mode=args.selection_mode,
             support_policy=args.support_policy,
             min_variant_count=int(args.min_variant_count),
@@ -567,7 +632,9 @@ def main() -> None:
                 "selector_selected_source": decision["selected_source"],
                 "selector_selection_reason": decision["selection_reason"],
                 "selector_variant_count": decision["variant_count"],
+                "selector_support_view_count": decision["variant_count"],
                 "selector_required_votes": decision["required_votes"],
+                "selector_support_topk": support_topk,
                 "selector_promoted_page_count": decision["promoted_page_count"],
                 "selector_stable_promoted_page_count": decision["stable_promoted_page_count"],
                 "selector_unstable_promoted_page_count": decision["unstable_promoted_page_count"],
@@ -577,6 +644,7 @@ def main() -> None:
                 "selector_stable_promoted_pages": decision["stable_promoted_pages"],
                 "selector_unstable_promoted_pages": decision["unstable_promoted_pages"],
                 "selector_promoted_page_vote_counts": decision["promoted_page_vote_counts"],
+                "selector_promoted_page_vote_sources": decision["promoted_page_vote_sources"],
             },
         }
         per_qid.append(row_summary)
