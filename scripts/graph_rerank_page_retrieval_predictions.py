@@ -762,6 +762,33 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--query-local-evidence-min-doc-confidence",
+        type=float,
+        default=0.0,
+        help=(
+            "For query_local_softmax, skip a document if its query-local evidence "
+            "confidence is below this threshold."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-max-active-page-frac",
+        type=float,
+        default=1.0,
+        help=(
+            "For query_local_softmax, skip a document when evidence touches more than "
+            "this fraction of its candidate pages. This suppresses diffuse evidence."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-softmax-mix",
+        type=float,
+        default=1.0,
+        help=(
+            "Blend between original uniform doc->page transitions and query-local "
+            "softmax transitions. 0 disables the shift; 1 applies the full shift."
+        ),
+    )
+    parser.add_argument(
         "--query-local-evidence-softmax-prior",
         choices=["page_seed", "uniform"],
         default="page_seed",
@@ -3709,6 +3736,13 @@ def build_query_local_evidence_scores(
         "query_local_evidence_confidence_mode": str(
             args.query_local_evidence_confidence_mode
         ),
+        "query_local_evidence_min_doc_confidence": float(
+            args.query_local_evidence_min_doc_confidence
+        ),
+        "query_local_evidence_max_active_page_frac": float(
+            args.query_local_evidence_max_active_page_frac
+        ),
+        "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
         "query_local_evidence_softmax_prior": str(args.query_local_evidence_softmax_prior),
         "query_local_evidence_active": False,
         "query_local_evidence_reason": "disabled",
@@ -3830,6 +3864,9 @@ def softmax_doc_page_multipliers(
     page_seed: dict[str, float],
     strength: float,
     confidence_mode: str,
+    min_doc_confidence: float,
+    max_active_page_frac: float,
+    softmax_mix: float,
     softmax_prior: str,
 ) -> tuple[dict[str, float], dict[str, object]]:
     multipliers: dict[str, float] = {
@@ -3841,6 +3878,12 @@ def softmax_doc_page_multipliers(
     active_page_count = 0
     confidence_values: list[float] = []
     alpha_values: list[float] = []
+    active_page_frac_values: list[float] = []
+    skipped_low_confidence_doc_count = 0
+    skipped_broad_doc_count = 0
+    min_doc_confidence = clamp(float(min_doc_confidence), 0.0, 1.0)
+    max_active_page_frac = clamp(float(max_active_page_frac), 0.0, 1.0)
+    softmax_mix = clamp(float(softmax_mix), 0.0, 1.0)
 
     for _doc_id, doc_records in pages_by_doc.items():
         if not doc_records:
@@ -3853,8 +3896,16 @@ def softmax_doc_page_multipliers(
         if max_score <= 0.0:
             continue
         confidence = query_local_doc_confidence(doc_scores, mode=confidence_mode)
+        if confidence < min_doc_confidence:
+            skipped_low_confidence_doc_count += 1
+            continue
+        doc_active_page_count = sum(1 for score in doc_scores.values() if score > 0.0)
+        active_page_frac = float(doc_active_page_count) / float(len(doc_records))
+        if active_page_frac > max_active_page_frac:
+            skipped_broad_doc_count += 1
+            continue
         alpha = max(0.0, float(strength)) * confidence
-        if alpha <= 0.0:
+        if alpha <= 0.0 or softmax_mix <= 0.0:
             continue
 
         priors: dict[str, float] = {}
@@ -3876,16 +3927,25 @@ def softmax_doc_page_multipliers(
         doc_page_count = float(len(doc_records))
         for record in doc_records:
             uid = record.page_uid
-            multipliers[uid] = doc_page_count * softmax_dist.get(uid, 0.0)
+            full_multiplier = doc_page_count * softmax_dist.get(uid, 0.0)
+            multipliers[uid] = 1.0 + softmax_mix * (full_multiplier - 1.0)
 
         active_doc_count += 1
-        active_page_count += sum(1 for score in doc_scores.values() if score > 0.0)
+        active_page_count += doc_active_page_count
         confidence_values.append(confidence)
         alpha_values.append(alpha)
+        active_page_frac_values.append(active_page_frac)
 
     return multipliers, {
         "constraint_competition_active_doc_count": active_doc_count,
         "constraint_competition_active_page_count": active_page_count,
+        "query_local_evidence_skipped_low_confidence_doc_count": (
+            skipped_low_confidence_doc_count
+        ),
+        "query_local_evidence_skipped_broad_doc_count": skipped_broad_doc_count,
+        "mean_query_local_evidence_active_page_frac": (
+            statistics.fmean(active_page_frac_values) if active_page_frac_values else None
+        ),
         "mean_query_local_evidence_doc_confidence": (
             statistics.fmean(confidence_values) if confidence_values else None
         ),
@@ -4383,6 +4443,9 @@ def build_constraint_competition_policy(
             page_seed=page_seed,
             strength=strength,
             confidence_mode=str(args.query_local_evidence_confidence_mode),
+            min_doc_confidence=float(args.query_local_evidence_min_doc_confidence),
+            max_active_page_frac=float(args.query_local_evidence_max_active_page_frac),
+            softmax_mix=float(args.query_local_evidence_softmax_mix),
             softmax_prior=str(args.query_local_evidence_softmax_prior),
         )
         multiplier_values = list(multipliers.values())
@@ -5653,6 +5716,13 @@ def main() -> None:
                 ),
                 "query_local_evidence_stopword_mode": args.query_local_evidence_stopword_mode,
                 "query_local_evidence_confidence_mode": args.query_local_evidence_confidence_mode,
+                "query_local_evidence_min_doc_confidence": float(
+                    args.query_local_evidence_min_doc_confidence
+                ),
+                "query_local_evidence_max_active_page_frac": float(
+                    args.query_local_evidence_max_active_page_frac
+                ),
+                "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
                 "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
                 "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
                 "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
@@ -5837,6 +5907,13 @@ def main() -> None:
         "query_local_evidence_min_specificity": float(args.query_local_evidence_min_specificity),
         "query_local_evidence_stopword_mode": args.query_local_evidence_stopword_mode,
         "query_local_evidence_confidence_mode": args.query_local_evidence_confidence_mode,
+        "query_local_evidence_min_doc_confidence": float(
+            args.query_local_evidence_min_doc_confidence
+        ),
+        "query_local_evidence_max_active_page_frac": float(
+            args.query_local_evidence_max_active_page_frac
+        ),
+        "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
         "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
         "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
         "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
@@ -6485,6 +6562,26 @@ def main() -> None:
                 for row in per_qid
             )
             else None
+        ),
+        "mean_query_local_evidence_active_page_frac": (
+            statistics.fmean(
+                float(row["graph"].get("mean_query_local_evidence_active_page_frac", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_query_local_evidence_active_page_frac") is not None
+            )
+            if any(
+                row["graph"].get("mean_query_local_evidence_active_page_frac") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "query_local_evidence_skipped_low_confidence_doc_count": sum(
+            int(row["graph"].get("query_local_evidence_skipped_low_confidence_doc_count", 0))
+            for row in per_qid
+        ),
+        "query_local_evidence_skipped_broad_doc_count": sum(
+            int(row["graph"].get("query_local_evidence_skipped_broad_doc_count", 0))
+            for row in per_qid
         ),
         "mean_query_local_evidence_doc_alpha": (
             statistics.fmean(
