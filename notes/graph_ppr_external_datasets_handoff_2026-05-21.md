@@ -70,6 +70,99 @@ Current claim:
 - MMLongBench DocQA is now prepared as the next page-labeled stress test. It should use the same page-preserving default first, because `ans_page_list` provides exact zero-based page labels.
 - DUDE is scaffolded as the MP-DocVQA replacement target. It should also use the page-preserving default first, after validating the converter's `answer_page_base` sanity summary.
 
+## 2026-05-23 Addendum: Graph Augmentation Status
+
+Recent experiments added three new graph-augmentation directions: PDF hyperlink edges for M3DocVQA/MMQA, query-anchor/financial evidence audits for MMDocIR, and LayoutLMv3 page-embedding kNN edges for MMDocIR.
+
+### M3DocVQA PDF hyperlink graph
+
+The PDF annotations expose a real Wikipedia hyperlink graph:
+
+```text
+valid docs checked: 3366
+deduped edges: 21451
+source doc coverage: 2885 / 3366 = 85.71%
+target doc coverage: 2417 / 3366 = 71.81%
+```
+
+This is useful because many M3DocVQA questions are entity-chain or bridge-document questions. Hyperlinks provide authored edges from a retrieved source page to a related target document, especially for ImageListQ and visual/entity questions.
+
+Best current fixed-weight results against `fulldev_nohyperlink_denseheavy125_medium_both`:
+
+| Run | doc@1 | doc@4 | doc@20 | doc@100 | Movement summary |
+| --- | ---: | ---: | ---: | ---: | --- |
+| no hyperlink baseline | 0.6080 | 0.8458 | 0.9272 | 0.9632 | baseline |
+| hyperlink `w0p05` | 0.6099 | 0.8479 | 0.9283 | 0.9655 | 48 improved / 22 worsened |
+| hyperlink `w0p10` | 0.6090 | 0.8517 | 0.9292 | 0.9684 | 63 improved / 36 worsened |
+| hyperlink `w0p20` | 0.6057 | 0.8527 | 0.9305 | 0.9726 | 78 improved / 53 worsened |
+
+Interpretation:
+
+- fixed `w0p10` is the best balanced headline setting so far
+- fixed `w0p20` gives the highest doc@4/doc@100 but hurts doc@1
+- source/target gated query-supported `w0p10` is safer at doc@1 but lower at doc@4
+- source-target rank decay over-penalizes useful Wikipedia jumps and should not be used as a main setting
+
+Hyperlink audit:
+
+```text
+gold_has_any_incoming_link_count: 1959 / 2441
+gold_linked_from_baseline_sources_count: 1932 / 2441
+```
+
+The largest gains are concentrated in `ImageListQ`, where retrieved bridge pages often link to the target entity/document needed for a visual answer. This should be framed as a real authored document graph, not as a hand-built heuristic.
+
+### MMDocIR query-anchor and financial evidence
+
+Query-anchor evidence remains the strongest graph-native MMDocIR augmentation, but the audits show why domain-specific gains saturate.
+
+Financial subset:
+
+```text
+qids: 344
+best broad financial verifier recovered/lost: 3 / 0
+main limitations:
+  gold_page_no_financial_evidence_match: 187
+  evidence_too_broad: 87
+  gold_page_has_evidence_but_not_in_candidate_head: 29
+  gold_page_missing_from_candidate_pool: 18
+```
+
+The financial verifier can catch true table-like evidence, but naive financial text matching is too broad: many pages contain the same metric/year tokens. A strict doc-prior version reduced broad positive pages but caused 2 lost top-4 cases, so it should be treated as a diagnostic/ablation, not a headline method yet.
+
+News subset:
+
+```text
+qids: 137
+recovered: 2
+improved_rank: 38
+worsened_rank: 29
+missing_in_both: 14
+main limitation:
+  competing_top_pages_match_as_many_or_more_anchors: 45
+```
+
+The News audit is useful because it isolates the weakness of pure anchor matching: topical/entity redundancy. The right next step is not stronger anchor weight; it is learned or verifier-based evidence calibration, or at least multi-anchor relation/co-occurrence verification.
+
+### LayoutLMv3 page-kNN graph
+
+The LayoutLMv3 experiment should currently be reported as a negative ablation:
+
+```text
+embedded pages: 20214
+source_counts: {'fallback_text': 20214}
+```
+
+Because all pages used fallback text rather than real OCR boxes/layout inputs, the graph was essentially a text-embedding kNN graph, not a true layout graph.
+
+Observed behavior:
+
+- broad cross-doc kNN hurt MMDocIR page@4: `1114 -> 1104`
+- same-doc kNN was neutral/slightly worse: page@4 stayed around `1114`, doc@4 dropped slightly
+- gated same-doc top1 also did not help: recovered/lost `0 / 2`
+
+Conclusion: do not use fallback LayoutLMv3 kNN as a main novelty result. Revisit only with real OCR boxes/layout patches or a DocGraphLM-style page representation.
+
 ## Transfer Results That Motivated This
 
 Values outside parentheses are Graph-PPR `doc_shortlist_best`.

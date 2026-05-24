@@ -23,6 +23,21 @@ All MMDocIR numbers below are page hit@4 unless otherwise noted.
 | Query-position graph nodes | 1114 / 1658 | 0 | Conceptually useful but empirically neutral so far |
 | Structural metadata reranker, conservative parser | 1118 / 1658 | +4, lost=0 | Best targeted gain, but rule-based/heuristic |
 | Query anchor evidence nodes, uniform w0.20 r0.05 | 1117 / 1658 | +3, lost=0 | Best graph-native novelty result so far |
+| Query anchor r0.10 + tight structural metadata | 1123 / 1658 | +9, lost=0 | Best current MMDocIR result, but includes heuristic structural layer |
+| Financial verifier v2, broad table/text evidence | 1120 / 1658 | +6, lost=0 vs denseheavy baseline in case compare | Useful diagnostic; evidence often too broad |
+| Financial verifier strict doc-prior | 1118 / 1658 | +4, but lost=2 | Reduced broad positives, but too strict for headline use |
+| LayoutLMv3 fallback-text kNN graph | 1104-1114 / 1658 | -10 to 0 | Negative ablation until real OCR/layout boxes are available |
+
+M3DocVQA/MMQA document retrieval numbers:
+
+| Method | doc@1 | doc@4 | doc@20 | doc@100 | Current verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| no-hyperlink Graph Page Preserve | 0.6080 | 0.8458 | 0.9272 | 0.9632 | baseline |
+| PDF hyperlink graph `w0p05` | 0.6099 | 0.8479 | 0.9283 | 0.9655 | small safe gain |
+| PDF hyperlink graph `w0p10` | 0.6090 | 0.8517 | 0.9292 | 0.9684 | best balanced hyperlink setting |
+| PDF hyperlink graph `w0p20` | 0.6057 | 0.8527 | 0.9305 | 0.9726 | best deeper recall, hurts doc@1 |
+| query-supported hyperlink `s50_t500_m5_w0p10` | 0.6093 | 0.8500 | 0.9286 | 0.9676 | conservative/noise-control variant |
+| source-target decay hyperlink `w0p20` | 0.6103 | 0.8469 | 0.9278 | 0.9645 | top-1 gain but kills most hyperlink benefit |
 
 Cross-dataset structural metadata sanity:
 
@@ -39,6 +54,7 @@ Strongest thesis-facing novelty:
 2. Query-adaptive graph propagation controlled by reliability, transition, and same-document coherence.
 3. Typed evidence nodes in a heterogeneous graph: query-position nodes, query-anchor nodes, and planned page-type/visual-tag nodes.
 4. Failure-driven graph augmentation: target cases where the gold page exists in the dense/sparse pool but graph ranking fails to localize it.
+5. Authored hyperlink graph augmentation for Wikipedia-derived PDF corpora: PDF annotation links create real document/document transitions rather than synthetic similarity edges.
 
 Not novel by itself:
 
@@ -48,6 +64,7 @@ Not novel by itself:
 4. Standard Personalized PageRank.
 5. Simple post-hoc boosting.
 6. Hand-written query rules without graph integration.
+7. Fallback text-only LayoutLMv3 kNN edges; without real OCR boxes/layout features this is not a layout graph.
 
 ## Heuristic Status
 
@@ -168,6 +185,36 @@ but the slot extractor missed lowercase metric phrases and still included broad 
 The next revision adds lowercase financial metric phrase extraction and optional
 numeric/table-likeness weighting via `QUERY_ANCHOR_FINANCIAL_TABLE_BONUS`.
 
+Latest financial retrieval audit:
+
+```text
+Financial qids: 344
+Broad financial verifier:
+  recovered: 3
+  improved_rank: 49
+  worsened_rank: 29
+  missing_in_both: 18
+  main limitations:
+    gold_page_no_financial_evidence_match: 187
+    evidence_too_broad: 87
+    gold_page_has_evidence_but_not_in_candidate_head: 29
+
+Strict doc-prior verifier:
+  recovered: 3
+  lost: 2
+  improved_rank: 51
+  worsened_rank: 46
+  active_qid_count: 167
+  mean_active_positive_page_count: 76.24
+```
+
+Conclusion:
+
+- broad verifier catches real evidence but matches too many pages
+- strict verifier reduces broad positives but can demote already-correct top-4 pages
+- do not make this the main method yet
+- use it as evidence for the need for learned/query-conditioned evidence calibration
+
 ### 2. Page-Type / Modality Nodes
 
 Purpose: help table/chart/figure failures by adding page-level type evidence.
@@ -213,6 +260,62 @@ Candidate design:
 - Use reciprocal support to adapt source weights, restart vector, and edge strengths.
 - Avoid fixed domain/type routing unless used only for analysis.
 - Evaluate by agreement bins, pool coverage, and source-only gold coverage.
+
+### 6. PDF Hyperlink Graph For M3DocVQA/MMQA
+
+Purpose: use authored Wikipedia links embedded in the PDF annotations to connect retrieved bridge pages to target documents.
+
+Current graph construction:
+
+```text
+deduped_edge_count: 21451
+source_doc_count: 2885 / 3366
+target_doc_count: 2417 / 3366
+gold_has_any_incoming_link_count: 1959 / 2441
+gold_linked_from_baseline_sources_count: 1932 / 2441
+```
+
+Current best result:
+
+```text
+No-hyperlink baseline doc@4: 0.8458
+PDF hyperlink w0p10 doc@4: 0.8517
+PDF hyperlink w0p20 doc@4: 0.8527, but doc@1 drops
+```
+
+Interpretation:
+
+- `w0p10` is the best balanced setting
+- `w0p20` is useful if deeper recall matters more than top-1 stability
+- query-supported gating is safer but not stronger than fixed `w0p10`
+- source-target rank decay over-penalizes useful bridge links
+
+This is thesis-facing because the graph edges come from authored PDF/Wikipedia structure, not from labels. It is strongest on entity-chain and ImageListQ-style questions.
+
+### 7. News Query-Anchor Audit
+
+Purpose: understand why query anchors help some News questions but also create many rank regressions.
+
+Latest audit:
+
+```text
+News qids: 137
+recovered: 2
+improved_rank: 38
+worsened_rank: 29
+missing_in_both: 14
+main limitations:
+  competing_top_pages_match_as_many_or_more_anchors: 45
+  no_query_anchors: 26
+  gold_page_has_anchor_evidence_but_not_in_candidate_head: 19
+```
+
+Conclusion:
+
+- pure anchor matching is too weak for topical/news redundancy
+- stronger global anchor weights are likely to increase false positives
+- the non-heuristic path is learned evidence reliability or a query-conditioned verifier
+- use the audit as the motivation for adaptive graph evidence calibration
 
 ## Reporting Rule
 
