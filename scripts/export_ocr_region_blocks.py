@@ -46,6 +46,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--page-uid", action="append", default=[])
     parser.add_argument("--max-pages", type=int, default=0)
     parser.add_argument("--image-root", default="")
+    parser.add_argument(
+        "--image-path-prefix",
+        action="append",
+        default=[],
+        metavar="OLD=NEW",
+        help=(
+            "Rewrite stale image path prefixes before existence checks. "
+            "Repeatable; useful when doc_pages has absolute paths from another filesystem."
+        ),
+    )
     parser.add_argument("--ocr-engine", choices=["tesseract", "easyocr"], default="easyocr")
     parser.add_argument("--ocr-bin", default="tesseract")
     parser.add_argument("--ocr-lang", default="eng")
@@ -196,20 +206,50 @@ def load_doc_pages(path: Path) -> dict[str, dict[str, Any]]:
     return rows
 
 
-def candidate_image_paths(row: dict[str, Any], image_root: Path | None) -> list[Path]:
+def parse_image_path_prefixes(values: list[str]) -> list[tuple[str, str]]:
+    prefixes: list[tuple[str, str]] = []
+    for value in values:
+        if "=" not in str(value):
+            raise ValueError(f"--image-path-prefix must be OLD=NEW, got: {value}")
+        old, new = str(value).split("=", 1)
+        old = old.rstrip("/")
+        new = new.rstrip("/")
+        if not old or not new:
+            raise ValueError(f"--image-path-prefix must have non-empty OLD and NEW: {value}")
+        prefixes.append((old, new))
+    prefixes.sort(key=lambda pair: len(pair[0]), reverse=True)
+    return prefixes
+
+
+def rewrite_path(text: str, prefixes: list[tuple[str, str]]) -> list[str]:
+    rewritten: list[str] = []
+    for old, new in prefixes:
+        if text == old:
+            rewritten.append(new)
+        elif text.startswith(old + "/"):
+            rewritten.append(new + text[len(old) :])
+    return rewritten
+
+
+def candidate_image_paths(
+    row: dict[str, Any],
+    image_root: Path | None,
+    image_path_prefixes: list[tuple[str, str]],
+) -> list[Path]:
     candidates: list[Path] = []
 
     def add(value: Any) -> None:
         text = str(value or "").strip()
         if not text:
             return
-        path = Path(text)
-        if path.is_absolute():
-            candidates.append(path)
-        elif image_root is not None:
-            candidates.append(image_root / path)
-        else:
-            candidates.append(path)
+        for candidate_text in [text, *rewrite_path(text, image_path_prefixes)]:
+            path = Path(candidate_text)
+            if path.is_absolute():
+                candidates.append(path)
+            elif image_root is not None:
+                candidates.append(image_root / path)
+            else:
+                candidates.append(path)
 
     for key in ("image_path", "source_image_path", "page_image_path", "image"):
         add(row.get(key))
@@ -223,8 +263,12 @@ def candidate_image_paths(row: dict[str, Any], image_root: Path | None) -> list[
     return out
 
 
-def resolve_image_path(row: dict[str, Any], image_root: Path | None) -> Path | None:
-    for path in candidate_image_paths(row, image_root):
+def resolve_image_path(
+    row: dict[str, Any],
+    image_root: Path | None,
+    image_path_prefixes: list[tuple[str, str]],
+) -> Path | None:
+    for path in candidate_image_paths(row, image_root, image_path_prefixes):
         if path.exists():
             return path
     return None
@@ -390,6 +434,7 @@ def export_regions(args: argparse.Namespace) -> dict[str, Any]:
     missing_requested_pages = len(requested_pages - set(doc_pages))
 
     image_root = Path(args.image_root) if str(args.image_root).strip() else None
+    image_path_prefixes = parse_image_path_prefixes(args.image_path_prefix)
     reader = build_easyocr_reader(args) if str(args.ocr_engine) == "easyocr" else None
 
     output_path = Path(args.output_jsonl)
@@ -406,7 +451,7 @@ def export_regions(args: argparse.Namespace) -> dict[str, Any]:
             key = page_key_from_row(row)
             if key is None:
                 continue
-            image_path = resolve_image_path(row, image_root)
+            image_path = resolve_image_path(row, image_root, image_path_prefixes)
             if image_path is None:
                 missing_image_count += 1
                 if not args.continue_on_error:
@@ -461,6 +506,8 @@ def export_regions(args: argparse.Namespace) -> dict[str, Any]:
         "qid_filter_jsonl": [str(path) for path in args.qid_filter_jsonl],
         "prediction_top_pages": int(args.prediction_top_pages),
         "min_confidence": float(args.min_confidence),
+        "image_root": str(args.image_root),
+        "image_path_prefix": list(args.image_path_prefix),
     }
     Path(args.output_summary_json).write_text(
         json.dumps(summary, ensure_ascii=False, indent=2),
