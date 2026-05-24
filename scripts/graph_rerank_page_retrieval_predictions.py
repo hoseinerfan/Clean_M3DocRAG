@@ -809,6 +809,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--query-local-selector-decision-mode",
+        choices=["threshold", "stability_majority"],
+        default="threshold",
+        help=(
+            "Decision rule for query_local_selector. threshold uses the configured "
+            "feature/op/threshold. stability_majority selects qlsoft only when the "
+            "pages qlsoft promotes over constraint competition survive a strict "
+            "majority of internal qlsoft weakening variants."
+        ),
+    )
+    parser.add_argument(
         "--query-local-selector-op",
         choices=["<=", ">="],
         default=">=",
@@ -819,6 +830,21 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Threshold for query_local_selector. The selected qlsoft run remains opt-in.",
+    )
+    parser.add_argument(
+        "--query-local-stability-strength-factors",
+        default="0.5,0.75,1.0",
+        help=(
+            "Comma/space-separated qlsoft strength factors used by "
+            "stability_majority. Defaults to a monotone weakening ensemble ending "
+            "at the configured strength."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-stability-top-k",
+        type=int,
+        default=4,
+        help="Top-k page set used for query-local stability voting.",
     )
     parser.add_argument(
         "--query-local-evidence-boundary-mode",
@@ -4150,6 +4176,38 @@ def selector_condition_passes(
     return value >= float(threshold)
 
 
+def parse_float_sequence(value: object, *, default: list[float]) -> list[float]:
+    text = str(value or "").replace(",", " ")
+    values: list[float] = []
+    for item in text.split():
+        try:
+            number = float(item)
+        except ValueError:
+            continue
+        if math.isnan(number) or math.isinf(number) or number <= 0.0:
+            continue
+        values.append(number)
+    return values or list(default)
+
+
+def policy_adjusted_seed_ranking(
+    *,
+    policy: ConstraintCompetitionPolicy,
+    page_seed: dict[str, float],
+    top_k: int,
+) -> list[str]:
+    top_k = max(1, int(top_k))
+    ranked = sorted(
+        policy.doc_to_page_multipliers,
+        key=lambda uid: (
+            -max(0.0, float(page_seed.get(uid, 0.0)))
+            * max(0.0, float(policy.doc_to_page_multipliers.get(uid, 1.0))),
+            uid,
+        ),
+    )
+    return ranked[:top_k]
+
+
 def build_query_local_softmax_competition_policy(
     *,
     question: str,
@@ -4741,18 +4799,84 @@ def build_constraint_competition_policy(
         )
 
         selector_feature = str(args.query_local_selector_feature)
+        selector_decision_mode = str(args.query_local_selector_decision_mode)
         selector_op = str(args.query_local_selector_op)
         selector_threshold = float(args.query_local_selector_threshold)
         selector_value = finite_metadata_float(query_local_policy.metadata, selector_feature)
-        selector_passed = selector_condition_passes(
-            selector_value,
-            op=selector_op,
-            threshold=selector_threshold,
-        )
         query_local_available = (
             int(query_local_policy.metadata.get("constraint_competition_active_page_count", 0))
             > 0
         )
+        stability_top_k = max(1, int(args.query_local_stability_top_k))
+        stability_strength_factors = parse_float_sequence(
+            args.query_local_stability_strength_factors,
+            default=[0.5, 0.75, 1.0],
+        )
+        stability_variant_count = 0
+        stability_support_vote_count = 0
+        stability_promoted_pages: set[str] = set()
+        stability_vote_fraction: float | None = None
+
+        if selector_decision_mode == "stability_majority":
+            constraint_top = set(
+                policy_adjusted_seed_ranking(
+                    policy=constraint_policy,
+                    page_seed=page_seed,
+                    top_k=stability_top_k,
+                )
+            )
+            query_local_top = set(
+                policy_adjusted_seed_ranking(
+                    policy=query_local_policy,
+                    page_seed=page_seed,
+                    top_k=stability_top_k,
+                )
+            )
+            stability_promoted_pages = query_local_top - constraint_top
+            for factor in stability_strength_factors:
+                variant_policy = (
+                    query_local_policy
+                    if abs(float(factor) - 1.0) <= 1e-9
+                    else build_query_local_softmax_competition_policy(
+                        question=question,
+                        records=records,
+                        pages_by_doc=pages_by_doc,
+                        page_texts=page_texts,
+                        query_local_doc_weights=query_local_doc_weights,
+                        page_seed=page_seed,
+                        strength=strength * float(factor),
+                        args=args,
+                        base_metadata=metadata,
+                    )
+                )
+                variant_top = set(
+                    policy_adjusted_seed_ranking(
+                        policy=variant_policy,
+                        page_seed=page_seed,
+                        top_k=stability_top_k,
+                    )
+                )
+                stability_variant_count += 1
+                if stability_promoted_pages and stability_promoted_pages.issubset(
+                    variant_top
+                ):
+                    stability_support_vote_count += 1
+            stability_vote_fraction = (
+                float(stability_support_vote_count) / float(stability_variant_count)
+                if stability_variant_count > 0
+                else None
+            )
+            selector_passed = (
+                bool(stability_promoted_pages)
+                and stability_support_vote_count > stability_variant_count / 2.0
+            )
+        else:
+            selector_passed = selector_condition_passes(
+                selector_value,
+                op=selector_op,
+                threshold=selector_threshold,
+            )
+
         choose_query_local = bool(query_local_available and selector_passed)
         selected_policy = query_local_policy if choose_query_local else constraint_policy
         selected_metadata = dict(selected_policy.metadata)
@@ -4768,6 +4892,7 @@ def build_constraint_competition_policy(
         selected_metadata.update(
             {
                 "query_local_selector_feature": selector_feature,
+                "query_local_selector_decision_mode": selector_decision_mode,
                 "query_local_selector_op": selector_op,
                 "query_local_selector_threshold": selector_threshold,
                 "query_local_selector_feature_value": selector_value,
@@ -4784,6 +4909,14 @@ def build_constraint_competition_policy(
                         )
                     )
                     > 0
+                ),
+                "query_local_stability_top_k": stability_top_k,
+                "query_local_stability_strength_factors": stability_strength_factors,
+                "query_local_stability_variant_count": stability_variant_count,
+                "query_local_stability_support_vote_count": stability_support_vote_count,
+                "query_local_stability_vote_fraction": stability_vote_fraction,
+                "query_local_stability_promoted_page_count": len(
+                    stability_promoted_pages
                 ),
             }
         )
@@ -6031,8 +6164,11 @@ def main() -> None:
                 "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
                 "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
                 "query_local_selector_feature": args.query_local_selector_feature,
+                "query_local_selector_decision_mode": args.query_local_selector_decision_mode,
                 "query_local_selector_op": args.query_local_selector_op,
                 "query_local_selector_threshold": float(args.query_local_selector_threshold),
+                "query_local_stability_strength_factors": args.query_local_stability_strength_factors,
+                "query_local_stability_top_k": int(args.query_local_stability_top_k),
                 "query_local_evidence_boundary_mode": args.query_local_evidence_boundary_mode,
                 "query_local_evidence_boundary_rank_source": (
                     args.query_local_evidence_boundary_rank_source
@@ -6238,8 +6374,11 @@ def main() -> None:
         "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
         "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
         "query_local_selector_feature": args.query_local_selector_feature,
+        "query_local_selector_decision_mode": args.query_local_selector_decision_mode,
         "query_local_selector_op": args.query_local_selector_op,
         "query_local_selector_threshold": float(args.query_local_selector_threshold),
+        "query_local_stability_strength_factors": args.query_local_stability_strength_factors,
+        "query_local_stability_top_k": int(args.query_local_stability_top_k),
         "query_local_evidence_boundary_mode": args.query_local_evidence_boundary_mode,
         "query_local_evidence_boundary_rank_source": (
             args.query_local_evidence_boundary_rank_source
@@ -6990,6 +7129,31 @@ def main() -> None:
                 row["graph"].get("query_local_selector_feature_value") is not None
                 for row in per_qid
             )
+            else None
+        ),
+        "query_local_stability_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("query_local_stability_variant_count", 0)) > 0
+        ),
+        "mean_query_local_stability_vote_fraction": (
+            statistics.fmean(
+                float(row["graph"].get("query_local_stability_vote_fraction", 0.0))
+                for row in per_qid
+                if row["graph"].get("query_local_stability_vote_fraction") is not None
+            )
+            if any(
+                row["graph"].get("query_local_stability_vote_fraction") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_query_local_stability_promoted_page_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_local_stability_promoted_page_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
             else None
         ),
         "constraint_competition_qid_count": sum(
