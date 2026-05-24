@@ -685,20 +685,91 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--constraint-competition-mode",
-        choices=["none", "doc_transition"],
+        choices=["none", "doc_transition", "query_local_softmax"],
         default="none",
         help=(
-            "Use constraint-bundle page evidence to make pages within the same document "
-            "compete. doc_transition increases doc->page edge mass for pages with "
-            "constraint evidence, causing them to steal normalized transition mass from "
-            "sibling pages."
+            "Make pages within the same document compete for doc->page transition mass. "
+            "doc_transition uses constraint-bundle page evidence. query_local_softmax "
+            "uses query-local atom evidence without domain-specific constraint slots."
         ),
     )
     parser.add_argument(
         "--constraint-competition-strength",
         type=float,
         default=0.0,
-        help="Strength for constraint evidence doc->page transition competition.",
+        help="Strength for evidence-driven doc->page transition competition.",
+    )
+    parser.add_argument(
+        "--query-local-evidence-doc-top-k",
+        type=int,
+        default=20,
+        help=(
+            "For query_local_softmax, restrict page-text evidence matching to pages from "
+            "the top K fused dense/SPLADE documents. Use 0 for all candidate docs."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-min-doc-support",
+        type=float,
+        default=0.0,
+        help=(
+            "For query_local_softmax, ignore candidate docs with normalized dense/SPLADE "
+            "support below this threshold."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-max-atoms",
+        type=int,
+        default=24,
+        help="Maximum query-local evidence atoms retained after local specificity scoring.",
+    )
+    parser.add_argument(
+        "--query-local-evidence-max-ngram",
+        type=int,
+        default=4,
+        help="Maximum query-token n-gram length considered as a query-local evidence atom.",
+    )
+    parser.add_argument(
+        "--query-local-evidence-min-token-len",
+        type=int,
+        default=3,
+        help="Minimum non-numeric token length for query-local evidence atoms.",
+    )
+    parser.add_argument(
+        "--query-local-evidence-min-specificity",
+        type=float,
+        default=0.0,
+        help="Minimum local-IDF specificity floor for query-local evidence atoms.",
+    )
+    parser.add_argument(
+        "--query-local-evidence-stopword-mode",
+        choices=["generic", "none"],
+        default="generic",
+        help=(
+            "Stopword handling for query_local_softmax atoms. generic removes only "
+            "domain-agnostic instruction/function words; none relies purely on "
+            "query-local specificity scoring."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-confidence-mode",
+        choices=["none", "entropy", "margin"],
+        default="entropy",
+        help=(
+            "Confidence gate for query_local_softmax. entropy downweights diffuse "
+            "evidence; margin uses the gap between the strongest and second strongest "
+            "page evidence scores; none applies the full strength."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-softmax-prior",
+        choices=["page_seed", "uniform"],
+        default="page_seed",
+        help=(
+            "Base prior inside each document for query_local_softmax doc->page edges. "
+            "page_seed preserves the fused retrieval prior; uniform lets evidence fully "
+            "redistribute pages within each document."
+        ),
     )
     parser.add_argument(
         "--pdf-hyperlink-edges-jsonl",
@@ -2873,6 +2944,31 @@ CONSTRAINT_METRIC_PHRASES = FINANCIAL_METRIC_PHRASES | {
     "transferencias netas no monetarias",
 }
 
+# Generic instruction/function-word filter for query-local evidence atoms. This is
+# intentionally not a domain vocabulary; domain terms are kept and scored by their
+# query-local page specificity.
+QUERY_LOCAL_EVIDENCE_STOPWORDS = QUERY_ANCHOR_STOPWORDS | MULTILINGUAL_INSTRUCTION_STOPWORDS | {
+    "answer",
+    "answers",
+    "berechnen",
+    "calcular",
+    "calculate",
+    "calculer",
+    "come",
+    "comment",
+    "como",
+    "cómo",
+    "compare",
+    "comparer",
+    "dé",
+    "give",
+    "indicate",
+    "indique",
+    "indiquez",
+    "provide",
+    "show",
+}
+
 
 def normalize_query_anchor(anchor: str) -> str:
     normalized = re.sub(r"\s+", " ", str(anchor or "").strip(" \t\n\r,.;:!?()[]{}\"'`"))
@@ -3436,6 +3532,370 @@ def constraint_slot_specificity_weight(
     return clamp(raw, floor, 1.0)
 
 
+def query_local_uses_stopwords(mode: str) -> bool:
+    return str(mode) == "generic"
+
+
+def query_local_evidence_tokens(
+    question: str,
+    *,
+    min_token_len: int,
+    stopword_mode: str,
+) -> list[str]:
+    tokens: list[str] = []
+    for raw_token in re.findall(r"[\w&./+-]+", str(question or "").lower(), flags=re.UNICODE):
+        token = normalize_query_anchor(raw_token).lower()
+        if not token:
+            continue
+        if query_local_uses_stopwords(stopword_mode) and token in QUERY_LOCAL_EVIDENCE_STOPWORDS:
+            continue
+        if len(token) < min_token_len and not re.search(r"\d", token):
+            continue
+        tokens.append(token)
+    return tokens
+
+
+def add_query_local_evidence_atom(
+    atoms: list[str],
+    seen: set[str],
+    value: str,
+    *,
+    min_token_len: int,
+    stopword_mode: str,
+) -> None:
+    atom = normalize_query_anchor(value).lower()
+    if not atom:
+        return
+    atom_tokens = constraint_word_tokens(atom)
+    if query_local_uses_stopwords(stopword_mode) and atom in QUERY_LOCAL_EVIDENCE_STOPWORDS:
+        return
+    if (
+        query_local_uses_stopwords(stopword_mode)
+        and atom_tokens
+        and all(token in QUERY_LOCAL_EVIDENCE_STOPWORDS for token in atom_tokens)
+    ):
+        return
+    if len(atom) < min_token_len and not re.search(r"\d", atom):
+        return
+    if atom not in seen:
+        atoms.append(atom)
+        seen.add(atom)
+
+
+def extract_query_local_evidence_atoms(
+    question: str,
+    *,
+    args: argparse.Namespace,
+) -> list[str]:
+    max_atoms = max(1, int(args.query_local_evidence_max_atoms))
+    max_candidates = max(max_atoms, max_atoms * 3)
+    max_ngram = max(1, min(8, int(args.query_local_evidence_max_ngram)))
+    min_token_len = max(1, int(args.query_local_evidence_min_token_len))
+    stopword_mode = str(args.query_local_evidence_stopword_mode)
+    atoms: list[str] = []
+    seen: set[str] = set()
+
+    for value in extract_constraint_numeric_values(question):
+        add_query_local_evidence_atom(
+            atoms,
+            seen,
+            value,
+            min_token_len=1,
+            stopword_mode=stopword_mode,
+        )
+
+    for match in re.finditer(r"['\"]([^'\"]{3,120})['\"]", str(question or "")):
+        add_query_local_evidence_atom(
+            atoms,
+            seen,
+            match.group(1),
+            min_token_len=min_token_len,
+            stopword_mode=stopword_mode,
+        )
+
+    tokens = query_local_evidence_tokens(
+        question,
+        min_token_len=min_token_len,
+        stopword_mode=stopword_mode,
+    )
+    for token in tokens:
+        add_query_local_evidence_atom(
+            atoms,
+            seen,
+            token,
+            min_token_len=min_token_len,
+            stopword_mode=stopword_mode,
+        )
+
+    for ngram_len in range(min(max_ngram, len(tokens)), 1, -1):
+        for start in range(0, max(0, len(tokens) - ngram_len + 1)):
+            add_query_local_evidence_atom(
+                atoms,
+                seen,
+                " ".join(tokens[start : start + ngram_len]),
+                min_token_len=min_token_len,
+                stopword_mode=stopword_mode,
+            )
+            if len(atoms) >= max_candidates:
+                return atoms[:max_candidates]
+
+    return atoms[:max_candidates]
+
+
+def query_local_atom_matches_page_text(atom: str, page_text: str) -> bool:
+    if not atom or not page_text:
+        return False
+    normalized_atom = normalize_query_anchor(atom).lower()
+    if not normalized_atom:
+        return False
+    if " " not in normalized_atom and re.fullmatch(r"[a-z0-9_.+-]+", normalized_atom):
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9]){re.escape(normalized_atom)}(?![a-z0-9])",
+                page_text,
+            )
+        )
+    return normalized_atom in page_text
+
+
+def build_query_local_doc_weights(
+    *,
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    raw_doc_weights: dict[str, float] = defaultdict(float)
+    for doc_id, rank in dense_doc_ranks.items():
+        raw_doc_weights[doc_id] += source_weights.dense_weight / (
+            float(args.rrf_k) + float(rank)
+        )
+    for doc_id, rank in sparse_doc_ranks.items():
+        raw_doc_weights[doc_id] += source_weights.sparse_weight / (
+            float(args.rrf_k) + float(rank)
+        )
+    if not raw_doc_weights:
+        return {}
+    sorted_docs = sorted(raw_doc_weights.items(), key=lambda item: (-item[1], item[0]))
+    top_k = max(0, int(args.query_local_evidence_doc_top_k))
+    if top_k > 0:
+        sorted_docs = sorted_docs[:top_k]
+    return max_scale(dict(sorted_docs))
+
+
+def build_query_local_evidence_scores(
+    *,
+    question: str,
+    records: dict[str, PageRecord],
+    page_texts: dict[str, str],
+    doc_weights: dict[str, float],
+    args: argparse.Namespace,
+) -> tuple[dict[str, float], dict[str, object]]:
+    max_atoms = max(1, int(args.query_local_evidence_max_atoms))
+    min_doc_support = clamp(float(args.query_local_evidence_min_doc_support), 0.0, 1.0)
+    specificity_floor = clamp(float(args.query_local_evidence_min_specificity), 0.0, 1.0)
+    base_metadata: dict[str, object] = {
+        "query_local_evidence_doc_top_k": int(args.query_local_evidence_doc_top_k),
+        "query_local_evidence_min_doc_support": float(
+            args.query_local_evidence_min_doc_support
+        ),
+        "query_local_evidence_max_atoms": max_atoms,
+        "query_local_evidence_max_ngram": int(args.query_local_evidence_max_ngram),
+        "query_local_evidence_min_token_len": int(args.query_local_evidence_min_token_len),
+        "query_local_evidence_min_specificity": float(
+            args.query_local_evidence_min_specificity
+        ),
+        "query_local_evidence_stopword_mode": str(args.query_local_evidence_stopword_mode),
+        "query_local_evidence_confidence_mode": str(
+            args.query_local_evidence_confidence_mode
+        ),
+        "query_local_evidence_softmax_prior": str(args.query_local_evidence_softmax_prior),
+        "query_local_evidence_active": False,
+        "query_local_evidence_reason": "disabled",
+        "query_local_evidence_atom_count": 0,
+        "query_local_evidence_matched_atom_count": 0,
+        "query_local_evidence_selected_atom_count": 0,
+        "query_local_evidence_page_match_count": 0,
+        "mean_query_local_evidence_atom_specificity": None,
+    }
+    if not page_texts:
+        return {}, {**base_metadata, "query_local_evidence_reason": "no_page_text"}
+
+    candidate_records: dict[str, PageRecord] = {}
+    for uid, record in records.items():
+        doc_support = doc_weights.get(record.doc_id, 0.0)
+        if doc_support < min_doc_support or doc_support <= 0.0:
+            continue
+        candidate_records[uid] = record
+    candidate_count = len(candidate_records)
+    if candidate_count <= 0:
+        return {}, {**base_metadata, "query_local_evidence_reason": "no_candidate_pages"}
+
+    atoms = extract_query_local_evidence_atoms(question, args=args)
+    if not atoms:
+        return {}, {**base_metadata, "query_local_evidence_reason": "no_query_atoms"}
+
+    atom_matches: list[tuple[str, float, list[str], int]] = []
+    for order, atom in enumerate(atoms):
+        matched_uids = [
+            uid
+            for uid in candidate_records
+            if query_local_atom_matches_page_text(atom, page_texts.get(uid, ""))
+        ]
+        match_count = len(matched_uids)
+        if match_count <= 0:
+            continue
+        specificity = constraint_slot_specificity_weight(
+            match_count=match_count,
+            candidate_count=candidate_count,
+            floor=specificity_floor,
+        )
+        atom_matches.append((atom, specificity, matched_uids, order))
+
+    if not atom_matches:
+        return {}, {
+            **base_metadata,
+            "query_local_evidence_reason": "no_atom_matches",
+            "query_local_evidence_atom_count": len(atoms),
+        }
+
+    atom_matches.sort(
+        key=lambda item: (
+            -item[1],
+            -len(item[0].split()),
+            -len(item[0]),
+            item[3],
+        )
+    )
+    selected_atom_matches = atom_matches[:max_atoms]
+    page_scores: dict[str, float] = defaultdict(float)
+    selected_specificities: list[float] = []
+    selected_labels: list[str] = []
+    for atom, specificity, matched_uids, _order in selected_atom_matches:
+        selected_specificities.append(specificity)
+        selected_labels.append(atom)
+        for uid in matched_uids:
+            record = candidate_records[uid]
+            page_scores[uid] += specificity * doc_weights.get(record.doc_id, 1.0)
+
+    return dict(page_scores), {
+        **base_metadata,
+        "query_local_evidence_active": bool(page_scores),
+        "query_local_evidence_reason": "matched" if page_scores else "no_page_scores",
+        "query_local_evidence_atom_count": len(atoms),
+        "query_local_evidence_matched_atom_count": len(atom_matches),
+        "query_local_evidence_selected_atom_count": len(selected_atom_matches),
+        "query_local_evidence_page_match_count": len(page_scores),
+        "query_local_evidence_selected_atoms": selected_labels[:20],
+        "mean_query_local_evidence_atom_specificity": (
+            statistics.fmean(selected_specificities) if selected_specificities else None
+        ),
+    }
+
+
+def query_local_doc_confidence(scores: dict[str, float], *, mode: str) -> float:
+    active_scores = [max(0.0, float(score)) for score in scores.values() if score > 0.0]
+    if not active_scores:
+        return 0.0
+    if mode == "none":
+        return 1.0
+    if len(active_scores) == 1:
+        return 1.0
+    if mode == "margin":
+        ranked = sorted(active_scores, reverse=True)
+        top = ranked[0]
+        if top <= 0.0:
+            return 0.0
+        second = ranked[1] if len(ranked) > 1 else 0.0
+        return clamp((top - second) / top, 0.0, 1.0)
+
+    total = sum(active_scores)
+    if total <= 0.0:
+        return 0.0
+    entropy = 0.0
+    for score in active_scores:
+        prob = score / total
+        if prob > 0.0:
+            entropy -= prob * math.log(prob)
+    max_entropy = math.log(float(len(active_scores)))
+    if max_entropy <= 0.0:
+        return 1.0
+    return clamp(1.0 - entropy / max_entropy, 0.0, 1.0)
+
+
+def softmax_doc_page_multipliers(
+    *,
+    pages_by_doc: dict[str, list[PageRecord]],
+    page_scores: dict[str, float],
+    page_seed: dict[str, float],
+    strength: float,
+    confidence_mode: str,
+    softmax_prior: str,
+) -> tuple[dict[str, float], dict[str, object]]:
+    multipliers: dict[str, float] = {
+        record.page_uid: 1.0
+        for doc_records in pages_by_doc.values()
+        for record in doc_records
+    }
+    active_doc_count = 0
+    active_page_count = 0
+    confidence_values: list[float] = []
+    alpha_values: list[float] = []
+
+    for _doc_id, doc_records in pages_by_doc.items():
+        if not doc_records:
+            continue
+        doc_scores = {
+            record.page_uid: max(0.0, float(page_scores.get(record.page_uid, 0.0)))
+            for record in doc_records
+        }
+        max_score = max(doc_scores.values(), default=0.0)
+        if max_score <= 0.0:
+            continue
+        confidence = query_local_doc_confidence(doc_scores, mode=confidence_mode)
+        alpha = max(0.0, float(strength)) * confidence
+        if alpha <= 0.0:
+            continue
+
+        priors: dict[str, float] = {}
+        for record in doc_records:
+            uid = record.page_uid
+            if softmax_prior == "uniform":
+                priors[uid] = 1.0
+            else:
+                priors[uid] = max(1e-12, float(page_seed.get(uid, 0.0)))
+        prior_dist = normalize_nonnegative(priors)
+        logits = {
+            uid: math.log(max(1e-12, prior_dist.get(uid, 0.0)))
+            + alpha * (score / max_score)
+            for uid, score in doc_scores.items()
+        }
+        max_logit = max(logits.values())
+        exp_values = {uid: math.exp(value - max_logit) for uid, value in logits.items()}
+        softmax_dist = normalize_nonnegative(exp_values)
+        doc_page_count = float(len(doc_records))
+        for record in doc_records:
+            uid = record.page_uid
+            multipliers[uid] = doc_page_count * softmax_dist.get(uid, 0.0)
+
+        active_doc_count += 1
+        active_page_count += sum(1 for score in doc_scores.values() if score > 0.0)
+        confidence_values.append(confidence)
+        alpha_values.append(alpha)
+
+    return multipliers, {
+        "constraint_competition_active_doc_count": active_doc_count,
+        "constraint_competition_active_page_count": active_page_count,
+        "mean_query_local_evidence_doc_confidence": (
+            statistics.fmean(confidence_values) if confidence_values else None
+        ),
+        "mean_query_local_evidence_doc_alpha": (
+            statistics.fmean(alpha_values) if alpha_values else None
+        ),
+        "max_query_local_evidence_doc_alpha": max(alpha_values) if alpha_values else None,
+    }
+
+
 def build_query_constraint_bundle(
     *,
     question: str,
@@ -3881,25 +4341,67 @@ def constraint_bundle_page_weights(policy: QueryAnchorEvidencePolicy) -> dict[st
 
 def build_constraint_competition_policy(
     *,
+    question: str,
     records: dict[str, PageRecord],
     pages_by_doc: dict[str, list[PageRecord]],
     query_anchor_policy: QueryAnchorEvidencePolicy,
+    page_texts: dict[str, str],
+    query_local_doc_weights: dict[str, float],
+    page_seed: dict[str, float],
     args: argparse.Namespace,
 ) -> ConstraintCompetitionPolicy:
     mode = str(args.constraint_competition_mode)
     strength = max(0.0, float(args.constraint_competition_strength))
     multipliers = {uid: 1.0 for uid in records}
-    raw_page_weights = constraint_bundle_page_weights(query_anchor_policy)
     metadata: dict[str, object] = {
         "constraint_competition_mode": mode,
         "constraint_competition_strength": strength,
-        "constraint_competition_source": "constraint_bundle",
+        "constraint_competition_source": "none",
         "constraint_competition_active_doc_count": 0,
         "constraint_competition_active_page_count": 0,
         "mean_constraint_competition_doc_to_page_multiplier": 1.0 if records else None,
         "max_constraint_competition_doc_to_page_multiplier": 1.0 if records else None,
     }
-    if mode == "none" or strength <= 0.0 or not raw_page_weights:
+    if mode == "none" or strength <= 0.0:
+        return ConstraintCompetitionPolicy(multipliers, metadata)
+
+    if mode == "query_local_softmax":
+        page_scores, query_local_metadata = build_query_local_evidence_scores(
+            question=question,
+            records=records,
+            page_texts=page_texts,
+            doc_weights=query_local_doc_weights,
+            args=args,
+        )
+        metadata.update(query_local_metadata)
+        metadata["constraint_competition_source"] = "query_local_evidence"
+        if not page_scores:
+            return ConstraintCompetitionPolicy(multipliers, metadata)
+        multipliers, softmax_metadata = softmax_doc_page_multipliers(
+            pages_by_doc=pages_by_doc,
+            page_scores=page_scores,
+            page_seed=page_seed,
+            strength=strength,
+            confidence_mode=str(args.query_local_evidence_confidence_mode),
+            softmax_prior=str(args.query_local_evidence_softmax_prior),
+        )
+        multiplier_values = list(multipliers.values())
+        metadata.update(
+            {
+                **softmax_metadata,
+                "mean_constraint_competition_doc_to_page_multiplier": (
+                    statistics.fmean(multiplier_values) if multiplier_values else None
+                ),
+                "max_constraint_competition_doc_to_page_multiplier": (
+                    max(multiplier_values) if multiplier_values else None
+                ),
+            }
+        )
+        return ConstraintCompetitionPolicy(multipliers, metadata)
+
+    raw_page_weights = constraint_bundle_page_weights(query_anchor_policy)
+    metadata["constraint_competition_source"] = "constraint_bundle"
+    if not raw_page_weights:
         return ConstraintCompetitionPolicy(multipliers, metadata)
 
     active_doc_count = 0
@@ -4594,17 +5096,28 @@ def build_qid_graph_ranking(
         source_weights=source_weights,
         args=args,
     )
+    query_local_doc_weights = build_query_local_doc_weights(
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        source_weights=source_weights,
+        args=args,
+    )
+    page_texts = doc_page_catalog.page_texts if doc_page_catalog is not None else {}
     query_anchor_policy = build_query_anchor_evidence_policy(
         question=question,
         records=records,
-        page_texts=doc_page_catalog.page_texts if doc_page_catalog is not None else {},
+        page_texts=page_texts,
         doc_anchor_weights=query_anchor_doc_weights,
         args=args,
     )
     constraint_competition_policy = build_constraint_competition_policy(
+        question=question,
         records=records,
         pages_by_doc=pages_by_doc,
         query_anchor_policy=query_anchor_policy,
+        page_texts=page_texts,
+        query_local_doc_weights=query_local_doc_weights,
+        page_seed=page_seed,
         args=args,
     )
 
@@ -4623,7 +5136,7 @@ def build_qid_graph_ranking(
                 page_to_doc_weight *= transition_multiplier
             if bool(args.adaptive_transition_gate_doc_to_page):
                 doc_to_page_weight *= transition_multiplier
-        if str(args.constraint_competition_mode) == "doc_transition":
+        if str(args.constraint_competition_mode) in {"doc_transition", "query_local_softmax"}:
             doc_to_page_weight *= constraint_competition_policy.doc_to_page_multipliers.get(
                 uid,
                 1.0,
@@ -4899,7 +5412,10 @@ def main() -> None:
         doc_page_catalog = load_doc_page_catalog(
             Path(args.doc_pages_jsonl),
             text_fields=args.query_anchor_text_field,
-            load_page_texts=str(args.query_anchor_evidence_mode) != "none",
+            load_page_texts=(
+                str(args.query_anchor_evidence_mode) != "none"
+                or str(args.constraint_competition_mode) == "query_local_softmax"
+            ),
         )
 
     fused_payload: dict[str, dict] = {}
@@ -5123,6 +5639,21 @@ def main() -> None:
                 ),
                 "constraint_competition_mode": args.constraint_competition_mode,
                 "constraint_competition_strength": float(args.constraint_competition_strength),
+                "query_local_evidence_doc_top_k": int(args.query_local_evidence_doc_top_k),
+                "query_local_evidence_min_doc_support": float(
+                    args.query_local_evidence_min_doc_support
+                ),
+                "query_local_evidence_max_atoms": int(args.query_local_evidence_max_atoms),
+                "query_local_evidence_max_ngram": int(args.query_local_evidence_max_ngram),
+                "query_local_evidence_min_token_len": int(
+                    args.query_local_evidence_min_token_len
+                ),
+                "query_local_evidence_min_specificity": float(
+                    args.query_local_evidence_min_specificity
+                ),
+                "query_local_evidence_stopword_mode": args.query_local_evidence_stopword_mode,
+                "query_local_evidence_confidence_mode": args.query_local_evidence_confidence_mode,
+                "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
                 "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
                 "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
                 "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
@@ -5298,6 +5829,15 @@ def main() -> None:
         ),
         "constraint_competition_mode": args.constraint_competition_mode,
         "constraint_competition_strength": float(args.constraint_competition_strength),
+        "query_local_evidence_doc_top_k": int(args.query_local_evidence_doc_top_k),
+        "query_local_evidence_min_doc_support": float(args.query_local_evidence_min_doc_support),
+        "query_local_evidence_max_atoms": int(args.query_local_evidence_max_atoms),
+        "query_local_evidence_max_ngram": int(args.query_local_evidence_max_ngram),
+        "query_local_evidence_min_token_len": int(args.query_local_evidence_min_token_len),
+        "query_local_evidence_min_specificity": float(args.query_local_evidence_min_specificity),
+        "query_local_evidence_stopword_mode": args.query_local_evidence_stopword_mode,
+        "query_local_evidence_confidence_mode": args.query_local_evidence_confidence_mode,
+        "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
         "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
         "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
         "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
@@ -5881,6 +6421,79 @@ def main() -> None:
             )
             if any(
                 row["graph"].get("query_anchor_constraint_mean_value_specificity") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "query_local_evidence_qid_count": sum(
+            1
+            for row in per_qid
+            if bool(row["graph"].get("query_local_evidence_active", False))
+        ),
+        "mean_query_local_evidence_atom_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_local_evidence_atom_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_local_evidence_matched_atom_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_local_evidence_matched_atom_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_local_evidence_selected_atom_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_local_evidence_selected_atom_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_local_evidence_page_match_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_local_evidence_page_match_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_local_evidence_atom_specificity": (
+            statistics.fmean(
+                float(row["graph"].get("mean_query_local_evidence_atom_specificity", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_query_local_evidence_atom_specificity") is not None
+            )
+            if any(
+                row["graph"].get("mean_query_local_evidence_atom_specificity") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_query_local_evidence_doc_confidence": (
+            statistics.fmean(
+                float(row["graph"].get("mean_query_local_evidence_doc_confidence", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_query_local_evidence_doc_confidence") is not None
+            )
+            if any(
+                row["graph"].get("mean_query_local_evidence_doc_confidence") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_query_local_evidence_doc_alpha": (
+            statistics.fmean(
+                float(row["graph"].get("mean_query_local_evidence_doc_alpha", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_query_local_evidence_doc_alpha") is not None
+            )
+            if any(
+                row["graph"].get("mean_query_local_evidence_doc_alpha") is not None
                 for row in per_qid
             )
             else None
