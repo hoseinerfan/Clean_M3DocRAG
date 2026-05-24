@@ -574,12 +574,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--query-anchor-reasoning-mode",
-        choices=["none", "financial_slots"],
+        choices=["none", "financial_slots", "constraint_bundles"],
         default="none",
         help=(
             "Optional query-anchor reasoning layer. financial_slots adds a co-occurrence "
             "node for pages that satisfy multiple financial evidence slots such as metric "
-            "terms and fiscal years."
+            "terms and fiscal years. constraint_bundles adds a general conjunctive "
+            "evidence node that rewards pages satisfying multiple query constraint types."
         ),
     )
     parser.add_argument(
@@ -611,6 +612,51 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Require this minimum table-likeness score for financial bundle pages. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--query-anchor-constraint-bundle-weight",
+        type=float,
+        default=1.0,
+        help="Node weight for general query-constraint bundle evidence.",
+    )
+    parser.add_argument(
+        "--query-anchor-constraint-min-slot-types",
+        type=int,
+        default=2,
+        help="Minimum distinct constraint types a page must satisfy before bundle evidence is active.",
+    )
+    parser.add_argument(
+        "--query-anchor-constraint-max-page-matches",
+        type=int,
+        default=0,
+        help="Drop the constraint bundle if it matches more than this many pages. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--query-anchor-constraint-max-slot-page-matches",
+        type=int,
+        default=0,
+        help=(
+            "Ignore individual constraint slots that match more than this many candidate pages. "
+            "Use 0 to keep all slots with specificity downweighting."
+        ),
+    )
+    parser.add_argument(
+        "--query-anchor-constraint-specificity-floor",
+        type=float,
+        default=0.10,
+        help="Minimum local specificity weight for broad constraint slots.",
+    )
+    parser.add_argument(
+        "--query-anchor-constraint-table-bonus",
+        type=float,
+        default=0.0,
+        help="Extra multiplier for constraint-bundle page edges based on numeric/table-like page text.",
+    )
+    parser.add_argument(
+        "--query-anchor-constraint-table-min-score",
+        type=float,
+        default=0.0,
+        help="Require this minimum table-likeness score for constraint-bundle pages. Use 0 to disable.",
     )
     parser.add_argument(
         "--pdf-hyperlink-edges-jsonl",
@@ -2946,6 +2992,323 @@ def build_financial_reasoning_bundle(
     return node_id if matched_pages else None, matched_pages, metadata
 
 
+CONSTRAINT_ROLE_TRIGGERS = {
+    "table": {
+        "table",
+        "tabular",
+        "row",
+        "column",
+        "financial statement",
+        "balance sheet",
+        "income statement",
+        "cash flow",
+    },
+    "chart": {"chart", "graph", "plot", "diagram", "figure"},
+    "cover": {"cover", "front page", "title page", "first page"},
+    "references": {"reference", "references", "bibliography", "citation", "cited"},
+    "appendix": {"appendix", "appendices", "supplement"},
+    "signature": {"signature", "signed", "signatory"},
+    "date": {"date", "dated", "published", "publication", "released", "release"},
+}
+
+
+def extract_constraint_numeric_values(question: str) -> list[str]:
+    values: list[str] = []
+    seen: set[str] = set()
+    pattern = (
+        r"\bFY\s*'?\d{2,4}\b"
+        r"|\b20\d{2}\b"
+        r"|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b"
+        r"|\b(?:\$|€|£)?\d[\d,]*(?:\.\d+)?\s*(?:%|percent|percentage|million|billion|thousand)?\b"
+    )
+    for match in re.finditer(pattern, str(question or ""), flags=re.IGNORECASE):
+        value = normalize_query_anchor(match.group(0))
+        lower = value.lower()
+        if value and lower not in seen:
+            values.append(value)
+            seen.add(lower)
+    return values[:12]
+
+
+def extract_constraint_role_values(question: str) -> list[str]:
+    query_lower = str(question or "").lower()
+    roles: list[str] = []
+    for role, triggers in CONSTRAINT_ROLE_TRIGGERS.items():
+        if any(trigger in query_lower for trigger in triggers):
+            roles.append(role)
+    return roles
+
+
+def query_constraint_slots(question: str, anchors: list[str]) -> dict[str, list[str]]:
+    slots: dict[str, list[str]] = {
+        "entity": [],
+        "numeric": [],
+        "metric": [],
+        "role": [],
+    }
+    seen: dict[str, set[str]] = {slot: set() for slot in slots}
+
+    def add(slot: str, value: str) -> None:
+        normalized = normalize_query_anchor(value)
+        lower = normalized.lower()
+        if normalized and lower not in seen[slot]:
+            slots[slot].append(normalized)
+            seen[slot].add(lower)
+
+    for value in extract_constraint_numeric_values(question):
+        add("numeric", value)
+    for value in extract_financial_metric_values(question):
+        add("metric", value)
+    for role in extract_constraint_role_values(question):
+        add("role", role)
+
+    for anchor in anchors:
+        normalized = normalize_query_anchor(anchor)
+        lower = normalized.lower()
+        if not normalized:
+            continue
+        if re.search(r"\d", lower):
+            add("numeric", normalized)
+            continue
+        anchor_tokens = set(re.findall(r"[a-z][a-z0-9&./+-]*", lower))
+        if anchor_tokens & FINANCIAL_METRIC_TERMS:
+            add("metric", normalized)
+            continue
+        if lower in FINANCIAL_ENTITY_STOPWORDS:
+            continue
+        if re.search(r"[A-Z]", normalized) or len(normalized.split()) > 1:
+            add("entity", normalized)
+
+    slots["entity"] = dedupe_specific_financial_values(slots["entity"])[:8]
+    slots["numeric"] = dedupe_specific_financial_values(slots["numeric"])[:8]
+    slots["metric"] = dedupe_specific_financial_values(slots["metric"])[:8]
+    slots["role"] = slots["role"][:6]
+    return slots
+
+
+def query_constraint_node_id(slots: dict[str, list[str]]) -> str:
+    raw_parts = []
+    for slot in sorted(slots):
+        if slots[slot]:
+            raw_parts.append(f"{slot}={','.join(value.lower() for value in slots[slot])}")
+    digest = hashlib.sha1("|".join(raw_parts).encode("utf-8")).hexdigest()[:12]
+    return f"query_constraint_bundle::{digest}"
+
+
+def role_matches_page(role: str, page_text: str, record: PageRecord) -> float:
+    text = str(page_text or "")
+    role = str(role or "").lower()
+    if not text and role != "cover":
+        return 0.0
+    if role == "table":
+        score = financial_table_likeness(text)
+        if "|" in text or "\t" in text:
+            score = max(score, 0.5)
+        return score if score >= 0.10 else 0.0
+    if role == "chart":
+        return 1.0 if re.search(r"\b(?:chart|graph|plot|figure|diagram)\b", text) else 0.0
+    if role == "cover":
+        return 1.0 if int(record.page_idx) == 0 else 0.0
+    if role == "references":
+        return 1.0 if re.search(r"\b(?:references|bibliography|works cited)\b", text) else 0.0
+    if role == "appendix":
+        return 1.0 if re.search(r"\bappendix\b|\bappendices\b", text) else 0.0
+    if role == "signature":
+        return 1.0 if re.search(r"\b(?:signature|signed|signatory)\b", text) else 0.0
+    if role == "date":
+        return 1.0 if re.search(r"\b20\d{2}\b|\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b", text) else 0.0
+    return 0.0
+
+
+def constraint_slot_match_count(
+    *,
+    slot: str,
+    values: list[str],
+    page_text: str,
+    record: PageRecord,
+) -> int:
+    if slot == "role":
+        return sum(1 for value in values if role_matches_page(value, page_text, record) > 0)
+    return sum(1 for value in values if anchor_matches_page_text(value, page_text))
+
+
+def constraint_slot_specificity_weight(
+    *, match_count: int, candidate_count: int, floor: float
+) -> float:
+    if match_count <= 0 or candidate_count <= 1:
+        return 1.0
+    try:
+        raw = math.log((float(candidate_count) + 1.0) / (float(match_count) + 1.0)) / math.log(
+            float(candidate_count) + 1.0
+        )
+    except (ValueError, ZeroDivisionError):
+        raw = 1.0
+    return clamp(raw, floor, 1.0)
+
+
+def build_query_constraint_bundle(
+    *,
+    question: str,
+    anchors: list[str],
+    records: dict[str, PageRecord],
+    page_texts: dict[str, str],
+    doc_anchor_weights: dict[str, float],
+    args: argparse.Namespace,
+) -> tuple[str | None, dict[str, float], dict[str, object]]:
+    if str(args.query_anchor_reasoning_mode) != "constraint_bundles":
+        return None, {}, {}
+
+    slots = query_constraint_slots(question, anchors)
+    active_slots = {slot: values for slot, values in slots.items() if values}
+    min_slot_types = max(1, int(args.query_anchor_constraint_min_slot_types))
+    max_slot_page_matches = max(0, int(args.query_anchor_constraint_max_slot_page_matches))
+    max_page_matches = max(0, int(args.query_anchor_constraint_max_page_matches))
+    specificity_floor = clamp(float(args.query_anchor_constraint_specificity_floor), 0.0, 1.0)
+    table_bonus = max(0.0, float(args.query_anchor_constraint_table_bonus))
+    table_min_score = clamp(float(args.query_anchor_constraint_table_min_score), 0.0, 1.0)
+    base_metadata: dict[str, object] = {
+        "query_anchor_constraint_bundle_weight": float(
+            args.query_anchor_constraint_bundle_weight
+        ),
+        "query_anchor_constraint_min_slot_types": min_slot_types,
+        "query_anchor_constraint_max_page_matches": max_page_matches,
+        "query_anchor_constraint_max_slot_page_matches": max_slot_page_matches,
+        "query_anchor_constraint_specificity_floor": specificity_floor,
+        "query_anchor_constraint_table_bonus": table_bonus,
+        "query_anchor_constraint_table_min_score": table_min_score,
+    }
+    if len(active_slots) < min_slot_types:
+        return None, {}, {
+            **base_metadata,
+            "query_anchor_constraint_bundle_active": False,
+            "query_anchor_constraint_bundle_reason": "too_few_slot_types",
+            "query_anchor_constraint_active_slot_count": len(active_slots),
+            "query_anchor_constraint_bundle_page_match_count": 0,
+            "query_anchor_constraint_dropped_broad_slot_count": 0,
+            "query_anchor_constraint_bundle_dropped_broad": False,
+        }
+
+    scope = str(args.query_anchor_scope)
+    min_doc_support = clamp(float(args.query_anchor_min_doc_support), 0.0, 1.0)
+    candidate_records: dict[str, PageRecord] = {}
+    for uid, record in records.items():
+        if scope == "doc_conditioned":
+            doc_support = doc_anchor_weights.get(record.doc_id, 0.0)
+            if doc_support < min_doc_support or doc_support <= 0:
+                continue
+        candidate_records[uid] = record
+    candidate_count = len(candidate_records)
+
+    slot_page_match_counts: dict[str, int] = {}
+    active_slots_filtered: dict[str, list[str]] = {}
+    dropped_broad_slot_count = 0
+    for slot, values in active_slots.items():
+        match_count = 0
+        for uid, record in candidate_records.items():
+            page_text = page_texts.get(uid, "")
+            if constraint_slot_match_count(slot=slot, values=values, page_text=page_text, record=record) > 0:
+                match_count += 1
+        if max_slot_page_matches > 0 and match_count > max_slot_page_matches:
+            dropped_broad_slot_count += 1
+            continue
+        if match_count > 0:
+            slot_page_match_counts[slot] = match_count
+            active_slots_filtered[slot] = values
+
+    if len(active_slots_filtered) < min_slot_types:
+        return None, {}, {
+            **base_metadata,
+            "query_anchor_constraint_bundle_active": False,
+            "query_anchor_constraint_bundle_reason": "too_few_matched_slot_types",
+            "query_anchor_constraint_active_slot_count": len(active_slots),
+            "query_anchor_constraint_matched_slot_count": len(active_slots_filtered),
+            "query_anchor_constraint_bundle_page_match_count": 0,
+            "query_anchor_constraint_dropped_broad_slot_count": dropped_broad_slot_count,
+            "query_anchor_constraint_bundle_dropped_broad": False,
+            "query_anchor_constraint_slot_page_match_counts": slot_page_match_counts,
+        }
+
+    slot_specificities = {
+        slot: constraint_slot_specificity_weight(
+            match_count=count,
+            candidate_count=candidate_count,
+            floor=specificity_floor,
+        )
+        for slot, count in slot_page_match_counts.items()
+    }
+    total_value_count = sum(len(values) for values in active_slots_filtered.values())
+    matched_pages: dict[str, float] = {}
+    matched_table_scores: list[float] = []
+    for uid, record in candidate_records.items():
+        page_text = page_texts.get(uid, "")
+        if not page_text and "role" not in active_slots_filtered:
+            continue
+        matched_slots: list[str] = []
+        matched_value_count = 0
+        for slot, values in active_slots_filtered.items():
+            count = constraint_slot_match_count(
+                slot=slot,
+                values=values,
+                page_text=page_text,
+                record=record,
+            )
+            if count > 0:
+                matched_slots.append(slot)
+                matched_value_count += count
+        required_slots = {
+            slot for slot in ("entity", "numeric") if slot in active_slots_filtered
+        }
+        if required_slots and not required_slots.issubset(set(matched_slots)):
+            continue
+        if len(matched_slots) < min_slot_types:
+            continue
+        table_score = financial_table_likeness(page_text)
+        if table_score < table_min_score:
+            continue
+        doc_support = doc_anchor_weights.get(record.doc_id, 1.0) if scope == "doc_conditioned" else 1.0
+        slot_score = len(matched_slots) / max(1.0, float(len(active_slots_filtered)))
+        value_score = matched_value_count / max(1.0, float(total_value_count))
+        specificity = statistics.fmean(slot_specificities[slot] for slot in matched_slots)
+        base_score = doc_support * specificity * (0.65 * slot_score + 0.35 * value_score)
+        matched_table_scores.append(table_score)
+        matched_pages[uid] = base_score * (1.0 + table_bonus * table_score)
+
+    dropped_bundle = bool(max_page_matches > 0 and len(matched_pages) > max_page_matches)
+    if dropped_bundle:
+        matched_pages = {}
+
+    label_parts = []
+    for slot in ("entity", "numeric", "metric", "role"):
+        if active_slots_filtered.get(slot):
+            label_parts.append(f"{slot}={','.join(active_slots_filtered[slot][:4])}")
+    metadata = {
+        **base_metadata,
+        "query_anchor_constraint_bundle_active": bool(matched_pages),
+        "query_anchor_constraint_bundle_reason": "matched" if matched_pages else "no_page_matches",
+        "query_anchor_constraint_active_slot_count": len(active_slots),
+        "query_anchor_constraint_matched_slot_count": len(active_slots_filtered),
+        "query_anchor_constraint_entity_count": len(slots["entity"]),
+        "query_anchor_constraint_numeric_count": len(slots["numeric"]),
+        "query_anchor_constraint_metric_count": len(slots["metric"]),
+        "query_anchor_constraint_role_count": len(slots["role"]),
+        "query_anchor_constraint_bundle_page_match_count": len(matched_pages),
+        "query_anchor_constraint_dropped_broad_slot_count": dropped_broad_slot_count,
+        "query_anchor_constraint_bundle_dropped_broad": dropped_bundle,
+        "query_anchor_constraint_bundle_label": " | ".join(label_parts),
+        "query_anchor_constraint_required_slots": [
+            slot for slot in ("entity", "numeric") if slot in active_slots_filtered
+        ],
+        "query_anchor_constraint_slot_page_match_counts": slot_page_match_counts,
+        "query_anchor_constraint_mean_slot_specificity": (
+            statistics.fmean(slot_specificities.values()) if slot_specificities else None
+        ),
+        "query_anchor_constraint_mean_table_score": (
+            statistics.fmean(matched_table_scores) if matched_table_scores else None
+        ),
+    }
+    return query_constraint_node_id(active_slots_filtered) if matched_pages else None, matched_pages, metadata
+
+
 def query_anchor_node_id(anchor: str) -> str:
     digest = hashlib.sha1(anchor.lower().encode("utf-8")).hexdigest()[:12]
     return f"query_anchor::{digest}"
@@ -3014,6 +3377,19 @@ def build_query_anchor_evidence_policy(
         "query_anchor_financial_year_anchor_count": 0,
         "query_anchor_financial_entity_anchor_count": 0,
         "query_anchor_financial_bundle_page_match_count": 0,
+    }
+    constraint_metadata: dict[str, object] = {
+        "query_anchor_constraint_bundle_active": False,
+        "query_anchor_constraint_bundle_reason": "disabled",
+        "query_anchor_constraint_active_slot_count": 0,
+        "query_anchor_constraint_matched_slot_count": 0,
+        "query_anchor_constraint_entity_count": 0,
+        "query_anchor_constraint_numeric_count": 0,
+        "query_anchor_constraint_metric_count": 0,
+        "query_anchor_constraint_role_count": 0,
+        "query_anchor_constraint_bundle_page_match_count": 0,
+        "query_anchor_constraint_dropped_broad_slot_count": 0,
+        "query_anchor_constraint_bundle_dropped_broad": False,
     }
     if mode != "none" and page_texts:
         anchors = extract_query_anchors(
@@ -3090,6 +3466,24 @@ def build_query_anchor_evidence_policy(
                         ),
                     }
                 )
+        if str(args.query_anchor_reasoning_mode) == "constraint_bundles":
+            bundle_node, bundle_pages, constraint_metadata = build_query_constraint_bundle(
+                question=question,
+                anchors=anchors,
+                records=records,
+                page_texts=page_texts,
+                doc_anchor_weights=doc_anchor_weights,
+                args=args,
+            )
+            if bundle_node and bundle_pages:
+                anchor_page_weights[bundle_node] = bundle_pages
+                anchor_node_weights[bundle_node] = max(
+                    0.0, float(args.query_anchor_constraint_bundle_weight)
+                )
+                anchor_labels[bundle_node] = (
+                    "constraint_bundles: "
+                    + str(constraint_metadata.get("query_anchor_constraint_bundle_label", ""))
+                )
 
     page_match_count = sum(len(pages) for pages in anchor_page_weights.values())
     metadata: dict[str, object] = {
@@ -3114,6 +3508,7 @@ def build_query_anchor_evidence_policy(
         "query_anchor_text_fields": list(args.query_anchor_text_field),
         "query_anchor_labels": [anchor_labels[node_id] for node_id in sorted(anchor_labels)],
         **financial_metadata,
+        **constraint_metadata,
     }
     return QueryAnchorEvidencePolicy(
         anchor_page_weights=anchor_page_weights,
@@ -4272,6 +4667,27 @@ def main() -> None:
                 "query_anchor_financial_table_min_score": float(
                     args.query_anchor_financial_table_min_score
                 ),
+                "query_anchor_constraint_bundle_weight": float(
+                    args.query_anchor_constraint_bundle_weight
+                ),
+                "query_anchor_constraint_min_slot_types": int(
+                    args.query_anchor_constraint_min_slot_types
+                ),
+                "query_anchor_constraint_max_page_matches": int(
+                    args.query_anchor_constraint_max_page_matches
+                ),
+                "query_anchor_constraint_max_slot_page_matches": int(
+                    args.query_anchor_constraint_max_slot_page_matches
+                ),
+                "query_anchor_constraint_specificity_floor": float(
+                    args.query_anchor_constraint_specificity_floor
+                ),
+                "query_anchor_constraint_table_bonus": float(
+                    args.query_anchor_constraint_table_bonus
+                ),
+                "query_anchor_constraint_table_min_score": float(
+                    args.query_anchor_constraint_table_min_score
+                ),
                 "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
                 "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
                 "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
@@ -4430,6 +4846,19 @@ def main() -> None:
         "query_anchor_financial_max_page_matches": int(args.query_anchor_financial_max_page_matches),
         "query_anchor_financial_table_bonus": float(args.query_anchor_financial_table_bonus),
         "query_anchor_financial_table_min_score": float(args.query_anchor_financial_table_min_score),
+        "query_anchor_constraint_bundle_weight": float(args.query_anchor_constraint_bundle_weight),
+        "query_anchor_constraint_min_slot_types": int(args.query_anchor_constraint_min_slot_types),
+        "query_anchor_constraint_max_page_matches": int(args.query_anchor_constraint_max_page_matches),
+        "query_anchor_constraint_max_slot_page_matches": int(
+            args.query_anchor_constraint_max_slot_page_matches
+        ),
+        "query_anchor_constraint_specificity_floor": float(
+            args.query_anchor_constraint_specificity_floor
+        ),
+        "query_anchor_constraint_table_bonus": float(args.query_anchor_constraint_table_bonus),
+        "query_anchor_constraint_table_min_score": float(
+            args.query_anchor_constraint_table_min_score
+        ),
         "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
         "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
         "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
@@ -4968,6 +5397,39 @@ def main() -> None:
             )
             if any(
                 row["graph"].get("query_anchor_financial_mean_table_score") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "query_anchor_constraint_bundle_qid_count": sum(
+            1
+            for row in per_qid
+            if bool(row["graph"].get("query_anchor_constraint_bundle_active", False))
+        ),
+        "mean_query_anchor_constraint_bundle_page_match_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_constraint_bundle_page_match_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_anchor_constraint_active_slot_count": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_constraint_active_slot_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_query_anchor_constraint_slot_specificity": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_constraint_mean_slot_specificity", 0.0))
+                for row in per_qid
+                if row["graph"].get("query_anchor_constraint_mean_slot_specificity") is not None
+            )
+            if any(
+                row["graph"].get("query_anchor_constraint_mean_slot_specificity") is not None
                 for row in per_qid
             )
             else None

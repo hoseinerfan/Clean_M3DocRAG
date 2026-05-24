@@ -80,6 +80,53 @@ The graph-native methods are the main novelty path. They should be prioritized w
 
 ## Next Experiments
 
+### 0. Constraint-Aware Evidence Bundle Nodes
+
+Purpose: target the clearest current graph limitation: Graph-PPR can identify the right document but still localizes the wrong page inside that document.
+
+Current implementation:
+
+- Enables `QUERY_ANCHOR_REASONING_MODE=constraint_bundles` inside `scripts/graph_rerank_page_retrieval_predictions.py`.
+- Extracts query-side constraint slots:
+  - `entity`
+  - `numeric`
+  - `metric`
+  - `role`
+- Adds one conjunctive graph node when candidate pages satisfy multiple constraint types together.
+- Requires critical `entity` and `numeric` slots when they exist, so pages matching only broad metric/year/table evidence do not get the bundle boost.
+- Downweights broad slots by local specificity and optionally drops overly broad slots or bundles.
+
+Why this is novel:
+
+- The graph no longer propagates relevance only through page/doc nodes or independent lexical anchors.
+- It creates a query-conditioned typed evidence bottleneck, so document-level PPR mass can return preferentially to pages satisfying the query's evidence constraints.
+- This directly tests whether the graph can solve right-document/wrong-page failures without adding another retriever or VLM.
+
+Recommended first settings:
+
+```bash
+QUERY_ANCHOR_EVIDENCE_MODE=entity_numeric
+QUERY_ANCHOR_REASONING_MODE=constraint_bundles
+QUERY_ANCHOR_SCOPE=doc_conditioned
+QUERY_ANCHOR_DOC_TOP_K=20
+QUERY_ANCHOR_EDGE_WEIGHT=0.15
+QUERY_ANCHOR_RESTART_WEIGHT=0.10
+QUERY_ANCHOR_CONSTRAINT_BUNDLE_WEIGHT=1.0
+QUERY_ANCHOR_CONSTRAINT_MIN_SLOT_TYPES=2
+QUERY_ANCHOR_CONSTRAINT_SPECIFICITY_FLOOR=0.10
+```
+
+Primary target bucket:
+
+- page@4 misses where doc@4 already hits
+- especially MMDocIR metadata/table-like queries and ViDoRe V3 finance/table failures
+
+Success criteria:
+
+- Recover page@4 misses with low or zero loss against `denseheavy125_medium_both`.
+- Summary JSON should show nonzero `query_anchor_constraint_bundle_qid_count`.
+- Audit recovered/lost cases to verify the bundle is selecting answer-bearing evidence pages, not just matching broad table text.
+
 ### 1. Query Anchor Evidence Nodes
 
 Purpose: improve entity/numeric localization in finance, news, and papers without gold labels.
