@@ -626,6 +626,25 @@ def parse_args() -> argparse.Namespace:
         help="Minimum distinct constraint types a page must satisfy before bundle evidence is active.",
     )
     parser.add_argument(
+        "--query-anchor-constraint-extraction-mode",
+        choices=["legacy", "multilingual"],
+        default="legacy",
+        help=(
+            "Constraint slot extraction policy. legacy preserves the original entity/numeric/"
+            "financial-metric parser; multilingual adds instruction-word filtering and "
+            "broader multilingual metric terms."
+        ),
+    )
+    parser.add_argument(
+        "--query-anchor-constraint-value-weight-mode",
+        choices=["legacy", "local_idf"],
+        default="legacy",
+        help=(
+            "How bundle page scores count matched constraint values. legacy uses raw matched "
+            "value count; local_idf weights individual values by query-local specificity."
+        ),
+    )
+    parser.add_argument(
         "--query-anchor-constraint-max-page-matches",
         type=int,
         default=0,
@@ -2556,6 +2575,9 @@ QUERY_ANCHOR_STOPWORDS = {
     "who",
     "with",
     "write",
+}
+
+MULTILINGUAL_INSTRUCTION_STOPWORDS = {
     "al",
     "alle",
     "als",
@@ -2744,7 +2766,7 @@ FINANCIAL_ENTITY_STOPWORDS = QUERY_ANCHOR_STOPWORDS | FINANCIAL_METRIC_TERMS | {
     "year",
 }
 
-CONSTRAINT_ENTITY_STOPWORDS = FINANCIAL_ENTITY_STOPWORDS | {
+CONSTRAINT_ENTITY_STOPWORDS = FINANCIAL_ENTITY_STOPWORDS | MULTILINGUAL_INSTRUCTION_STOPWORDS | {
     "comparaison",
     "comparison",
     "compare",
@@ -3256,7 +3278,13 @@ def extract_constraint_role_values(question: str) -> list[str]:
     return roles
 
 
-def query_constraint_slots(question: str, anchors: list[str]) -> dict[str, list[str]]:
+def query_constraint_slots(
+    question: str,
+    anchors: list[str],
+    *,
+    extraction_mode: str = "legacy",
+) -> dict[str, list[str]]:
+    use_multilingual = str(extraction_mode) == "multilingual"
     slots: dict[str, list[str]] = {
         "entity": [],
         "numeric": [],
@@ -3268,13 +3296,13 @@ def query_constraint_slots(question: str, anchors: list[str]) -> dict[str, list[
     def add(slot: str, value: str) -> None:
         normalized = normalize_query_anchor(value)
         lower = normalized.lower()
-        if slot == "entity":
+        if use_multilingual and slot == "entity":
             tokens = constraint_word_tokens(lower)
             if lower in CONSTRAINT_ENTITY_STOPWORDS:
                 return
             if tokens and all(token in CONSTRAINT_ENTITY_STOPWORDS for token in tokens):
                 return
-        if slot == "metric" and lower in CONSTRAINT_ENTITY_STOPWORDS:
+        if use_multilingual and slot == "metric" and lower in CONSTRAINT_ENTITY_STOPWORDS:
             return
         if normalized and lower not in seen[slot]:
             slots[slot].append(normalized)
@@ -3282,7 +3310,12 @@ def query_constraint_slots(question: str, anchors: list[str]) -> dict[str, list[
 
     for value in extract_constraint_numeric_values(question):
         add("numeric", value)
-    for value in extract_constraint_metric_values(question):
+    metric_values = (
+        extract_constraint_metric_values(question)
+        if use_multilingual
+        else extract_financial_metric_values(question)
+    )
+    for value in metric_values:
         add("metric", value)
     for role in extract_constraint_role_values(question):
         add("role", role)
@@ -3295,13 +3328,20 @@ def query_constraint_slots(question: str, anchors: list[str]) -> dict[str, list[
         if re.search(r"\d", lower):
             add("numeric", normalized)
             continue
-        anchor_tokens = constraint_word_tokens(lower)
-        if anchor_tokens & CONSTRAINT_METRIC_TERMS:
+        if use_multilingual:
+            anchor_tokens = constraint_word_tokens(lower)
+            metric_terms = CONSTRAINT_METRIC_TERMS
+            entity_stopwords = CONSTRAINT_ENTITY_STOPWORDS
+        else:
+            anchor_tokens = set(re.findall(r"[a-z][a-z0-9&./+-]*", lower))
+            metric_terms = FINANCIAL_METRIC_TERMS
+            entity_stopwords = FINANCIAL_ENTITY_STOPWORDS
+        if anchor_tokens & metric_terms:
             add("metric", normalized)
             continue
-        if lower in CONSTRAINT_ENTITY_STOPWORDS:
+        if lower in entity_stopwords:
             continue
-        if anchor_tokens and all(token in CONSTRAINT_ENTITY_STOPWORDS for token in anchor_tokens):
+        if use_multilingual and anchor_tokens and all(token in entity_stopwords for token in anchor_tokens):
             continue
         if re.search(r"[A-Z]", normalized) or len(normalized.split()) > 1:
             add("entity", normalized)
@@ -3385,7 +3425,13 @@ def build_query_constraint_bundle(
     if str(args.query_anchor_reasoning_mode) != "constraint_bundles":
         return None, {}, {}
 
-    slots = query_constraint_slots(question, anchors)
+    extraction_mode = str(args.query_anchor_constraint_extraction_mode)
+    value_weight_mode = str(args.query_anchor_constraint_value_weight_mode)
+    slots = query_constraint_slots(
+        question,
+        anchors,
+        extraction_mode=extraction_mode,
+    )
     active_slots = {slot: values for slot, values in slots.items() if values}
     min_slot_types = max(1, int(args.query_anchor_constraint_min_slot_types))
     max_slot_page_matches = max(0, int(args.query_anchor_constraint_max_slot_page_matches))
@@ -3403,6 +3449,8 @@ def build_query_constraint_bundle(
         "query_anchor_constraint_specificity_floor": specificity_floor,
         "query_anchor_constraint_table_bonus": table_bonus,
         "query_anchor_constraint_table_min_score": table_min_score,
+        "query_anchor_constraint_extraction_mode": extraction_mode,
+        "query_anchor_constraint_value_weight_mode": value_weight_mode,
     }
     if len(active_slots) < min_slot_types:
         return None, {}, {
@@ -3493,6 +3541,7 @@ def build_query_constraint_bundle(
         for slot, values in active_slots_filtered.items()
         for value in values
     )
+    total_value_count = sum(len(values) for values in active_slots_filtered.values())
     matched_pages: dict[str, float] = {}
     matched_table_scores: list[float] = []
     for uid, record in candidate_records.items():
@@ -3533,7 +3582,10 @@ def build_query_constraint_bundle(
             continue
         doc_support = doc_anchor_weights.get(record.doc_id, 1.0) if scope == "doc_conditioned" else 1.0
         slot_score = len(matched_slots) / max(1.0, float(len(active_slots_filtered)))
-        value_score = matched_value_weight / max(1e-9, float(total_value_weight))
+        if value_weight_mode == "local_idf":
+            value_score = matched_value_weight / max(1e-9, float(total_value_weight))
+        else:
+            value_score = matched_value_count / max(1.0, float(total_value_count))
         specificity = statistics.fmean(slot_specificities[slot] for slot in matched_slots)
         base_score = doc_support * specificity * (0.65 * slot_score + 0.35 * value_score)
         matched_table_scores.append(table_score)
@@ -4949,6 +5001,10 @@ def main() -> None:
                 "query_anchor_constraint_min_slot_types": int(
                     args.query_anchor_constraint_min_slot_types
                 ),
+                "query_anchor_constraint_extraction_mode": args.query_anchor_constraint_extraction_mode,
+                "query_anchor_constraint_value_weight_mode": (
+                    args.query_anchor_constraint_value_weight_mode
+                ),
                 "query_anchor_constraint_max_page_matches": int(
                     args.query_anchor_constraint_max_page_matches
                 ),
@@ -5124,6 +5180,8 @@ def main() -> None:
         "query_anchor_financial_table_min_score": float(args.query_anchor_financial_table_min_score),
         "query_anchor_constraint_bundle_weight": float(args.query_anchor_constraint_bundle_weight),
         "query_anchor_constraint_min_slot_types": int(args.query_anchor_constraint_min_slot_types),
+        "query_anchor_constraint_extraction_mode": args.query_anchor_constraint_extraction_mode,
+        "query_anchor_constraint_value_weight_mode": args.query_anchor_constraint_value_weight_mode,
         "query_anchor_constraint_max_page_matches": int(args.query_anchor_constraint_max_page_matches),
         "query_anchor_constraint_max_slot_page_matches": int(
             args.query_anchor_constraint_max_slot_page_matches
