@@ -123,3 +123,35 @@ Why this is more defensible than another reranker:
 2. All edges come from corpus structure, reading order, and standard IR scoring.
 3. No gold labels, learned thresholds, or dataset-specific selectors are used.
 4. The summary explicitly reports whether real region/layout fields were used; text-only fallback should be framed as an immediate prototype, not the final layout claim.
+
+### OCR Region Extraction
+
+If converted `doc_pages_dev.jsonl` has page-level OCR text but no region fields, export OCR line/block regions for only the candidate pages used by the hard-subset experiment:
+
+```bash
+python scripts/export_ocr_region_blocks.py \
+  --doc-pages-jsonl "$DATA_ROOT/doc_pages_dev.jsonl" \
+  --prediction-json "$PREDICTION" \
+  --qid-filter-jsonl "$GOLD" \
+  --prediction-top-pages 50 \
+  --ocr-engine easyocr \
+  --ocr-lang en \
+  --easyocr-gpu \
+  --output-jsonl "$OUT_DIR/${DATA_NAME}_${SUBSET_LABEL}_ocr_regions_top50.jsonl" \
+  --output-summary-json "$OUT_DIR/${DATA_NAME}_${SUBSET_LABEL}_ocr_regions_top50.summary.json" \
+  --continue-on-error
+```
+
+Then rerun the evidence graph with:
+
+```bash
+REGION_JSONL="$OUT_DIR/${DATA_NAME}_${SUBSET_LABEL}_ocr_regions_top50.jsonl" \
+LAYOUT_DISABLE_FALLBACK_REGIONS=1 \
+LAYOUT_LABEL="${DATA_NAME}_${SUBSET_LABEL}_ocr_region_evidence_graph_top50" \
+LAYOUT_CANDIDATE_SCOPE=prediction_top_pages \
+LAYOUT_CANDIDATE_TOP_PAGES=50 \
+OVERWRITE_LAYOUT_EVIDENCE=1 \
+bash scripts/run_layout_evidence_graph_track.sh
+```
+
+With `LAYOUT_DISABLE_FALLBACK_REGIONS=1`, pages without explicit OCR/layout regions do not receive fallback text-block nodes. This makes `mean_explicit_region_pages` and `mean_fallback_region_pages` a direct sanity check for whether the result is a true OCR-region graph.

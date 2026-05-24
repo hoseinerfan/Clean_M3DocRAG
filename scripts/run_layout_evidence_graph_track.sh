@@ -52,27 +52,40 @@ LAYOUT_SUMMARY="${LAYOUT_SUMMARY:-$OUT_DIR/${LAYOUT_LABEL}.summary.json}"
 LAYOUT_CASES="${LAYOUT_CASES:-$OUT_DIR/${LAYOUT_LABEL}_cases.json}"
 
 if [[ "${OVERWRITE_LAYOUT_EVIDENCE:-0}" == "1" || ! -f "$LAYOUT_PRED" ]]; then
-  "$PYTHON_BIN" "$REPO_ROOT/scripts/rerank_layout_evidence_graph.py" \
-    --prediction "$PREDICTION" \
-    --doc-pages-jsonl "$DOC_PAGES_JSONL" \
-    --gold "$GOLD" \
-    --candidate-scope "${LAYOUT_CANDIDATE_SCOPE:-top_docs_prediction_pages}" \
-    --top-docs "${LAYOUT_TOP_DOCS:-4}" \
-    --input-top-pages "${LAYOUT_INPUT_TOP_PAGES:-1000}" \
-    --candidate-top-pages "${LAYOUT_CANDIDATE_TOP_PAGES:-1000}" \
-    --output-top-pages "${LAYOUT_OUTPUT_TOP_PAGES:-1000}" \
-    --max-pages-per-doc "${LAYOUT_MAX_PAGES_PER_DOC:-250}" \
-    --max-regions-per-page "${LAYOUT_MAX_REGIONS_PER_PAGE:-32}" \
-    --max-region-tokens "${LAYOUT_MAX_REGION_TOKENS:-96}" \
-    --ppr-restart-prob "${LAYOUT_PPR_RESTART_PROB:-0.30}" \
-    --ppr-iters "${LAYOUT_PPR_ITERS:-20}" \
-    --region-adjacent-edge-weight "${LAYOUT_REGION_ADJACENT_EDGE_WEIGHT:-0.15}" \
-    --page-restart-weight "${LAYOUT_PAGE_RESTART_WEIGHT:-0.0}" \
-    --rrf-k "${LAYOUT_RRF_K:-60}" \
-    --hit-k "${LAYOUT_HIT_K:-4}" \
-    --output-prediction-json "$LAYOUT_PRED" \
-    --output-summary-json "$LAYOUT_SUMMARY" \
+  LAYOUT_ARGS=(
+    --prediction "$PREDICTION"
+    --doc-pages-jsonl "$DOC_PAGES_JSONL"
+    --gold "$GOLD"
+    --candidate-scope "${LAYOUT_CANDIDATE_SCOPE:-top_docs_prediction_pages}"
+    --top-docs "${LAYOUT_TOP_DOCS:-4}"
+    --input-top-pages "${LAYOUT_INPUT_TOP_PAGES:-1000}"
+    --candidate-top-pages "${LAYOUT_CANDIDATE_TOP_PAGES:-1000}"
+    --output-top-pages "${LAYOUT_OUTPUT_TOP_PAGES:-1000}"
+    --max-pages-per-doc "${LAYOUT_MAX_PAGES_PER_DOC:-250}"
+    --max-regions-per-page "${LAYOUT_MAX_REGIONS_PER_PAGE:-32}"
+    --max-region-tokens "${LAYOUT_MAX_REGION_TOKENS:-96}"
+    --ppr-restart-prob "${LAYOUT_PPR_RESTART_PROB:-0.30}"
+    --ppr-iters "${LAYOUT_PPR_ITERS:-20}"
+    --region-adjacent-edge-weight "${LAYOUT_REGION_ADJACENT_EDGE_WEIGHT:-0.15}"
+    --page-restart-weight "${LAYOUT_PAGE_RESTART_WEIGHT:-0.0}"
+    --rrf-k "${LAYOUT_RRF_K:-60}"
+    --hit-k "${LAYOUT_HIT_K:-4}"
+    --output-prediction-json "$LAYOUT_PRED"
+    --output-summary-json "$LAYOUT_SUMMARY"
     --output-case-json "$LAYOUT_CASES"
+  )
+  if [[ "${LAYOUT_DISABLE_FALLBACK_REGIONS:-0}" == "1" ]]; then
+    LAYOUT_ARGS+=(--disable-fallback-regions)
+  fi
+  if [[ -n "${REGION_JSONL:-}" ]]; then
+    IFS=: read -r -a REGION_JSONL_PARTS <<< "$REGION_JSONL"
+    for region_jsonl in "${REGION_JSONL_PARTS[@]}"; do
+      if [[ -n "$region_jsonl" ]]; then
+        LAYOUT_ARGS+=(--region-jsonl "$region_jsonl")
+      fi
+    done
+  fi
+  "$PYTHON_BIN" "$REPO_ROOT/scripts/rerank_layout_evidence_graph.py" "${LAYOUT_ARGS[@]}"
 else
   echo "using_existing_layout_evidence_prediction: $LAYOUT_PRED"
 fi

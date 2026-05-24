@@ -111,6 +111,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--doc-pages-jsonl", required=True, help="Converted doc_pages JSONL.")
     parser.add_argument("--gold", default="", help="Optional gold MMQA JSONL for metrics.")
     parser.add_argument(
+        "--region-jsonl",
+        action="append",
+        default=[],
+        help=(
+            "Optional external OCR/layout region JSONL keyed by page_uid or doc_id/page_idx. "
+            "Rows may contain ocr_blocks, layout_regions, tables, figures, captions, or any "
+            "field listed by --region-field. Repeat to merge multiple region sources."
+        ),
+    )
+    parser.add_argument(
         "--text-field",
         action="append",
         default=[],
@@ -145,6 +155,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-pages-per-doc", type=int, default=250)
     parser.add_argument("--max-regions-per-page", type=int, default=32)
     parser.add_argument("--max-region-tokens", type=int, default=96)
+    parser.add_argument(
+        "--disable-fallback-regions",
+        action="store_true",
+        help=(
+            "Use only explicit OCR/layout regions from doc_pages or --region-jsonl. "
+            "Pages without explicit regions receive no evidence nodes."
+        ),
+    )
     parser.add_argument("--bm25-k1", type=float, default=1.2)
     parser.add_argument("--bm25-b", type=float, default=0.75)
     parser.add_argument("--ppr-restart-prob", type=float, default=0.30)
@@ -309,6 +327,68 @@ def load_page_catalog(
             key=lambda uid: parse_page_uid(uid).page_idx if parse_page_uid(uid) else 10**9,
         )
     return by_uid, dict(by_doc)
+
+
+def load_region_catalog(paths: list[str]) -> dict[str, dict[str, Any]]:
+    by_uid: dict[str, dict[str, Any]] = {}
+    for raw_path in paths:
+        if not str(raw_path).strip():
+            continue
+        path = Path(raw_path)
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                row = json.loads(line)
+                uid = str(row.get("page_uid", "")).strip()
+                if not uid:
+                    key = page_key_from_row(row)
+                    uid = key.uid if key is not None else ""
+                if not uid:
+                    continue
+                target = by_uid.setdefault(uid, {})
+                for key, value in row.items():
+                    if key in {"doc_id", "doc_name", "page_idx", "page_id", "page_number", "page_uid"}:
+                        continue
+                    if value in (None, "", [], {}):
+                        continue
+                    existing = target.get(key)
+                    if isinstance(existing, list) and isinstance(value, list):
+                        existing.extend(value)
+                    elif existing in (None, "", [], {}):
+                        target[key] = value
+                    elif key not in target:
+                        target[key] = value
+                    else:
+                        target[f"external_{key}"] = value
+    return by_uid
+
+
+def attach_region_catalog(
+    page_catalog: dict[str, PageRecord],
+    region_catalog: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    attached_pages = 0
+    attached_fields = 0
+    for uid, region_row in region_catalog.items():
+        record = page_catalog.get(uid)
+        if record is None:
+            continue
+        attached_pages += 1
+        for key, value in region_row.items():
+            if value in (None, "", [], {}):
+                continue
+            if key in record.row and isinstance(record.row[key], list) and isinstance(value, list):
+                record.row[key].extend(value)
+            else:
+                record.row[key] = value
+            attached_fields += 1
+    return {
+        "external_region_page_count": attached_pages,
+        "external_region_field_count": attached_fields,
+        "external_region_loaded_page_count": len(region_catalog),
+    }
 
 
 def prediction_rows(row: dict[str, Any]) -> list[Any]:
@@ -489,6 +569,7 @@ def extract_regions(
     region_fields: list[str],
     max_regions_per_page: int,
     max_region_tokens: int,
+    disable_fallback_regions: bool,
 ) -> tuple[list[EvidenceRegion], bool]:
     regions: list[EvidenceRegion] = []
     used_explicit = False
@@ -535,7 +616,7 @@ def extract_regions(
         if max_regions_per_page > 0 and len(regions) >= max_regions_per_page:
             break
 
-    if not used_explicit:
+    if not used_explicit and not disable_fallback_regions:
         for text, label, source in markdown_or_text_blocks(record.text, max_region_tokens):
             if not text:
                 continue
@@ -702,6 +783,7 @@ def evidence_scores_for_qid(
             region_fields=region_fields,
             max_regions_per_page=int(args.max_regions_per_page),
             max_region_tokens=int(args.max_region_tokens),
+            disable_fallback_regions=bool(args.disable_fallback_regions),
         )
         if not page_regions:
             continue
@@ -929,6 +1011,7 @@ def rerank_prediction(
     args: argparse.Namespace,
     text_fields: list[str],
     region_fields: list[str],
+    region_catalog_summary: dict[str, int],
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     output: dict[str, dict[str, Any]] = {}
     cases: list[dict[str, Any]] = []
@@ -1018,6 +1101,8 @@ def rerank_prediction(
         "qid_count": len(output),
         "input_prediction": str(args.prediction),
         "doc_pages_jsonl": str(args.doc_pages_jsonl),
+        "region_jsonl": [str(path) for path in args.region_jsonl],
+        **region_catalog_summary,
         "candidate_scope": str(args.candidate_scope),
         "top_docs": int(args.top_docs),
         "input_top_pages": int(args.input_top_pages),
@@ -1026,6 +1111,7 @@ def rerank_prediction(
         "max_pages_per_doc": int(args.max_pages_per_doc),
         "max_regions_per_page": int(args.max_regions_per_page),
         "max_region_tokens": int(args.max_region_tokens),
+        "disable_fallback_regions": bool(args.disable_fallback_regions),
         "text_fields": text_fields,
         "region_fields": region_fields,
         "bm25_k1": float(args.bm25_k1),
@@ -1095,6 +1181,8 @@ def main() -> None:
     region_fields = args.region_field if args.region_field else DEFAULT_REGION_FIELDS
     prediction = load_prediction(Path(args.prediction))
     page_catalog, by_doc = load_page_catalog(Path(args.doc_pages_jsonl), text_fields=text_fields)
+    region_catalog = load_region_catalog(args.region_jsonl)
+    region_catalog_summary = attach_region_catalog(page_catalog, region_catalog)
     gold_by_qid = (
         {str(row["qid"]): row for row in read_jsonl(Path(args.gold))}
         if str(args.gold).strip()
@@ -1108,6 +1196,7 @@ def main() -> None:
         args=args,
         text_fields=text_fields,
         region_fields=region_fields,
+        region_catalog_summary=region_catalog_summary,
     )
 
     Path(args.output_prediction_json).write_text(
@@ -1122,7 +1211,7 @@ def main() -> None:
     print(f"saved_prediction: {args.output_prediction_json}")
     print(f"saved_summary: {args.output_summary_json}")
     for key, value in summary.items():
-        if key in {"input_prediction", "doc_pages_jsonl", "text_fields", "region_fields"}:
+        if key in {"input_prediction", "doc_pages_jsonl", "region_jsonl", "text_fields", "region_fields"}:
             continue
         print(f"{key}: {value}")
 
