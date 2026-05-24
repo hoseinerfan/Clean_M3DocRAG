@@ -2556,6 +2556,87 @@ QUERY_ANCHOR_STOPWORDS = {
     "who",
     "with",
     "write",
+    "al",
+    "alle",
+    "als",
+    "au",
+    "aux",
+    "avec",
+    "cual",
+    "cuál",
+    "cuales",
+    "cuáles",
+    "da",
+    "d",
+    "das",
+    "de",
+    "del",
+    "dem",
+    "den",
+    "der",
+    "des",
+    "descrever",
+    "descreva",
+    "did",
+    "die",
+    "do",
+    "dos",
+    "du",
+    "el",
+    "en",
+    "entre",
+    "es",
+    "est",
+    "et",
+    "explain",
+    "explique",
+    "expliquer",
+    "expliquez",
+    "für",
+    "im",
+    "ist",
+    "l",
+    "la",
+    "las",
+    "le",
+    "les",
+    "liste",
+    "listen",
+    "los",
+    "na",
+    "nas",
+    "no",
+    "nos",
+    "para",
+    "par",
+    "por",
+    "qual",
+    "quais",
+    "que",
+    "qué",
+    "quels",
+    "quelle",
+    "quelles",
+    "según",
+    "selon",
+    "sie",
+    "son",
+    "sont",
+    "und",
+    "una",
+    "une",
+    "utiliza",
+    "welche",
+    "welchen",
+    "welcher",
+    "welches",
+    "wie",
+    "¿cuál",
+    "año",
+    "ano",
+    "année",
+    "auf",
+    "vs",
 }
 
 FINANCIAL_METRIC_TERMS = {
@@ -2663,6 +2744,90 @@ FINANCIAL_ENTITY_STOPWORDS = QUERY_ANCHOR_STOPWORDS | FINANCIAL_METRIC_TERMS | {
     "year",
 }
 
+CONSTRAINT_ENTITY_STOPWORDS = FINANCIAL_ENTITY_STOPWORDS | {
+    "comparaison",
+    "comparison",
+    "compare",
+    "comparer",
+    "describir",
+    "explanation",
+    "explicar",
+    "expliquer",
+    "general",
+    "principalmente",
+    "principal",
+    "respuesta",
+    "text",
+    "texte",
+}
+
+CONSTRAINT_METRIC_TERMS = FINANCIAL_METRIC_TERMS | {
+    "abastecimiento",
+    "average",
+    "biomasa",
+    "biomasse",
+    "biomass",
+    "cantidad",
+    "capital",
+    "commercial",
+    "demanda",
+    "demande",
+    "diversification",
+    "efficiency",
+    "electricidad",
+    "electricite",
+    "electricité",
+    "electricity",
+    "energetique",
+    "energétique",
+    "energia",
+    "energie",
+    "énergie",
+    "energies",
+    "énergies",
+    "energy",
+    "fossil",
+    "gas",
+    "gestion",
+    "management",
+    "metanizable",
+    "méthanisable",
+    "methanizable",
+    "mtep",
+    "non",
+    "operativa",
+    "operational",
+    "reorganisation",
+    "reorganización",
+    "renewable",
+    "renouvelables",
+    "segmentos",
+    "segments",
+    "seguridad",
+    "source",
+    "sources",
+    "strategic",
+    "stratégiques",
+    "toneladas",
+    "tonnes",
+    "transferencias",
+    "transfers",
+    "var",
+}
+
+CONSTRAINT_METRIC_PHRASES = FINANCIAL_METRIC_PHRASES | {
+    "average management var",
+    "demande de biomasse",
+    "demanda de biomasa",
+    "gestion de capital",
+    "management var",
+    "net non-cash transfers",
+    "normas de seguridad de abastecimiento",
+    "quantité totale",
+    "total average management var",
+    "transferencias netas no monetarias",
+}
+
 
 def normalize_query_anchor(anchor: str) -> str:
     normalized = re.sub(r"\s+", " ", str(anchor or "").strip(" \t\n\r,.;:!?()[]{}\"'`"))
@@ -2670,6 +2835,14 @@ def normalize_query_anchor(anchor: str) -> str:
     if normalized.lower().endswith("'s"):
         normalized = normalized[:-2]
     return normalized.strip()
+
+
+def constraint_word_tokens(text: str) -> set[str]:
+    return {
+        normalize_query_anchor(token).lower()
+        for token in re.findall(r"[\w&./+-]+", str(text or ""), flags=re.UNICODE)
+        if normalize_query_anchor(token)
+    }
 
 
 def add_query_anchor(anchors: list[str], anchor: str, *, min_len: int) -> None:
@@ -2827,6 +3000,50 @@ def extract_financial_metric_values(question: str) -> list[str]:
             if not ngram or not (set(ngram) & FINANCIAL_METRIC_TERMS):
                 continue
             if len(ngram) == 1 and ngram[0] in {"total", "gross", "net", "operating"}:
+                continue
+            add(" ".join(ngram))
+
+    return dedupe_specific_financial_values(values)[:12]
+
+
+def extract_constraint_metric_values(question: str) -> list[str]:
+    query = str(question or "")
+    query_lower = query.lower()
+    values: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        normalized = normalize_query_anchor(value)
+        lower = normalized.lower()
+        if normalized and lower not in seen:
+            values.append(normalized)
+            seen.add(lower)
+
+    for phrase in sorted(CONSTRAINT_METRIC_PHRASES, key=lambda item: (-len(item.split()), item)):
+        if re.search(rf"(?<![\w]){re.escape(phrase)}(?![\w])", query_lower, flags=re.UNICODE):
+            add(phrase)
+
+    tokens = []
+    for raw_token in re.findall(r"[\w&./+-]+", query_lower, flags=re.UNICODE):
+        token = normalize_query_anchor(raw_token).lower()
+        if token and token not in CONSTRAINT_ENTITY_STOPWORDS:
+            tokens.append(token)
+    for ngram_len in range(4, 0, -1):
+        for start in range(0, max(0, len(tokens) - ngram_len + 1)):
+            ngram = tokens[start : start + ngram_len]
+            if any(re.fullmatch(r"(?:fy)?\d{2,4}", token) for token in ngram):
+                continue
+            if not (set(ngram) & CONSTRAINT_METRIC_TERMS):
+                continue
+            while ngram and ngram[0] in CONSTRAINT_ENTITY_STOPWORDS:
+                ngram = ngram[1:]
+            while ngram and ngram[-1] in CONSTRAINT_ENTITY_STOPWORDS:
+                ngram = ngram[:-1]
+            if not ngram or not (set(ngram) & CONSTRAINT_METRIC_TERMS):
+                continue
+            if ngram[0] not in CONSTRAINT_METRIC_TERMS:
+                continue
+            if len(ngram) == 1 and ngram[0] in {"total", "non", "average"}:
                 continue
             add(" ".join(ngram))
 
@@ -3051,13 +3268,21 @@ def query_constraint_slots(question: str, anchors: list[str]) -> dict[str, list[
     def add(slot: str, value: str) -> None:
         normalized = normalize_query_anchor(value)
         lower = normalized.lower()
+        if slot == "entity":
+            tokens = constraint_word_tokens(lower)
+            if lower in CONSTRAINT_ENTITY_STOPWORDS:
+                return
+            if tokens and all(token in CONSTRAINT_ENTITY_STOPWORDS for token in tokens):
+                return
+        if slot == "metric" and lower in CONSTRAINT_ENTITY_STOPWORDS:
+            return
         if normalized and lower not in seen[slot]:
             slots[slot].append(normalized)
             seen[slot].add(lower)
 
     for value in extract_constraint_numeric_values(question):
         add("numeric", value)
-    for value in extract_financial_metric_values(question):
+    for value in extract_constraint_metric_values(question):
         add("metric", value)
     for role in extract_constraint_role_values(question):
         add("role", role)
@@ -3070,11 +3295,13 @@ def query_constraint_slots(question: str, anchors: list[str]) -> dict[str, list[
         if re.search(r"\d", lower):
             add("numeric", normalized)
             continue
-        anchor_tokens = set(re.findall(r"[a-z][a-z0-9&./+-]*", lower))
-        if anchor_tokens & FINANCIAL_METRIC_TERMS:
+        anchor_tokens = constraint_word_tokens(lower)
+        if anchor_tokens & CONSTRAINT_METRIC_TERMS:
             add("metric", normalized)
             continue
-        if lower in FINANCIAL_ENTITY_STOPWORDS:
+        if lower in CONSTRAINT_ENTITY_STOPWORDS:
+            continue
+        if anchor_tokens and all(token in CONSTRAINT_ENTITY_STOPWORDS for token in anchor_tokens):
             continue
         if re.search(r"[A-Z]", normalized) or len(normalized.split()) > 1:
             add("entity", normalized)
@@ -3200,20 +3427,33 @@ def build_query_constraint_bundle(
     candidate_count = len(candidate_records)
 
     slot_page_match_counts: dict[str, int] = {}
+    slot_value_match_counts: dict[str, dict[str, int]] = {}
     active_slots_filtered: dict[str, list[str]] = {}
     dropped_broad_slot_count = 0
     for slot, values in active_slots.items():
-        match_count = 0
+        matched_uids: set[str] = set()
+        value_counts: dict[str, int] = {}
         for uid, record in candidate_records.items():
             page_text = page_texts.get(uid, "")
-            if constraint_slot_match_count(slot=slot, values=values, page_text=page_text, record=record) > 0:
-                match_count += 1
+            for value in values:
+                if constraint_slot_match_count(
+                    slot=slot,
+                    values=[value],
+                    page_text=page_text,
+                    record=record,
+                ) > 0:
+                    matched_uids.add(uid)
+                    value_counts[value] = value_counts.get(value, 0) + 1
+        match_count = len(matched_uids)
         if max_slot_page_matches > 0 and match_count > max_slot_page_matches:
             dropped_broad_slot_count += 1
             continue
         if match_count > 0:
             slot_page_match_counts[slot] = match_count
-            active_slots_filtered[slot] = values
+            slot_value_match_counts[slot] = value_counts
+            active_slots_filtered[slot] = [
+                value for value in values if value_counts.get(value, 0) > 0
+            ]
 
     if len(active_slots_filtered) < min_slot_types:
         return None, {}, {
@@ -3226,6 +3466,7 @@ def build_query_constraint_bundle(
             "query_anchor_constraint_dropped_broad_slot_count": dropped_broad_slot_count,
             "query_anchor_constraint_bundle_dropped_broad": False,
             "query_anchor_constraint_slot_page_match_counts": slot_page_match_counts,
+            "query_anchor_constraint_slot_value_match_counts": slot_value_match_counts,
         }
 
     slot_specificities = {
@@ -3236,7 +3477,22 @@ def build_query_constraint_bundle(
         )
         for slot, count in slot_page_match_counts.items()
     }
-    total_value_count = sum(len(values) for values in active_slots_filtered.values())
+    slot_value_specificities = {
+        slot: {
+            value: constraint_slot_specificity_weight(
+                match_count=count,
+                candidate_count=candidate_count,
+                floor=specificity_floor,
+            )
+            for value, count in value_counts.items()
+        }
+        for slot, value_counts in slot_value_match_counts.items()
+    }
+    total_value_weight = sum(
+        slot_value_specificities.get(slot, {}).get(value, specificity_floor)
+        for slot, values in active_slots_filtered.items()
+        for value in values
+    )
     matched_pages: dict[str, float] = {}
     matched_table_scores: list[float] = []
     for uid, record in candidate_records.items():
@@ -3245,16 +3501,26 @@ def build_query_constraint_bundle(
             continue
         matched_slots: list[str] = []
         matched_value_count = 0
+        matched_value_weight = 0.0
         for slot, values in active_slots_filtered.items():
-            count = constraint_slot_match_count(
-                slot=slot,
-                values=values,
-                page_text=page_text,
-                record=record,
-            )
-            if count > 0:
-                matched_slots.append(slot)
+            slot_matched = False
+            for value in values:
+                count = constraint_slot_match_count(
+                    slot=slot,
+                    values=[value],
+                    page_text=page_text,
+                    record=record,
+                )
+                if count <= 0:
+                    continue
+                slot_matched = True
                 matched_value_count += count
+                matched_value_weight += slot_value_specificities.get(slot, {}).get(
+                    value,
+                    specificity_floor,
+                )
+            if slot_matched:
+                matched_slots.append(slot)
         required_slots = {
             slot for slot in ("entity", "numeric") if slot in active_slots_filtered
         }
@@ -3267,7 +3533,7 @@ def build_query_constraint_bundle(
             continue
         doc_support = doc_anchor_weights.get(record.doc_id, 1.0) if scope == "doc_conditioned" else 1.0
         slot_score = len(matched_slots) / max(1.0, float(len(active_slots_filtered)))
-        value_score = matched_value_count / max(1.0, float(total_value_count))
+        value_score = matched_value_weight / max(1e-9, float(total_value_weight))
         specificity = statistics.fmean(slot_specificities[slot] for slot in matched_slots)
         base_score = doc_support * specificity * (0.65 * slot_score + 0.35 * value_score)
         matched_table_scores.append(table_score)
@@ -3299,8 +3565,18 @@ def build_query_constraint_bundle(
             slot for slot in ("entity", "numeric") if slot in active_slots_filtered
         ],
         "query_anchor_constraint_slot_page_match_counts": slot_page_match_counts,
+        "query_anchor_constraint_slot_value_match_counts": slot_value_match_counts,
         "query_anchor_constraint_mean_slot_specificity": (
             statistics.fmean(slot_specificities.values()) if slot_specificities else None
+        ),
+        "query_anchor_constraint_mean_value_specificity": (
+            statistics.fmean(
+                value
+                for value_counts in slot_value_specificities.values()
+                for value in value_counts.values()
+            )
+            if slot_value_specificities
+            else None
         ),
         "query_anchor_constraint_mean_table_score": (
             statistics.fmean(matched_table_scores) if matched_table_scores else None
@@ -5430,6 +5706,18 @@ def main() -> None:
             )
             if any(
                 row["graph"].get("query_anchor_constraint_mean_slot_specificity") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_query_anchor_constraint_value_specificity": (
+            statistics.fmean(
+                float(row["graph"].get("query_anchor_constraint_mean_value_specificity", 0.0))
+                for row in per_qid
+                if row["graph"].get("query_anchor_constraint_mean_value_specificity") is not None
+            )
+            if any(
+                row["graph"].get("query_anchor_constraint_mean_value_specificity") is not None
                 for row in per_qid
             )
             else None
