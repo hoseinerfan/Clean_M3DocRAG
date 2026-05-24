@@ -648,6 +648,34 @@ def parse_args() -> argparse.Namespace:
         help="Optional cap on hyperlink targets per source page. Use 0 for no cap.",
     )
     parser.add_argument(
+        "--pdf-hyperlink-source-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Only emit hyperlink edges from pages whose best dense/SPLADE/expansion "
+            "rank is within this cutoff. Use 0 for no source-rank gate."
+        ),
+    )
+    parser.add_argument(
+        "--pdf-hyperlink-target-doc-top-k",
+        type=int,
+        default=0,
+        help=(
+            "Only emit hyperlink edges to docs whose best candidate page rank is within "
+            "this cutoff. Use 0 for no target-doc gate."
+        ),
+    )
+    parser.add_argument(
+        "--pdf-hyperlink-query-support-weight-mode",
+        choices=["none", "source_rank_decay", "source_target_rank_decay"],
+        default="none",
+        help=(
+            "Optionally scale hyperlink edge weights by query support ranks. "
+            "source_rank_decay uses the source page rank; source_target_rank_decay "
+            "also uses the target doc's best candidate-page rank."
+        ),
+    )
+    parser.add_argument(
         "--external-page-graph-jsonl",
         default="",
         help=(
@@ -3145,13 +3173,68 @@ def add_query_anchor_evidence_restart(
     return added
 
 
-def pdf_hyperlink_edge_weight(raw_link_count: int, args: argparse.Namespace) -> float:
+def page_record_best_rank(record: PageRecord) -> int | None:
+    ranks = [
+        rank
+        for rank in (record.dense_rank, record.sparse_rank, record.expansion_rank)
+        if rank is not None
+    ]
+    return min(ranks) if ranks else None
+
+
+def rank_decay_factor(rank: int | None) -> float:
+    if rank is None or int(rank) <= 0:
+        return 0.0
+    return 1.0 / math.log2(float(rank) + 1.0)
+
+
+def pdf_hyperlink_query_support_multiplier(
+    *,
+    source_rank: int | None,
+    target_doc_rank: int | None,
+    args: argparse.Namespace,
+) -> float:
+    mode = str(args.pdf_hyperlink_query_support_weight_mode)
+    if mode == "source_rank_decay":
+        return rank_decay_factor(source_rank)
+    if mode == "source_target_rank_decay":
+        return rank_decay_factor(source_rank) * rank_decay_factor(target_doc_rank)
+    return 1.0
+
+
+def pdf_hyperlink_edge_weight(
+    raw_link_count: int,
+    args: argparse.Namespace,
+    *,
+    source_rank: int | None = None,
+    target_doc_rank: int | None = None,
+) -> float:
     base_weight = float(args.pdf_hyperlink_edge_weight)
     if base_weight <= 0:
         return 0.0
     if str(args.pdf_hyperlink_weight_mode) == "log_count":
-        return base_weight * math.log1p(max(1, int(raw_link_count)))
-    return base_weight
+        base_weight *= math.log1p(max(1, int(raw_link_count)))
+    return base_weight * pdf_hyperlink_query_support_multiplier(
+        source_rank=source_rank,
+        target_doc_rank=target_doc_rank,
+        args=args,
+    )
+
+
+def pdf_hyperlink_doc_best_ranks(records: dict[str, PageRecord]) -> dict[str, int]:
+    doc_best_ranks: dict[str, int] = {}
+    for record in records.values():
+        rank = page_record_best_rank(record)
+        if rank is None:
+            continue
+        doc_best_ranks[record.doc_id] = min(doc_best_ranks.get(record.doc_id, rank), rank)
+    return doc_best_ranks
+
+
+def pdf_hyperlink_passes_rank_gate(rank: int | None, cutoff: int) -> bool:
+    if cutoff <= 0:
+        return True
+    return rank is not None and rank <= cutoff
 
 
 def add_pdf_hyperlink_edges(
@@ -3171,35 +3254,63 @@ def add_pdf_hyperlink_edges(
             "pdf_hyperlink_source_page_count": 0,
             "pdf_hyperlink_target_doc_count": 0,
             "pdf_hyperlink_raw_link_count": 0,
+            "pdf_hyperlink_source_top_k": int(args.pdf_hyperlink_source_top_k),
+            "pdf_hyperlink_target_doc_top_k": int(args.pdf_hyperlink_target_doc_top_k),
+            "pdf_hyperlink_query_support_weight_mode": str(
+                args.pdf_hyperlink_query_support_weight_mode
+            ),
+            "pdf_hyperlink_skipped_source_rank_gate": 0,
+            "pdf_hyperlink_skipped_target_doc_rank_gate": 0,
             "pdf_hyperlink_loaded_edge_count": (
                 pdf_hyperlink_graph.edge_count if pdf_hyperlink_graph is not None else 0
             ),
         }
 
     candidate_doc_ids = {record.doc_id for record in records.values()}
+    doc_best_ranks = pdf_hyperlink_doc_best_ranks(records)
     used_source_pages: set[str] = set()
     used_target_docs: set[str] = set()
     edge_count = 0
     raw_link_count = 0
     max_edges_per_source = max(0, int(args.pdf_hyperlink_max_edges_per_source))
+    source_top_k = max(0, int(args.pdf_hyperlink_source_top_k))
+    target_doc_top_k = max(0, int(args.pdf_hyperlink_target_doc_top_k))
+    skipped_source_rank_gate = 0
+    skipped_target_doc_rank_gate = 0
 
     for source_uid in sorted(records):
         source_edges = pdf_hyperlink_graph.by_source_page.get(source_uid, [])
         if not source_edges:
             continue
+        source_rank = page_record_best_rank(records[source_uid])
+        if not pdf_hyperlink_passes_rank_gate(source_rank, source_top_k):
+            skipped_source_rank_gate += 1
+            continue
+        weighted_edges: list[tuple[PdfHyperlinkEdge, float, int | None]] = []
+        for edge in source_edges:
+            target_doc_rank = doc_best_ranks.get(edge.target_doc_id)
+            if edge.target_doc_id not in candidate_doc_ids:
+                continue
+            if not pdf_hyperlink_passes_rank_gate(target_doc_rank, target_doc_top_k):
+                skipped_target_doc_rank_gate += 1
+                continue
+            weight = pdf_hyperlink_edge_weight(
+                edge.raw_link_count,
+                args,
+                source_rank=source_rank,
+                target_doc_rank=target_doc_rank,
+            )
+            if weight <= 0:
+                continue
+            weighted_edges.append((edge, weight, target_doc_rank))
         ordered_edges = sorted(
-            source_edges,
-            key=lambda edge: (-int(edge.raw_link_count), edge.target_doc_id),
+            weighted_edges,
+            key=lambda item: (-item[1], -int(item[0].raw_link_count), item[0].target_doc_id),
         )
         if max_edges_per_source > 0:
             ordered_edges = ordered_edges[:max_edges_per_source]
-        for edge in ordered_edges:
-            if edge.target_doc_id not in candidate_doc_ids:
-                continue
+        for edge, weight, _target_doc_rank in ordered_edges:
             target_doc_node = f"doc::{edge.target_doc_id}"
-            weight = pdf_hyperlink_edge_weight(edge.raw_link_count, args)
-            if weight <= 0:
-                continue
             add_directed_edge(graph, source_uid, target_doc_node, weight)
             edge_count += 1
             raw_link_count += int(edge.raw_link_count)
@@ -3221,6 +3332,13 @@ def add_pdf_hyperlink_edges(
         "pdf_hyperlink_direction": str(args.pdf_hyperlink_direction),
         "pdf_hyperlink_weight_mode": str(args.pdf_hyperlink_weight_mode),
         "pdf_hyperlink_max_edges_per_source": int(args.pdf_hyperlink_max_edges_per_source),
+        "pdf_hyperlink_source_top_k": int(args.pdf_hyperlink_source_top_k),
+        "pdf_hyperlink_target_doc_top_k": int(args.pdf_hyperlink_target_doc_top_k),
+        "pdf_hyperlink_query_support_weight_mode": str(
+            args.pdf_hyperlink_query_support_weight_mode
+        ),
+        "pdf_hyperlink_skipped_source_rank_gate": skipped_source_rank_gate,
+        "pdf_hyperlink_skipped_target_doc_rank_gate": skipped_target_doc_rank_gate,
     }
 
 
@@ -3240,12 +3358,7 @@ def external_page_graph_edge_weight(
 
 
 def external_page_graph_record_rank(record: PageRecord) -> int | None:
-    ranks = [
-        rank
-        for rank in (record.dense_rank, record.sparse_rank, record.expansion_rank)
-        if rank is not None
-    ]
-    return min(ranks) if ranks else None
+    return page_record_best_rank(record)
 
 
 def external_page_graph_passes_rank_gate(record: PageRecord, cutoff: int) -> bool:
@@ -4164,6 +4277,11 @@ def main() -> None:
                 "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
                 "pdf_hyperlink_weight_mode": args.pdf_hyperlink_weight_mode,
                 "pdf_hyperlink_max_edges_per_source": int(args.pdf_hyperlink_max_edges_per_source),
+                "pdf_hyperlink_source_top_k": int(args.pdf_hyperlink_source_top_k),
+                "pdf_hyperlink_target_doc_top_k": int(args.pdf_hyperlink_target_doc_top_k),
+                "pdf_hyperlink_query_support_weight_mode": (
+                    args.pdf_hyperlink_query_support_weight_mode
+                ),
                 "external_page_graph_jsonl": args.external_page_graph_jsonl,
                 "external_page_graph_edge_weight": float(args.external_page_graph_edge_weight),
                 "external_page_graph_direction": args.external_page_graph_direction,
@@ -4317,6 +4435,9 @@ def main() -> None:
         "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
         "pdf_hyperlink_weight_mode": args.pdf_hyperlink_weight_mode,
         "pdf_hyperlink_max_edges_per_source": int(args.pdf_hyperlink_max_edges_per_source),
+        "pdf_hyperlink_source_top_k": int(args.pdf_hyperlink_source_top_k),
+        "pdf_hyperlink_target_doc_top_k": int(args.pdf_hyperlink_target_doc_top_k),
+        "pdf_hyperlink_query_support_weight_mode": args.pdf_hyperlink_query_support_weight_mode,
         "pdf_hyperlink_loaded_edge_count": (
             pdf_hyperlink_graph.edge_count if pdf_hyperlink_graph is not None else 0
         ),
@@ -4768,6 +4889,22 @@ def main() -> None:
         "mean_pdf_hyperlink_raw_link_count": (
             statistics.fmean(
                 float(row["graph"].get("pdf_hyperlink_raw_link_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_pdf_hyperlink_skipped_source_rank_gate": (
+            statistics.fmean(
+                float(row["graph"].get("pdf_hyperlink_skipped_source_rank_gate", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_pdf_hyperlink_skipped_target_doc_rank_gate": (
+            statistics.fmean(
+                float(row["graph"].get("pdf_hyperlink_skipped_target_doc_rank_gate", 0.0))
                 for row in per_qid
             )
             if per_qid
