@@ -86,6 +86,15 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Emit only one edge for each unordered pair. PPR can add reverse edges later.",
     )
+    parser.add_argument(
+        "--mutual-only",
+        action="store_true",
+        help=(
+            "Keep only reciprocal kNN edges: source->target is emitted only when source "
+            "also appears in target's top-k SPLADE neighbors under the same scoring setup. "
+            "This is a standard mutual-kNN graph construction and removes one-way weak links."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -344,10 +353,14 @@ def main() -> None:
     target_docs: set[str] = set()
     emitted_pair_keys: set[tuple[str, str]] = set()
     score_values: list[float] = []
+    neighbor_cache: dict[int, list[tuple[int, float]]] = {}
+    candidate_edge_count = 0
+    mutual_rejected_edge_count = 0
+    neighbor_index_cache: dict[int, set[int]] = {}
 
-    with output_jsonl.open("w", encoding="utf-8") as handle:
-        for source_idx in source_indices:
-            source_uid = page_uids[source_idx]
+    def cached_neighbors(source_idx: int) -> list[tuple[int, float]]:
+        neighbors = neighbor_cache.get(source_idx)
+        if neighbors is None:
             neighbors = top_neighbors_for_source(
                 source_idx=source_idx,
                 index=index,
@@ -360,9 +373,28 @@ def main() -> None:
                 same_doc_only=bool(args.same_doc_only),
                 cross_doc_only=bool(args.cross_doc_only),
             )
+            neighbor_cache[source_idx] = neighbors
+        return neighbors
+
+    def cached_neighbor_indices(source_idx: int) -> set[int]:
+        neighbor_indices = neighbor_index_cache.get(source_idx)
+        if neighbor_indices is None:
+            neighbor_indices = {idx for idx, _score in cached_neighbors(source_idx)}
+            neighbor_index_cache[source_idx] = neighbor_indices
+        return neighbor_indices
+
+    with output_jsonl.open("w", encoding="utf-8") as handle:
+        for source_idx in source_indices:
+            source_uid = page_uids[source_idx]
+            neighbors = cached_neighbors(source_idx)
             emitted_for_source = 0
             for target_idx, score in neighbors:
+                candidate_edge_count += 1
                 target_uid = page_uids[target_idx]
+                if bool(args.mutual_only):
+                    if source_idx not in cached_neighbor_indices(target_idx):
+                        mutual_rejected_edge_count += 1
+                        continue
                 if bool(args.bidirectional_dedup):
                     pair_key = tuple(sorted((source_uid, target_uid)))
                     if pair_key in emitted_pair_keys:
@@ -407,6 +439,10 @@ def main() -> None:
         "same_doc_only": bool(args.same_doc_only),
         "cross_doc_only": bool(args.cross_doc_only),
         "bidirectional_dedup": bool(args.bidirectional_dedup),
+        "mutual_only": bool(args.mutual_only),
+        "candidate_edge_count_before_mutual_filter": candidate_edge_count,
+        "mutual_rejected_edge_count": mutual_rejected_edge_count,
+        "neighbor_cache_size": len(neighbor_cache),
         "score_min": min(score_values) if score_values else None,
         "score_max": max(score_values) if score_values else None,
         "score_mean": (sum(score_values) / len(score_values)) if score_values else None,

@@ -42,15 +42,25 @@ SPLADE_KNN_SOURCE_TOP_PAGES="${SPLADE_KNN_SOURCE_TOP_PAGES:-1000}"
 SPLADE_KNN_SOURCE_TOPK_TERMS="${SPLADE_KNN_SOURCE_TOPK_TERMS:-64}"
 SPLADE_KNN_MIN_SCORE="${SPLADE_KNN_MIN_SCORE:-0.0}"
 SPLADE_KNN_SCORE_MODE="${SPLADE_KNN_SCORE_MODE:-cosine}"
-SPLADE_KNN_LABEL="${SPLADE_KNN_LABEL:-${DATA_NAME}_${SUBSET_LABEL}_splade_knn_top${SPLADE_KNN_TOP_K}}"
+SPLADE_KNN_MUTUAL_ONLY="${SPLADE_KNN_MUTUAL_ONLY:-0}"
+if [[ "$SPLADE_KNN_MUTUAL_ONLY" == "1" ]]; then
+  SPLADE_GRAPH_VIEW_NAME="${SPLADE_GRAPH_VIEW_NAME:-splade_mknn}"
+else
+  SPLADE_GRAPH_VIEW_NAME="${SPLADE_GRAPH_VIEW_NAME:-splade_knn}"
+fi
+SPLADE_KNN_LABEL="${SPLADE_KNN_LABEL:-${DATA_NAME}_${SUBSET_LABEL}_${SPLADE_GRAPH_VIEW_NAME}_top${SPLADE_KNN_TOP_K}}"
 SPLADE_KNN_EDGES_JSONL="${SPLADE_KNN_EDGES_JSONL:-$OUT_DIR/${SPLADE_KNN_LABEL}.edges.jsonl}"
 SPLADE_KNN_SUMMARY_JSON="${SPLADE_KNN_SUMMARY_JSON:-$OUT_DIR/${SPLADE_KNN_LABEL}.summary.json}"
 
-SPLADE_GRAPH_LABEL="${SPLADE_GRAPH_LABEL:-${DATA_NAME}_${SUBSET_LABEL}_graph_ppr_splade_knn}"
+SPLADE_GRAPH_LABEL="${SPLADE_GRAPH_LABEL:-${DATA_NAME}_${SUBSET_LABEL}_graph_ppr_${SPLADE_GRAPH_VIEW_NAME}}"
 SPLADE_GRAPH_PRED="${SPLADE_GRAPH_PRED:-$OUT_DIR/${SPLADE_GRAPH_LABEL}.prediction.json}"
 SPLADE_GRAPH_SUMMARY="${SPLADE_GRAPH_SUMMARY:-$OUT_DIR/${SPLADE_GRAPH_LABEL}.summary.json}"
 
-FUSION_LABEL="${FUSION_LABEL:-${DATA_NAME}_${SUBSET_LABEL}_graph_view_rrf}"
+if [[ "$SPLADE_KNN_MUTUAL_ONLY" == "1" ]]; then
+  FUSION_LABEL="${FUSION_LABEL:-${DATA_NAME}_${SUBSET_LABEL}_graph_view_${SPLADE_GRAPH_VIEW_NAME}_rrf}"
+else
+  FUSION_LABEL="${FUSION_LABEL:-${DATA_NAME}_${SUBSET_LABEL}_graph_view_rrf}"
+fi
 FUSION_PRED="${FUSION_PRED:-$OUT_DIR/${FUSION_LABEL}.prediction.json}"
 FUSION_SUMMARY="${FUSION_SUMMARY:-$OUT_DIR/${FUSION_LABEL}.summary.json}"
 
@@ -88,18 +98,23 @@ else
 fi
 
 if [[ "${OVERWRITE_KNN:-0}" == "1" || ! -f "$SPLADE_KNN_EDGES_JSONL" ]]; then
-  "$PYTHON_BIN" "$REPO_ROOT/scripts/build_splade_page_knn_graph.py" \
-    --splade-index-pt "$SPLADE_INDEX_PT" \
-    --source-prediction-json "$DENSE_PRED" \
-    --source-prediction-json "$SPARSE_PRED" \
-    --qid-filter-jsonl "$GOLD" \
-    --source-top-pages "$SPLADE_KNN_SOURCE_TOP_PAGES" \
-    --top-k "$SPLADE_KNN_TOP_K" \
-    --source-topk-terms "$SPLADE_KNN_SOURCE_TOPK_TERMS" \
-    --min-score "$SPLADE_KNN_MIN_SCORE" \
-    --score-mode "$SPLADE_KNN_SCORE_MODE" \
-    --output-jsonl "$SPLADE_KNN_EDGES_JSONL" \
+  KNN_ARGS=(
+    --splade-index-pt "$SPLADE_INDEX_PT"
+    --source-prediction-json "$DENSE_PRED"
+    --source-prediction-json "$SPARSE_PRED"
+    --qid-filter-jsonl "$GOLD"
+    --source-top-pages "$SPLADE_KNN_SOURCE_TOP_PAGES"
+    --top-k "$SPLADE_KNN_TOP_K"
+    --source-topk-terms "$SPLADE_KNN_SOURCE_TOPK_TERMS"
+    --min-score "$SPLADE_KNN_MIN_SCORE"
+    --score-mode "$SPLADE_KNN_SCORE_MODE"
+    --output-jsonl "$SPLADE_KNN_EDGES_JSONL"
     --output-summary-json "$SPLADE_KNN_SUMMARY_JSON"
+  )
+  if [[ "$SPLADE_KNN_MUTUAL_ONLY" == "1" ]]; then
+    KNN_ARGS+=(--mutual-only)
+  fi
+  "$PYTHON_BIN" "$REPO_ROOT/scripts/build_splade_page_knn_graph.py" "${KNN_ARGS[@]}"
 else
   echo "using_existing_splade_knn_edges: $SPLADE_KNN_EDGES_JSONL"
 fi

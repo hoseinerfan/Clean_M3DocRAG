@@ -71,3 +71,13 @@ Metrics:
 ## Interpretation
 
 If SPLADE-kNN graph PPR improves top-4 page localization, the thesis claim is that semantic page-page edges address a limitation of page-preserving graph PPR. If SPLADE-kNN improves only R@1/R@2, report it as rank sharpening. If SPLADE-kNN is noisy, the unweighted RRF result is the robust final method.
+
+## Mutual-kNN Variant
+
+A stricter graph can be built with:
+
+```bash
+SPLADE_KNN_MUTUAL_ONLY=1 bash scripts/run_retriever_induced_graph_track.sh
+```
+
+This keeps only reciprocal SPLADE neighbors: page A connects to page B only when each appears in the other's top-k list. Mutual-kNN is a standard graph construction, not a learned or gold-tuned threshold. Use it as the first noise-control ablation when the directed SPLADE-kNN graph recovers hard cases but also worsens some same-document sibling pages.
