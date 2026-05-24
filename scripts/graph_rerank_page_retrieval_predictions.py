@@ -127,6 +127,12 @@ class QueryAnchorEvidencePolicy:
 
 
 @dataclass
+class ConstraintCompetitionPolicy:
+    doc_to_page_multipliers: dict[str, float]
+    metadata: dict[str, object]
+
+
+@dataclass
 class PdfHyperlinkEdge:
     source_page_uid: str
     target_doc_id: str
@@ -676,6 +682,23 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Require this minimum table-likeness score for constraint-bundle pages. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--constraint-competition-mode",
+        choices=["none", "doc_transition"],
+        default="none",
+        help=(
+            "Use constraint-bundle page evidence to make pages within the same document "
+            "compete. doc_transition increases doc->page edge mass for pages with "
+            "constraint evidence, causing them to steal normalized transition mass from "
+            "sibling pages."
+        ),
+    )
+    parser.add_argument(
+        "--constraint-competition-strength",
+        type=float,
+        default=0.0,
+        help="Strength for constraint evidence doc->page transition competition.",
     )
     parser.add_argument(
         "--pdf-hyperlink-edges-jsonl",
@@ -3846,6 +3869,72 @@ def build_query_anchor_evidence_policy(
     )
 
 
+def constraint_bundle_page_weights(policy: QueryAnchorEvidencePolicy) -> dict[str, float]:
+    weights: dict[str, float] = defaultdict(float)
+    for node_id, page_weights in policy.anchor_page_weights.items():
+        if not str(node_id).startswith("query_constraint_bundle::"):
+            continue
+        for uid, weight in page_weights.items():
+            weights[uid] += max(0.0, float(weight))
+    return dict(weights)
+
+
+def build_constraint_competition_policy(
+    *,
+    records: dict[str, PageRecord],
+    pages_by_doc: dict[str, list[PageRecord]],
+    query_anchor_policy: QueryAnchorEvidencePolicy,
+    args: argparse.Namespace,
+) -> ConstraintCompetitionPolicy:
+    mode = str(args.constraint_competition_mode)
+    strength = max(0.0, float(args.constraint_competition_strength))
+    multipliers = {uid: 1.0 for uid in records}
+    raw_page_weights = constraint_bundle_page_weights(query_anchor_policy)
+    metadata: dict[str, object] = {
+        "constraint_competition_mode": mode,
+        "constraint_competition_strength": strength,
+        "constraint_competition_source": "constraint_bundle",
+        "constraint_competition_active_doc_count": 0,
+        "constraint_competition_active_page_count": 0,
+        "mean_constraint_competition_doc_to_page_multiplier": 1.0 if records else None,
+        "max_constraint_competition_doc_to_page_multiplier": 1.0 if records else None,
+    }
+    if mode == "none" or strength <= 0.0 or not raw_page_weights:
+        return ConstraintCompetitionPolicy(multipliers, metadata)
+
+    active_doc_count = 0
+    active_page_count = 0
+    for doc_id, doc_records in pages_by_doc.items():
+        doc_weights = {
+            record.page_uid: raw_page_weights.get(record.page_uid, 0.0)
+            for record in doc_records
+        }
+        max_weight = max(doc_weights.values(), default=0.0)
+        if max_weight <= 0.0:
+            continue
+        active_doc_count += 1
+        for uid, weight in doc_weights.items():
+            if weight <= 0.0:
+                continue
+            active_page_count += 1
+            multipliers[uid] = 1.0 + strength * (float(weight) / float(max_weight))
+
+    multiplier_values = list(multipliers.values())
+    metadata.update(
+        {
+            "constraint_competition_active_doc_count": active_doc_count,
+            "constraint_competition_active_page_count": active_page_count,
+            "mean_constraint_competition_doc_to_page_multiplier": (
+                statistics.fmean(multiplier_values) if multiplier_values else None
+            ),
+            "max_constraint_competition_doc_to_page_multiplier": (
+                max(multiplier_values) if multiplier_values else None
+            ),
+        }
+    )
+    return ConstraintCompetitionPolicy(multipliers, metadata)
+
+
 def add_query_anchor_evidence_edges(
     *,
     graph: dict[str, dict[str, float]],
@@ -4512,6 +4601,12 @@ def build_qid_graph_ranking(
         doc_anchor_weights=query_anchor_doc_weights,
         args=args,
     )
+    constraint_competition_policy = build_constraint_competition_policy(
+        records=records,
+        pages_by_doc=pages_by_doc,
+        query_anchor_policy=query_anchor_policy,
+        args=args,
+    )
 
     graph: dict[str, dict[str, float]] = defaultdict(dict)
     base_page_to_doc_weight = effective_page_to_doc_edge_weight(args)
@@ -4528,6 +4623,11 @@ def build_qid_graph_ranking(
                 page_to_doc_weight *= transition_multiplier
             if bool(args.adaptive_transition_gate_doc_to_page):
                 doc_to_page_weight *= transition_multiplier
+        if str(args.constraint_competition_mode) == "doc_transition":
+            doc_to_page_weight *= constraint_competition_policy.doc_to_page_multipliers.get(
+                uid,
+                1.0,
+            )
         add_directed_edge(graph, uid, doc_node, page_to_doc_weight)
         add_directed_edge(graph, doc_node, uid, doc_to_page_weight)
 
@@ -4711,6 +4811,7 @@ def build_qid_graph_ranking(
         **position_evidence_metadata,
         **query_anchor_policy.metadata,
         **query_anchor_evidence_metadata,
+        **constraint_competition_policy.metadata,
         **pdf_hyperlink_metadata,
         **external_page_graph_metadata,
         "position_evidence_restart_seed_node_count": position_seed_node_count,
@@ -5020,6 +5121,8 @@ def main() -> None:
                 "query_anchor_constraint_table_min_score": float(
                     args.query_anchor_constraint_table_min_score
                 ),
+                "constraint_competition_mode": args.constraint_competition_mode,
+                "constraint_competition_strength": float(args.constraint_competition_strength),
                 "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
                 "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
                 "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
@@ -5193,6 +5296,8 @@ def main() -> None:
         "query_anchor_constraint_table_min_score": float(
             args.query_anchor_constraint_table_min_score
         ),
+        "constraint_competition_mode": args.constraint_competition_mode,
+        "constraint_competition_strength": float(args.constraint_competition_strength),
         "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
         "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
         "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
@@ -5778,6 +5883,43 @@ def main() -> None:
                 row["graph"].get("query_anchor_constraint_mean_value_specificity") is not None
                 for row in per_qid
             )
+            else None
+        ),
+        "constraint_competition_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("constraint_competition_active_page_count", 0)) > 0
+        ),
+        "mean_constraint_competition_active_doc_count": (
+            statistics.fmean(
+                float(row["graph"].get("constraint_competition_active_doc_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_constraint_competition_active_page_count": (
+            statistics.fmean(
+                float(row["graph"].get("constraint_competition_active_page_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_constraint_competition_doc_to_page_multiplier": (
+            statistics.fmean(
+                float(row["graph"].get("mean_constraint_competition_doc_to_page_multiplier", 1.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "max_constraint_competition_doc_to_page_multiplier": (
+            max(
+                float(row["graph"].get("max_constraint_competition_doc_to_page_multiplier", 1.0))
+                for row in per_qid
+            )
+            if per_qid
             else None
         ),
         "per_qid": per_qid,
