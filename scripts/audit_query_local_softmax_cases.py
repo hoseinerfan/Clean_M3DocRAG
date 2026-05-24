@@ -30,6 +30,7 @@ NUMERIC_FEATURES = [
     "mean_query_local_evidence_active_boundary_weight",
     "min_query_local_evidence_boundary_weight",
     "max_query_local_evidence_boundary_weight",
+    "query_local_selector_feature_value",
     "query_anchor_constraint_bundle_page_match_count",
     "query_anchor_constraint_active_slot_count",
     "query_anchor_constraint_matched_slot_count",

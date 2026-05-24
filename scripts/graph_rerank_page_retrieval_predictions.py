@@ -685,12 +685,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--constraint-competition-mode",
-        choices=["none", "doc_transition", "query_local_softmax"],
+        choices=["none", "doc_transition", "query_local_softmax", "query_local_selector"],
         default="none",
         help=(
             "Make pages within the same document compete for doc->page transition mass. "
             "doc_transition uses constraint-bundle page evidence. query_local_softmax "
-            "uses query-local atom evidence without domain-specific constraint slots."
+            "uses query-local atom evidence without domain-specific constraint slots. "
+            "query_local_selector computes both and chooses qlsoft only when a "
+            "configured query-local diagnostic passes."
         ),
     )
     parser.add_argument(
@@ -797,6 +799,26 @@ def parse_args() -> argparse.Namespace:
             "page_seed preserves the fused retrieval prior; uniform lets evidence fully "
             "redistribute pages within each document."
         ),
+    )
+    parser.add_argument(
+        "--query-local-selector-feature",
+        default="mean_query_local_evidence_boundary_weight",
+        help=(
+            "For query_local_selector, qlsoft diagnostic used to decide whether to "
+            "use query-local softmax or fall back to constraint-bundle competition."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-selector-op",
+        choices=["<=", ">="],
+        default=">=",
+        help="Comparison operator for query_local_selector.",
+    )
+    parser.add_argument(
+        "--query-local-selector-threshold",
+        type=float,
+        default=0.0,
+        help="Threshold for query_local_selector. The selected qlsoft run remains opt-in.",
     )
     parser.add_argument(
         "--query-local-evidence-boundary-mode",
@@ -4090,6 +4112,132 @@ def softmax_doc_page_multipliers(
     }
 
 
+def competition_multiplier_summary(multipliers: dict[str, float]) -> dict[str, float | None]:
+    values = list(multipliers.values())
+    return {
+        "mean_constraint_competition_doc_to_page_multiplier": (
+            statistics.fmean(values) if values else None
+        ),
+        "max_constraint_competition_doc_to_page_multiplier": max(values) if values else None,
+    }
+
+
+def finite_metadata_float(metadata: dict[str, object], key: str) -> float | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return float(value)
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if math.isnan(number) or math.isinf(number):
+        return None
+    return number
+
+
+def selector_condition_passes(
+    value: float | None,
+    *,
+    op: str,
+    threshold: float,
+) -> bool:
+    if value is None:
+        return False
+    if op == "<=":
+        return value <= float(threshold)
+    return value >= float(threshold)
+
+
+def build_query_local_softmax_competition_policy(
+    *,
+    question: str,
+    records: dict[str, PageRecord],
+    pages_by_doc: dict[str, list[PageRecord]],
+    page_texts: dict[str, str],
+    query_local_doc_weights: dict[str, float],
+    page_seed: dict[str, float],
+    strength: float,
+    args: argparse.Namespace,
+    base_metadata: dict[str, object],
+) -> ConstraintCompetitionPolicy:
+    multipliers = {uid: 1.0 for uid in records}
+    metadata = dict(base_metadata)
+    page_scores, query_local_metadata = build_query_local_evidence_scores(
+        question=question,
+        records=records,
+        page_texts=page_texts,
+        doc_weights=query_local_doc_weights,
+        args=args,
+    )
+    metadata.update(query_local_metadata)
+    metadata["constraint_competition_source"] = "query_local_evidence"
+    if not page_scores:
+        return ConstraintCompetitionPolicy(multipliers, metadata)
+
+    multipliers, softmax_metadata = softmax_doc_page_multipliers(
+        pages_by_doc=pages_by_doc,
+        page_scores=page_scores,
+        page_seed=page_seed,
+        strength=strength,
+        confidence_mode=str(args.query_local_evidence_confidence_mode),
+        min_doc_confidence=float(args.query_local_evidence_min_doc_confidence),
+        max_active_page_frac=float(args.query_local_evidence_max_active_page_frac),
+        softmax_mix=float(args.query_local_evidence_softmax_mix),
+        softmax_prior=str(args.query_local_evidence_softmax_prior),
+        boundary_mode=str(args.query_local_evidence_boundary_mode),
+        boundary_rank_source=str(args.query_local_evidence_boundary_rank_source),
+        boundary_center_rank=float(args.query_local_evidence_boundary_center_rank),
+        boundary_window=float(args.query_local_evidence_boundary_window),
+        boundary_floor=float(args.query_local_evidence_boundary_floor),
+    )
+    metadata.update({**softmax_metadata, **competition_multiplier_summary(multipliers)})
+    return ConstraintCompetitionPolicy(multipliers, metadata)
+
+
+def build_constraint_bundle_competition_policy(
+    *,
+    records: dict[str, PageRecord],
+    pages_by_doc: dict[str, list[PageRecord]],
+    query_anchor_policy: QueryAnchorEvidencePolicy,
+    strength: float,
+    base_metadata: dict[str, object],
+) -> ConstraintCompetitionPolicy:
+    multipliers = {uid: 1.0 for uid in records}
+    metadata = dict(base_metadata)
+    raw_page_weights = constraint_bundle_page_weights(query_anchor_policy)
+    metadata["constraint_competition_source"] = "constraint_bundle"
+    if not raw_page_weights:
+        return ConstraintCompetitionPolicy(multipliers, metadata)
+
+    active_doc_count = 0
+    active_page_count = 0
+    for doc_id, doc_records in pages_by_doc.items():
+        doc_weights = {
+            record.page_uid: raw_page_weights.get(record.page_uid, 0.0)
+            for record in doc_records
+        }
+        max_weight = max(doc_weights.values(), default=0.0)
+        if max_weight <= 0.0:
+            continue
+        active_doc_count += 1
+        for uid, weight in doc_weights.items():
+            if weight <= 0.0:
+                continue
+            active_page_count += 1
+            multipliers[uid] = 1.0 + strength * (float(weight) / float(max_weight))
+
+    metadata.update(
+        {
+            "constraint_competition_active_doc_count": active_doc_count,
+            "constraint_competition_active_page_count": active_page_count,
+            **competition_multiplier_summary(multipliers),
+        }
+    )
+    return ConstraintCompetitionPolicy(multipliers, metadata)
+
+
 def build_query_constraint_bundle(
     *,
     question: str,
@@ -4560,83 +4708,97 @@ def build_constraint_competition_policy(
         return ConstraintCompetitionPolicy(multipliers, metadata)
 
     if mode == "query_local_softmax":
-        page_scores, query_local_metadata = build_query_local_evidence_scores(
+        return build_query_local_softmax_competition_policy(
             question=question,
             records=records,
-            page_texts=page_texts,
-            doc_weights=query_local_doc_weights,
-            args=args,
-        )
-        metadata.update(query_local_metadata)
-        metadata["constraint_competition_source"] = "query_local_evidence"
-        if not page_scores:
-            return ConstraintCompetitionPolicy(multipliers, metadata)
-        multipliers, softmax_metadata = softmax_doc_page_multipliers(
             pages_by_doc=pages_by_doc,
-            page_scores=page_scores,
+            page_texts=page_texts,
+            query_local_doc_weights=query_local_doc_weights,
             page_seed=page_seed,
             strength=strength,
-            confidence_mode=str(args.query_local_evidence_confidence_mode),
-            min_doc_confidence=float(args.query_local_evidence_min_doc_confidence),
-            max_active_page_frac=float(args.query_local_evidence_max_active_page_frac),
-            softmax_mix=float(args.query_local_evidence_softmax_mix),
-            softmax_prior=str(args.query_local_evidence_softmax_prior),
-            boundary_mode=str(args.query_local_evidence_boundary_mode),
-            boundary_rank_source=str(args.query_local_evidence_boundary_rank_source),
-            boundary_center_rank=float(args.query_local_evidence_boundary_center_rank),
-            boundary_window=float(args.query_local_evidence_boundary_window),
-            boundary_floor=float(args.query_local_evidence_boundary_floor),
+            args=args,
+            base_metadata=metadata,
         )
-        multiplier_values = list(multipliers.values())
-        metadata.update(
+
+    if mode == "query_local_selector":
+        query_local_policy = build_query_local_softmax_competition_policy(
+            question=question,
+            records=records,
+            pages_by_doc=pages_by_doc,
+            page_texts=page_texts,
+            query_local_doc_weights=query_local_doc_weights,
+            page_seed=page_seed,
+            strength=strength,
+            args=args,
+            base_metadata=metadata,
+        )
+        constraint_policy = build_constraint_bundle_competition_policy(
+            records=records,
+            pages_by_doc=pages_by_doc,
+            query_anchor_policy=query_anchor_policy,
+            strength=strength,
+            base_metadata=metadata,
+        )
+
+        selector_feature = str(args.query_local_selector_feature)
+        selector_op = str(args.query_local_selector_op)
+        selector_threshold = float(args.query_local_selector_threshold)
+        selector_value = finite_metadata_float(query_local_policy.metadata, selector_feature)
+        selector_passed = selector_condition_passes(
+            selector_value,
+            op=selector_op,
+            threshold=selector_threshold,
+        )
+        query_local_available = (
+            int(query_local_policy.metadata.get("constraint_competition_active_page_count", 0))
+            > 0
+        )
+        choose_query_local = bool(query_local_available and selector_passed)
+        selected_policy = query_local_policy if choose_query_local else constraint_policy
+        selected_metadata = dict(selected_policy.metadata)
+
+        for key, value in query_local_policy.metadata.items():
+            if key.startswith("query_local_evidence_") or key.startswith(
+                "mean_query_local_evidence_"
+            ) or key.startswith("min_query_local_evidence_") or key.startswith(
+                "max_query_local_evidence_"
+            ):
+                selected_metadata[key] = value
+
+        selected_metadata.update(
             {
-                **softmax_metadata,
-                "mean_constraint_competition_doc_to_page_multiplier": (
-                    statistics.fmean(multiplier_values) if multiplier_values else None
+                "query_local_selector_feature": selector_feature,
+                "query_local_selector_op": selector_op,
+                "query_local_selector_threshold": selector_threshold,
+                "query_local_selector_feature_value": selector_value,
+                "query_local_selector_passed": selector_passed,
+                "query_local_selector_query_local_available": query_local_available,
+                "query_local_selector_selected_source": (
+                    "query_local_evidence" if choose_query_local else "constraint_bundle"
                 ),
-                "max_constraint_competition_doc_to_page_multiplier": (
-                    max(multiplier_values) if multiplier_values else None
+                "query_local_selector_constraint_bundle_available": (
+                    int(
+                        constraint_policy.metadata.get(
+                            "constraint_competition_active_page_count",
+                            0,
+                        )
+                    )
+                    > 0
                 ),
             }
         )
-        return ConstraintCompetitionPolicy(multipliers, metadata)
+        selected_metadata["constraint_competition_source"] = selected_metadata[
+            "query_local_selector_selected_source"
+        ]
+        return ConstraintCompetitionPolicy(selected_policy.doc_to_page_multipliers, selected_metadata)
 
-    raw_page_weights = constraint_bundle_page_weights(query_anchor_policy)
-    metadata["constraint_competition_source"] = "constraint_bundle"
-    if not raw_page_weights:
-        return ConstraintCompetitionPolicy(multipliers, metadata)
-
-    active_doc_count = 0
-    active_page_count = 0
-    for doc_id, doc_records in pages_by_doc.items():
-        doc_weights = {
-            record.page_uid: raw_page_weights.get(record.page_uid, 0.0)
-            for record in doc_records
-        }
-        max_weight = max(doc_weights.values(), default=0.0)
-        if max_weight <= 0.0:
-            continue
-        active_doc_count += 1
-        for uid, weight in doc_weights.items():
-            if weight <= 0.0:
-                continue
-            active_page_count += 1
-            multipliers[uid] = 1.0 + strength * (float(weight) / float(max_weight))
-
-    multiplier_values = list(multipliers.values())
-    metadata.update(
-        {
-            "constraint_competition_active_doc_count": active_doc_count,
-            "constraint_competition_active_page_count": active_page_count,
-            "mean_constraint_competition_doc_to_page_multiplier": (
-                statistics.fmean(multiplier_values) if multiplier_values else None
-            ),
-            "max_constraint_competition_doc_to_page_multiplier": (
-                max(multiplier_values) if multiplier_values else None
-            ),
-        }
+    return build_constraint_bundle_competition_policy(
+        records=records,
+        pages_by_doc=pages_by_doc,
+        query_anchor_policy=query_anchor_policy,
+        strength=strength,
+        base_metadata=metadata,
     )
-    return ConstraintCompetitionPolicy(multipliers, metadata)
 
 
 def add_query_anchor_evidence_edges(
@@ -5338,7 +5500,11 @@ def build_qid_graph_ranking(
                 page_to_doc_weight *= transition_multiplier
             if bool(args.adaptive_transition_gate_doc_to_page):
                 doc_to_page_weight *= transition_multiplier
-        if str(args.constraint_competition_mode) in {"doc_transition", "query_local_softmax"}:
+        if str(args.constraint_competition_mode) in {
+            "doc_transition",
+            "query_local_softmax",
+            "query_local_selector",
+        }:
             doc_to_page_weight *= constraint_competition_policy.doc_to_page_multipliers.get(
                 uid,
                 1.0,
@@ -5616,7 +5782,8 @@ def main() -> None:
             text_fields=args.query_anchor_text_field,
             load_page_texts=(
                 str(args.query_anchor_evidence_mode) != "none"
-                or str(args.constraint_competition_mode) == "query_local_softmax"
+                or str(args.constraint_competition_mode)
+                in {"query_local_softmax", "query_local_selector"}
             ),
         )
 
@@ -5863,6 +6030,9 @@ def main() -> None:
                 ),
                 "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
                 "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
+                "query_local_selector_feature": args.query_local_selector_feature,
+                "query_local_selector_op": args.query_local_selector_op,
+                "query_local_selector_threshold": float(args.query_local_selector_threshold),
                 "query_local_evidence_boundary_mode": args.query_local_evidence_boundary_mode,
                 "query_local_evidence_boundary_rank_source": (
                     args.query_local_evidence_boundary_rank_source
@@ -6067,6 +6237,9 @@ def main() -> None:
         ),
         "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
         "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
+        "query_local_selector_feature": args.query_local_selector_feature,
+        "query_local_selector_op": args.query_local_selector_op,
+        "query_local_selector_threshold": float(args.query_local_selector_threshold),
         "query_local_evidence_boundary_mode": args.query_local_evidence_boundary_mode,
         "query_local_evidence_boundary_rank_source": (
             args.query_local_evidence_boundary_rank_source
@@ -6786,6 +6959,35 @@ def main() -> None:
             if any(
                 row["graph"].get("mean_query_local_evidence_active_boundary_weight")
                 is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "query_local_selector_qid_count": sum(
+            1
+            for row in per_qid
+            if row["graph"].get("query_local_selector_selected_source") is not None
+        ),
+        "query_local_selector_selected_query_local_count": sum(
+            1
+            for row in per_qid
+            if row["graph"].get("query_local_selector_selected_source")
+            == "query_local_evidence"
+        ),
+        "query_local_selector_selected_constraint_bundle_count": sum(
+            1
+            for row in per_qid
+            if row["graph"].get("query_local_selector_selected_source")
+            == "constraint_bundle"
+        ),
+        "mean_query_local_selector_feature_value": (
+            statistics.fmean(
+                float(row["graph"].get("query_local_selector_feature_value", 0.0))
+                for row in per_qid
+                if row["graph"].get("query_local_selector_feature_value") is not None
+            )
+            if any(
+                row["graph"].get("query_local_selector_feature_value") is not None
                 for row in per_qid
             )
             else None
