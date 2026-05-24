@@ -81,3 +81,45 @@ SPLADE_KNN_MUTUAL_ONLY=1 bash scripts/run_retriever_induced_graph_track.sh
 ```
 
 This keeps only reciprocal SPLADE neighbors: page A connects to page B only when each appears in the other's top-k list. Mutual-kNN is a standard graph construction, not a learned or gold-tuned threshold. Use it as the first noise-control ablation when the directed SPLADE-kNN graph recovers hard cases but also worsens some same-document sibling pages.
+
+## Layout/Evidence Graph Pivot
+
+Full-dev SPLADE-kNN results show that semantic page-page propagation repairs some hard cases but is not a complete exact-page solution. The next limitation is page granularity: page-preserving PPR often finds the right document, then confuses same-document sibling pages. The layout/evidence graph addresses this by scoring evidence regions inside candidate pages before aggregating back to pages.
+
+Main script:
+
+```bash
+bash scripts/run_layout_evidence_graph_track.sh
+```
+
+Required environment:
+
+```bash
+DATA_NAME=vidore-v3
+DATA_ROOT=/path/to/converted/root
+OUT_DIR=/path/to/graph_ppr_output
+SUBSET_LABEL=rankable_rightdoc_wrongpage_100
+GOLD=/path/to/subset_or_full_gold.jsonl
+PREDICTION=/path/to/base_graph_or_dense_prediction.json
+export DATA_NAME DATA_ROOT OUT_DIR SUBSET_LABEL GOLD PREDICTION
+```
+
+The default `PREDICTION` is `${OUT_DIR}/${DATA_NAME}_${SUBSET_LABEL}_graph_ppr_base.prediction.json` when that file exists, then `BASE_PRED`, then `DENSE_PRED`.
+
+Method:
+
+1. Candidate pages come from the top retrieved documents and the input page ranking.
+2. Region nodes are read from corpus-side fields such as `layout_regions`, `ocr_blocks`, `text_blocks`, `tables`, `figures`, and `captions`.
+3. If explicit region fields are absent, the script falls back to converted `markdown`/OCR text blocks. Report `mean_explicit_region_pages` and `mean_fallback_region_pages` so the thesis can separate true layout evidence from text-only fallback.
+4. Query-region edges use BM25.
+5. Region-page edges use containment.
+6. Region-region edges use reading order within the page.
+7. PPR produces an evidence-page ranking.
+8. The final page ranking is unweighted RRF between the input ranking and the evidence graph ranking.
+
+Why this is more defensible than another reranker:
+
+1. The graph has typed internal evidence nodes instead of treating each page as an atomic item.
+2. All edges come from corpus structure, reading order, and standard IR scoring.
+3. No gold labels, learned thresholds, or dataset-specific selectors are used.
+4. The summary explicitly reports whether real region/layout fields were used; text-only fallback should be framed as an immediate prototype, not the final layout claim.
