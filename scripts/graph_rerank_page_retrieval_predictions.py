@@ -799,6 +799,53 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--query-local-evidence-boundary-mode",
+        choices=["none", "rank_window"],
+        default="none",
+        help=(
+            "For query_local_softmax, optionally focus evidence mass near the current "
+            "retrieval rank boundary. rank_window applies a smooth rank-proximity "
+            "weight before the doc-local softmax."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-boundary-rank-source",
+        choices=["page_seed", "best_source"],
+        default="page_seed",
+        help=(
+            "Rank signal used by query-local boundary weighting. page_seed uses the "
+            "current fused page seed order; best_source uses the best dense/SPLADE/"
+            "expansion source rank."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-boundary-center-rank",
+        type=float,
+        default=5.0,
+        help=(
+            "Center rank for query-local rank_window boundary weighting. For top-4 "
+            "page recall, 5 targets pages just outside the cutoff."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-boundary-window",
+        type=float,
+        default=6.0,
+        help=(
+            "Half-width of the smooth rank window for query-local boundary weighting. "
+            "Larger values allow evidence to affect a broader rank band."
+        ),
+    )
+    parser.add_argument(
+        "--query-local-evidence-boundary-floor",
+        type=float,
+        default=0.25,
+        help=(
+            "Minimum rank-proximity weight for query-local boundary weighting. This "
+            "keeps evidence usable away from the boundary without letting it dominate."
+        ),
+    )
+    parser.add_argument(
         "--pdf-hyperlink-edges-jsonl",
         default="",
         help=(
@@ -3744,6 +3791,21 @@ def build_query_local_evidence_scores(
         ),
         "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
         "query_local_evidence_softmax_prior": str(args.query_local_evidence_softmax_prior),
+        "query_local_evidence_boundary_mode": str(
+            args.query_local_evidence_boundary_mode
+        ),
+        "query_local_evidence_boundary_rank_source": str(
+            args.query_local_evidence_boundary_rank_source
+        ),
+        "query_local_evidence_boundary_center_rank": float(
+            args.query_local_evidence_boundary_center_rank
+        ),
+        "query_local_evidence_boundary_window": float(
+            args.query_local_evidence_boundary_window
+        ),
+        "query_local_evidence_boundary_floor": float(
+            args.query_local_evidence_boundary_floor
+        ),
         "query_local_evidence_active": False,
         "query_local_evidence_reason": "disabled",
         "query_local_evidence_atom_count": 0,
@@ -3857,6 +3919,40 @@ def query_local_doc_confidence(scores: dict[str, float], *, mode: str) -> float:
     return clamp(1.0 - entropy / max_entropy, 0.0, 1.0)
 
 
+def page_seed_rank_lookup(page_seed: dict[str, float]) -> dict[str, int]:
+    ranked_uids = sorted(
+        page_seed,
+        key=lambda uid: (-float(page_seed.get(uid, 0.0)), uid),
+    )
+    return {uid: rank for rank, uid in enumerate(ranked_uids, start=1)}
+
+
+def query_local_boundary_weight(
+    *,
+    record: PageRecord,
+    page_seed_ranks: dict[str, int],
+    mode: str,
+    rank_source: str,
+    center_rank: float,
+    window: float,
+    floor: float,
+) -> float:
+    if mode == "none":
+        return 1.0
+
+    floor = clamp(float(floor), 0.0, 1.0)
+    window = max(1e-6, float(window))
+    if rank_source == "best_source":
+        rank = page_record_best_rank(record)
+    else:
+        rank = page_seed_ranks.get(record.page_uid)
+    if rank is None or int(rank) <= 0:
+        return floor
+
+    proximity = max(0.0, 1.0 - abs(float(rank) - float(center_rank)) / window)
+    return floor + (1.0 - floor) * proximity
+
+
 def softmax_doc_page_multipliers(
     *,
     pages_by_doc: dict[str, list[PageRecord]],
@@ -3868,6 +3964,11 @@ def softmax_doc_page_multipliers(
     max_active_page_frac: float,
     softmax_mix: float,
     softmax_prior: str,
+    boundary_mode: str,
+    boundary_rank_source: str,
+    boundary_center_rank: float,
+    boundary_window: float,
+    boundary_floor: float,
 ) -> tuple[dict[str, float], dict[str, object]]:
     multipliers: dict[str, float] = {
         record.page_uid: 1.0
@@ -3879,11 +3980,16 @@ def softmax_doc_page_multipliers(
     confidence_values: list[float] = []
     alpha_values: list[float] = []
     active_page_frac_values: list[float] = []
+    boundary_weight_values: list[float] = []
+    active_boundary_weight_values: list[float] = []
     skipped_low_confidence_doc_count = 0
     skipped_broad_doc_count = 0
     min_doc_confidence = clamp(float(min_doc_confidence), 0.0, 1.0)
     max_active_page_frac = clamp(float(max_active_page_frac), 0.0, 1.0)
     softmax_mix = clamp(float(softmax_mix), 0.0, 1.0)
+    boundary_mode = str(boundary_mode)
+    boundary_rank_source = str(boundary_rank_source)
+    page_seed_ranks = page_seed_rank_lookup(page_seed)
 
     for _doc_id, doc_records in pages_by_doc.items():
         if not doc_records:
@@ -3909,16 +4015,30 @@ def softmax_doc_page_multipliers(
             continue
 
         priors: dict[str, float] = {}
+        doc_boundary_weights: dict[str, float] = {}
         for record in doc_records:
             uid = record.page_uid
             if softmax_prior == "uniform":
                 priors[uid] = 1.0
             else:
                 priors[uid] = max(1e-12, float(page_seed.get(uid, 0.0)))
+            boundary_weight = query_local_boundary_weight(
+                record=record,
+                page_seed_ranks=page_seed_ranks,
+                mode=boundary_mode,
+                rank_source=boundary_rank_source,
+                center_rank=float(boundary_center_rank),
+                window=float(boundary_window),
+                floor=float(boundary_floor),
+            )
+            doc_boundary_weights[uid] = boundary_weight
+            boundary_weight_values.append(boundary_weight)
+            if doc_scores.get(uid, 0.0) > 0.0:
+                active_boundary_weight_values.append(boundary_weight)
         prior_dist = normalize_nonnegative(priors)
         logits = {
             uid: math.log(max(1e-12, prior_dist.get(uid, 0.0)))
-            + alpha * (score / max_score)
+            + alpha * doc_boundary_weights.get(uid, 1.0) * (score / max_score)
             for uid, score in doc_scores.items()
         }
         max_logit = max(logits.values())
@@ -3953,6 +4073,20 @@ def softmax_doc_page_multipliers(
             statistics.fmean(alpha_values) if alpha_values else None
         ),
         "max_query_local_evidence_doc_alpha": max(alpha_values) if alpha_values else None,
+        "mean_query_local_evidence_boundary_weight": (
+            statistics.fmean(boundary_weight_values) if boundary_weight_values else None
+        ),
+        "mean_query_local_evidence_active_boundary_weight": (
+            statistics.fmean(active_boundary_weight_values)
+            if active_boundary_weight_values
+            else None
+        ),
+        "min_query_local_evidence_boundary_weight": (
+            min(boundary_weight_values) if boundary_weight_values else None
+        ),
+        "max_query_local_evidence_boundary_weight": (
+            max(boundary_weight_values) if boundary_weight_values else None
+        ),
     }
 
 
@@ -4447,6 +4581,11 @@ def build_constraint_competition_policy(
             max_active_page_frac=float(args.query_local_evidence_max_active_page_frac),
             softmax_mix=float(args.query_local_evidence_softmax_mix),
             softmax_prior=str(args.query_local_evidence_softmax_prior),
+            boundary_mode=str(args.query_local_evidence_boundary_mode),
+            boundary_rank_source=str(args.query_local_evidence_boundary_rank_source),
+            boundary_center_rank=float(args.query_local_evidence_boundary_center_rank),
+            boundary_window=float(args.query_local_evidence_boundary_window),
+            boundary_floor=float(args.query_local_evidence_boundary_floor),
         )
         multiplier_values = list(multipliers.values())
         metadata.update(
@@ -5724,6 +5863,19 @@ def main() -> None:
                 ),
                 "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
                 "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
+                "query_local_evidence_boundary_mode": args.query_local_evidence_boundary_mode,
+                "query_local_evidence_boundary_rank_source": (
+                    args.query_local_evidence_boundary_rank_source
+                ),
+                "query_local_evidence_boundary_center_rank": float(
+                    args.query_local_evidence_boundary_center_rank
+                ),
+                "query_local_evidence_boundary_window": float(
+                    args.query_local_evidence_boundary_window
+                ),
+                "query_local_evidence_boundary_floor": float(
+                    args.query_local_evidence_boundary_floor
+                ),
                 "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
                 "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
                 "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
@@ -5915,6 +6067,19 @@ def main() -> None:
         ),
         "query_local_evidence_softmax_mix": float(args.query_local_evidence_softmax_mix),
         "query_local_evidence_softmax_prior": args.query_local_evidence_softmax_prior,
+        "query_local_evidence_boundary_mode": args.query_local_evidence_boundary_mode,
+        "query_local_evidence_boundary_rank_source": (
+            args.query_local_evidence_boundary_rank_source
+        ),
+        "query_local_evidence_boundary_center_rank": float(
+            args.query_local_evidence_boundary_center_rank
+        ),
+        "query_local_evidence_boundary_window": float(
+            args.query_local_evidence_boundary_window
+        ),
+        "query_local_evidence_boundary_floor": float(
+            args.query_local_evidence_boundary_floor
+        ),
         "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
         "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
         "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
@@ -6591,6 +6756,36 @@ def main() -> None:
             )
             if any(
                 row["graph"].get("mean_query_local_evidence_doc_alpha") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_query_local_evidence_boundary_weight": (
+            statistics.fmean(
+                float(row["graph"].get("mean_query_local_evidence_boundary_weight", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_query_local_evidence_boundary_weight") is not None
+            )
+            if any(
+                row["graph"].get("mean_query_local_evidence_boundary_weight") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_query_local_evidence_active_boundary_weight": (
+            statistics.fmean(
+                float(
+                    row["graph"].get(
+                        "mean_query_local_evidence_active_boundary_weight", 0.0
+                    )
+                )
+                for row in per_qid
+                if row["graph"].get("mean_query_local_evidence_active_boundary_weight")
+                is not None
+            )
+            if any(
+                row["graph"].get("mean_query_local_evidence_active_boundary_weight")
+                is not None
                 for row in per_qid
             )
             else None
