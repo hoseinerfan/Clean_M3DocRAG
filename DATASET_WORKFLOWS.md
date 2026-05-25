@@ -559,12 +559,12 @@ python scripts/audit_retrieval_failure_taxonomy.py \
   --run mmdocir "$MMDOCIR_DATA/MMQA_dev.jsonl" "$MMDOCIR_OUT/mmdocir_dev_graph_ppr_base.prediction.json" \
   --run opendocvqa "$OPENDOC_DATA/MMQA_dev.jsonl" "$OPENDOC_OUT/opendocvqa_denseheavy125_medium_both.prediction.json" \
   --hit-k 4 \
-  --boundary-k 10 \
+  --boundary-k 20 \
   --adjacent-window 2 \
   --topn 50 \
-  --output-json "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report.json" \
-  --output-md "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report.md" \
-  --output-csv "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report_cases.csv"
+  --output-json "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report_rich.json" \
+  --output-md "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report_rich.md" \
+  --output-csv "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report_rich_cases.csv"
 ```
 
 This audit uses gold labels to explain failures, so it is for analysis only. Do not use its categories
@@ -584,9 +584,9 @@ Observed limitation report for frozen Graph-PPR outputs:
 
 | Dataset | qids | page hit@4 | doc hit@4 | page failures | document retrieval gap | same-document page confusion | rank-boundary localization | right-doc deep/missing page |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| ViDoRe V3 | 14514 | 9383 | 13206 | 5131 | 1308 / 5131 = 25.5% | 1921 / 5131 = 37.4% | 1534 / 5131 = 29.9% | 368 / 5131 = 7.2% |
-| MMDocIR | 1658 | 1114 | 1353 | 544 | 305 / 544 = 56.1% | 118 / 544 = 21.7% | 98 / 544 = 18.0% | 23 / 544 = 4.2% |
-| OpenDocVQA | 41017 | 26173 | 26901 | 14844 | 14116 / 14844 = 95.1% | 212 / 14844 = 1.4% | 482 / 14844 = 3.2% | 34 / 14844 = 0.2% |
+| ViDoRe V3 | 14514 | 9383 | 13206 | 5131 | 1308 / 5131 = 25.5% | 1340 / 5131 = 26.1% | 2228 / 5131 = 43.4% | 255 / 5131 = 5.0% |
+| MMDocIR | 1658 | 1114 | 1353 | 544 | 305 / 544 = 56.1% | 74 / 544 = 13.6% | 147 / 544 = 27.0% | 18 / 544 = 3.3% |
+| OpenDocVQA | 41017 | 26173 | 26901 | 14844 | 14116 / 14844 = 95.1% | 119 / 14844 = 0.8% | 597 / 14844 = 4.0% | 12 / 14844 = 0.1% |
 
 Rank and document-position diagnostics:
 
@@ -598,9 +598,10 @@ Rank and document-position diagnostics:
 
 Operational findings:
 
-1. ViDoRe is mostly a page-local failure problem after the right document is already present. The
-   largest buckets are same-document page confusion and rank-boundary localization, so local
-   evidence, exact MaxSim boundary checks, and content/OCR/layout verifiers are plausible next tests.
+1. ViDoRe is mostly a page-local failure problem after the right document is already present. With
+   `--boundary-k 20`, rank-boundary localization is the largest bucket, followed by same-document
+   page confusion; local evidence, exact MaxSim boundary checks, and content/OCR/layout verifiers are
+   plausible next tests.
 2. MMDocIR is mixed, but document discovery is now the largest limitation. Boundary rescue can only
    attack the 239 right-document failures; the 305 document-retrieval-gap failures need stronger
    document/support recall.
@@ -608,8 +609,9 @@ Operational findings:
    More than 95% of page failures are document-retrieval gaps, so unconditional page-local reranking
    should not be expected to help and already produced a negative full-dev result.
 4. Rank-5 gold is useful but limited: 470 ViDoRe failures, 16 MMDocIR failures, and 1184 OpenDocVQA
-   failures have gold exactly at rank 5. On OpenDocVQA most of those are still document-rank-5 cases,
-   not right-document top-4 cases, so top4-vs-rank5 page swaps alone cannot solve the dominant issue.
+   failures have gold exactly at rank 5. The direct right-document rank-5 target is smaller:
+   449 ViDoRe, 15 MMDocIR, and 207 OpenDocVQA failures, so top4-vs-rank5 page swaps alone cannot
+   solve the dominant issue.
 5. Dataset-specific hotspots point to different fixes: ViDoRe finance/table repositories are dominated
    by same-document and boundary errors, MMDocIR financial reports and academic papers mix document
    gaps with page-local errors, and OpenDocVQA needs document discovery/pack selection before page
