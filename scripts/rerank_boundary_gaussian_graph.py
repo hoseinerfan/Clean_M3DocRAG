@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 from statistics import NormalDist, median
@@ -55,6 +56,33 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-rrf-k", type=float, default=60.0)
     parser.add_argument("--support-rrf-k", type=float, default=60.0)
     parser.add_argument("--support-top-pages", type=int, default=100)
+    parser.add_argument(
+        "--doc-pages-jsonl",
+        default="",
+        help=(
+            "Optional doc_pages JSONL containing page text fields. Enables content-aware "
+            "pairwise posterior modes."
+        ),
+    )
+    parser.add_argument(
+        "--page-text-jsonl",
+        default="",
+        help=(
+            "Optional page-text JSONL from export_converted_page_text.py. If provided with "
+            "--doc-pages-jsonl, both are loaded and later rows overwrite earlier rows."
+        ),
+    )
+    parser.add_argument(
+        "--text-field",
+        action="append",
+        default=[],
+        help=(
+            "Page text field to read from --doc-pages-jsonl/--page-text-jsonl. Repeat to "
+            "concatenate fields. Defaults to ocr_text/vlm_text/markdown/text/page_text/content."
+        ),
+    )
+    parser.add_argument("--content-bm25-k1", type=float, default=1.2)
+    parser.add_argument("--content-bm25-b", type=float, default=0.75)
     parser.add_argument("--same-doc-window", type=int, default=2)
     parser.add_argument("--same-doc-edge-weight", type=float, default=1.0)
     parser.add_argument("--base-rank-window", type=int, default=1)
@@ -77,10 +105,12 @@ def parse_args() -> argparse.Namespace:
             "posterior_disagreement",
             "posterior_temperature",
             "pairwise_posterior",
+            "pairwise_content_posterior",
             "pairwise_posterior_preserve",
             "pairwise_posterior_adaptive_preserve",
             "pairwise_counterfactual_posterior",
             "pairwise_counterfactual_evidence_posterior",
+            "pairwise_counterfactual_content_posterior",
         ),
         default="relative_z",
         help=(
@@ -92,6 +122,8 @@ def parse_args() -> argparse.Namespace:
             "posterior_temperature uses a rank prior plus temperature-scaled graph z-likelihood. "
             "pairwise_posterior uses a local posterior score but applies only one "
             "boundary-vs-top replacement if the boundary page has higher posterior odds. "
+            "pairwise_content_posterior adds direct query-page BM25 evidence to that "
+            "pairwise posterior. "
             "pairwise_posterior_preserve adds an extra base-rank preservation prior to "
             "the current top-k page before deciding the replacement. "
             "pairwise_posterior_adaptive_preserve scales that preservation prior by "
@@ -99,7 +131,9 @@ def parse_args() -> argparse.Namespace:
             "pairwise_counterfactual_posterior averages pairwise posterior scores over "
             "base/graph/support evidence-source counterfactuals. "
             "pairwise_counterfactual_evidence_posterior averages only external-evidence "
-            "counterfactuals, keeping base as the prior but excluding the base-only null model."
+            "counterfactuals, keeping base as the prior but excluding the base-only null model. "
+            "pairwise_counterfactual_content_posterior also includes direct query-page "
+            "content evidence in the external-evidence counterfactual set."
         ),
     )
     parser.add_argument(
@@ -137,6 +171,70 @@ def parse_uid(uid: str) -> tuple[str, int | None]:
         return doc_id, int(uid.rsplit("_page", 1)[1])
     except (IndexError, ValueError):
         return doc_id, None
+
+
+DEFAULT_TEXT_FIELDS = ["ocr_text", "vlm_text", "markdown", "text", "page_text", "content"]
+TOKEN_RE = re.compile(r"[A-Za-z0-9]+")
+
+
+def lexical_tokens(text: str) -> list[str]:
+    return [token.lower() for token in TOKEN_RE.findall(text)]
+
+
+def normalize_text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False)
+    return re.sub(r"\s+", " ", str(value).replace("\x0c", " ").replace("\u0000", " ")).strip()
+
+
+def row_page_uid(row: dict[str, Any]) -> str:
+    uid = str(row.get("page_uid", row.get("uid", "")) or "").strip()
+    if uid:
+        return uid
+    doc_id = str(row.get("doc_id", row.get("document_id", "")) or "").strip()
+    if not doc_id:
+        return ""
+    raw_page_idx = row.get("page_idx", row.get("page_id", row.get("page", row.get("page_number"))))
+    if raw_page_idx is None:
+        return ""
+    try:
+        return page_uid(doc_id, int(raw_page_idx))
+    except (TypeError, ValueError):
+        return ""
+
+
+def load_page_texts(paths: list[str], text_fields: list[str]) -> dict[str, str]:
+    fields = text_fields or DEFAULT_TEXT_FIELDS
+    page_texts: dict[str, str] = {}
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.exists():
+            raise FileNotFoundError(f"Missing page text/doc_pages JSONL: {path}")
+        for row in read_jsonl(path):
+            uid = row_page_uid(row)
+            if not uid:
+                continue
+            parts: list[str] = []
+            seen: set[str] = set()
+            for field in fields:
+                text = normalize_text_value(row.get(field))
+                if text and text not in seen:
+                    seen.add(text)
+                    parts.append(text)
+            page_texts[uid] = " ".join(parts).strip()
+    return page_texts
+
+
+def query_text_from_gold(row: dict[str, Any]) -> str:
+    for field in ("question", "query", "question_text"):
+        text = normalize_text_value(row.get(field))
+        if text:
+            return text
+    return ""
 
 
 def normalize(values: dict[str, float]) -> dict[str, float]:
@@ -456,6 +554,67 @@ def support_rrf_values(
     return values
 
 
+def content_bm25_scores(
+    *,
+    query_text: str,
+    local_pages: list[str],
+    page_texts: dict[str, str],
+    args: argparse.Namespace,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    query_terms = lexical_tokens(query_text)
+    unique_query_terms = sorted(set(query_terms))
+    if not unique_query_terms or not page_texts:
+        return {uid: 0.0 for uid in local_pages}, {
+            "content_available": False,
+            "content_query_token_count": len(query_terms),
+            "content_nonzero_page_count": 0,
+            "content_mean_doc_len": 0.0,
+        }
+
+    term_frequencies: dict[str, Counter[str]] = {}
+    doc_lengths: dict[str, int] = {}
+    document_frequency: Counter[str] = Counter()
+    for uid in local_pages:
+        tokens = lexical_tokens(page_texts.get(uid, ""))
+        doc_lengths[uid] = len(tokens)
+        counts: Counter[str] = Counter(tokens)
+        term_frequencies[uid] = counts
+        for term in unique_query_terms:
+            if counts.get(term, 0) > 0:
+                document_frequency[term] += 1
+
+    page_count = max(1, len(local_pages))
+    nonempty_lengths = [length for length in doc_lengths.values() if length > 0]
+    avg_doc_len = sum(nonempty_lengths) / float(len(nonempty_lengths)) if nonempty_lengths else 0.0
+    k1 = max(0.0, float(args.content_bm25_k1))
+    b = max(0.0, min(1.0, float(args.content_bm25_b)))
+    scores: dict[str, float] = {}
+    for uid in local_pages:
+        length = doc_lengths.get(uid, 0)
+        if length <= 0 or avg_doc_len <= 0:
+            scores[uid] = 0.0
+            continue
+        score = 0.0
+        counts = term_frequencies[uid]
+        length_norm = 1.0 - b + b * (float(length) / avg_doc_len)
+        for term in unique_query_terms:
+            tf = float(counts.get(term, 0))
+            if tf <= 0:
+                continue
+            df = float(document_frequency.get(term, 0))
+            idf = math.log(1.0 + (float(page_count) - df + 0.5) / (df + 0.5))
+            score += idf * ((tf * (k1 + 1.0)) / (tf + k1 * length_norm if k1 > 0 else tf))
+        scores[uid] = score
+    nonzero_count = sum(1 for value in scores.values() if value > 0.0)
+    return scores, {
+        "content_available": True,
+        "content_query_token_count": len(query_terms),
+        "content_unique_query_token_count": len(unique_query_terms),
+        "content_nonzero_page_count": nonzero_count,
+        "content_mean_doc_len": avg_doc_len,
+    }
+
+
 def stable_sigmoid(value: float) -> float:
     if value >= 0:
         exp_neg = math.exp(-min(value, 700.0))
@@ -470,9 +629,11 @@ def pairwise_posterior_scores(
     base_rank: dict[str, int],
     graph_scores: dict[str, float],
     support_ranks: dict[str, dict[str, int]],
+    content_scores: dict[str, float] | None,
     args: argparse.Namespace,
     graph_evidence_scale: float = 1.0,
     support_evidence_scale: float = 1.0,
+    content_evidence_scale: float = 0.0,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     base_prior = normalize({
         uid: 1.0 / float(base_rank.get(uid, 10**9))
@@ -493,18 +654,23 @@ def pairwise_posterior_scores(
         for uid in local_pages
     })
     support_z = robust_z_scores(support_values)
+    content_values = content_scores or {uid: 0.0 for uid in local_pages}
+    content_posterior = normalize(content_values)
 
     graph_concentration = distribution_concentration(graph_posterior)
     support_concentration = distribution_concentration(support_posterior)
+    content_concentration = distribution_concentration(content_posterior)
     graph_entropy = max(1e-12, 1.0 - graph_concentration)
     support_entropy = max(1e-12, 1.0 - support_concentration)
     graph_beta = 1.0 / graph_entropy
     support_beta = 0.0 if not support_ranks else 1.0 / support_entropy
+    content_beta = 1.0 if content_scores else 0.0
 
     scores = {
         uid: math.log(max(base_prior.get(uid, 0.0), 1e-300))
         + float(graph_evidence_scale) * graph_beta * graph_z.get(uid, 0.0)
         + float(support_evidence_scale) * support_beta * support_z.get(uid, 0.0)
+        + float(content_evidence_scale) * content_beta * content_values.get(uid, 0.0)
         for uid in local_pages
     }
     diagnostics = {
@@ -521,11 +687,15 @@ def pairwise_posterior_scores(
         },
         "graph_beta": graph_beta,
         "support_beta": support_beta if support_ranks else None,
+        "content_beta": content_beta if content_scores else None,
         "graph_evidence_scale": float(graph_evidence_scale),
         "support_evidence_scale": float(support_evidence_scale) if support_ranks else None,
+        "content_evidence_scale": float(content_evidence_scale) if content_scores else None,
         "base_prior": base_prior,
         "graph_posterior": graph_posterior,
         "support_posterior": support_posterior if support_ranks else {},
+        "content_concentration": content_concentration if content_scores else None,
+        "content_posterior": content_posterior if content_scores else {},
     }
     return scores, diagnostics
 
@@ -536,30 +706,46 @@ def pairwise_counterfactual_posterior_scores(
     base_rank: dict[str, int],
     graph_scores: dict[str, float],
     support_ranks: dict[str, dict[str, int]],
+    content_scores: dict[str, float] | None,
     args: argparse.Namespace,
     include_base_model: bool,
+    include_content_model: bool,
 ) -> tuple[dict[str, float], dict[str, Any], dict[str, dict[str, float]]]:
-    models: list[tuple[str, float, float]] = []
-    if include_base_model:
-        models.append(("base", 0.0, 0.0))
-    models.append(("graph", 1.0, 0.0))
+    external_sources: list[tuple[str, float, float, float]] = [("graph", 1.0, 0.0, 0.0)]
     if support_ranks:
-        models.extend([
-            ("support", 0.0, 1.0),
-            ("graph_support", 1.0, 1.0),
-        ])
+        external_sources.append(("support", 0.0, 1.0, 0.0))
+    if include_content_model and content_scores and any(value > 0.0 for value in content_scores.values()):
+        external_sources.append(("content", 0.0, 0.0, 1.0))
+
+    models: list[tuple[str, float, float, float]] = []
+    if include_base_model:
+        models.append(("base", 0.0, 0.0, 0.0))
+    for mask in range(1, 1 << len(external_sources)):
+        labels: list[str] = []
+        graph_scale = 0.0
+        support_scale = 0.0
+        content_scale = 0.0
+        for idx, (label, graph_value, support_value, content_value) in enumerate(external_sources):
+            if mask & (1 << idx):
+                labels.append(label)
+                graph_scale = max(graph_scale, graph_value)
+                support_scale = max(support_scale, support_value)
+                content_scale = max(content_scale, content_value)
+        models.append(("_".join(labels), graph_scale, support_scale, content_scale))
 
     score_maps: dict[str, dict[str, float]] = {}
     diagnostics_by_model: dict[str, dict[str, Any]] = {}
-    for label, graph_scale, support_scale in models:
+    for label, graph_scale, support_scale, content_scale in models:
         scores, diagnostics = pairwise_posterior_scores(
             local_pages=local_pages,
             base_rank=base_rank,
             graph_scores=graph_scores,
             support_ranks=support_ranks,
+            content_scores=content_scores,
             args=args,
             graph_evidence_scale=graph_scale,
             support_evidence_scale=support_scale,
+            content_evidence_scale=content_scale,
         )
         score_maps[label] = scores
         diagnostics_by_model[label] = diagnostics
@@ -754,6 +940,8 @@ def rerank_one(
     *,
     qid: str,
     base_row: dict[str, Any],
+    gold_row: dict[str, Any],
+    page_texts: dict[str, str],
     support_predictions: dict[str, dict[str, dict[str, Any]]],
     args: argparse.Namespace,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -769,18 +957,25 @@ def rerank_one(
     }
     pairwise_posterior_mode = args.decision_test in {
         "pairwise_posterior",
+        "pairwise_content_posterior",
         "pairwise_posterior_preserve",
         "pairwise_posterior_adaptive_preserve",
         "pairwise_counterfactual_posterior",
         "pairwise_counterfactual_evidence_posterior",
+        "pairwise_counterfactual_content_posterior",
     }
     pairwise_preserve_mode = args.decision_test == "pairwise_posterior_preserve"
     pairwise_adaptive_preserve_mode = args.decision_test == "pairwise_posterior_adaptive_preserve"
     pairwise_counterfactual_mode = args.decision_test in {
         "pairwise_counterfactual_posterior",
         "pairwise_counterfactual_evidence_posterior",
+        "pairwise_counterfactual_content_posterior",
     }
     include_base_counterfactual_model = args.decision_test == "pairwise_counterfactual_posterior"
+    include_content_evidence = args.decision_test in {
+        "pairwise_content_posterior",
+        "pairwise_counterfactual_content_posterior",
+    }
     boundary_top = max(int(args.boundary_top_pages), int(args.hit_k) + 1)
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
@@ -804,6 +999,12 @@ def rerank_one(
         base_rank=base_rank,
         support_ranks=support_ranks,
         graph_scores=graph_scores,
+        args=args,
+    )
+    content_scores, content_diag = content_bm25_scores(
+        query_text=query_text_from_gold(gold_row),
+        local_pages=local_pages,
+        page_texts=page_texts,
         args=args,
     )
     z_scores = evidence_maps["graph"]
@@ -873,8 +1074,10 @@ def rerank_one(
                 base_rank=base_rank,
                 graph_scores=graph_scores,
                 support_ranks=support_ranks,
+                content_scores=content_scores if include_content_evidence else None,
                 args=args,
                 include_base_model=include_base_counterfactual_model,
+                include_content_model=include_content_evidence,
             )
         else:
             posterior_scores, posterior_diag = pairwise_posterior_scores(
@@ -882,7 +1085,9 @@ def rerank_one(
                 base_rank=base_rank,
                 graph_scores=graph_scores,
                 support_ranks=support_ranks,
+                content_scores=content_scores if include_content_evidence else None,
                 args=args,
+                content_evidence_scale=1.0 if include_content_evidence else 0.0,
             )
         if pairwise_adaptive_preserve_mode:
             pairwise_preservation_prior_scale = adaptive_preservation_scale(posterior_diag)
@@ -996,6 +1201,17 @@ def rerank_one(
         "posterior_graph_beta": posterior_diag.get("graph_beta"),
         "posterior_support_beta": posterior_diag.get("support_beta"),
         "posterior_support_concentration": posterior_diag.get("support_concentration"),
+        "posterior_content_beta": posterior_diag.get("content_beta"),
+        "posterior_content_concentration": posterior_diag.get("content_concentration"),
+        "content_enabled": bool(include_content_evidence),
+        "content_available": bool(content_diag.get("content_available")),
+        "content_query_token_count": content_diag.get("content_query_token_count"),
+        "content_unique_query_token_count": content_diag.get("content_unique_query_token_count"),
+        "content_nonzero_page_count": content_diag.get("content_nonzero_page_count"),
+        "content_mean_doc_len": content_diag.get("content_mean_doc_len"),
+        "weakest_top_content_score": content_scores.get(weakest_top, 0.0),
+        "best_boundary_content_score": content_scores.get(best_boundary, 0.0),
+        "content_score_margin": content_scores.get(best_boundary, 0.0) - content_scores.get(weakest_top, 0.0),
         "pairwise_score_margin": pairwise_score_margin,
         "pairwise_raw_score_margin": pairwise_raw_score_margin,
         "pairwise_preservation_prior": pairwise_preservation_prior_value,
@@ -1130,6 +1346,12 @@ def main() -> None:
         str(label): load_prediction(Path(path))
         for label, path in args.support
     }
+    page_text_paths = [
+        str(path)
+        for path in (str(args.doc_pages_jsonl).strip(), str(args.page_text_jsonl).strip())
+        if path
+    ]
+    page_texts = load_page_texts(page_text_paths, [str(field) for field in args.text_field]) if page_text_paths else {}
 
     output_rows: dict[str, dict[str, Any]] = {}
     cases: list[dict[str, Any]] = []
@@ -1137,6 +1359,8 @@ def main() -> None:
         output_row, case = rerank_one(
             qid=qid,
             base_row=base_prediction[qid],
+            gold_row=gold_rows[qid],
+            page_texts=page_texts,
             support_predictions=support_predictions,
             args=args,
         )
@@ -1159,12 +1383,18 @@ def main() -> None:
             "gold": str(args.gold),
             "base_prediction": str(args.base_prediction),
             "supports": {str(label): str(path) for label, path in args.support},
+            "doc_pages_jsonl": str(args.doc_pages_jsonl),
+            "page_text_jsonl": str(args.page_text_jsonl),
+            "text_fields": [str(field) for field in (args.text_field or DEFAULT_TEXT_FIELDS)],
+            "loaded_page_text_count": len(page_texts),
             "hit_k": int(args.hit_k),
             "boundary_top_pages": int(args.boundary_top_pages),
             "restart_prob": float(args.restart_prob),
             "ppr_iters": int(args.ppr_iters),
             "base_seed_weight": float(args.base_seed_weight),
             "support_seed_weight": float(args.support_seed_weight),
+            "content_bm25_k1": float(args.content_bm25_k1),
+            "content_bm25_b": float(args.content_bm25_b),
             "same_top_docs_only": bool(args.same_top_docs_only),
             "decision_test": str(args.decision_test),
             "paired_confidence": float(args.paired_confidence),
