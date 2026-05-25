@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import random
 import statistics
 import sys
 from collections import Counter, OrderedDict, defaultdict
@@ -43,6 +44,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--recall-k", dest="recall_ks", type=int, nargs="+", default=DEFAULT_RECALL_KS)
     parser.add_argument("--max-qids", type=int, default=0, help="Optional smoke-test cap.")
+    parser.add_argument(
+        "--sample-qids",
+        type=int,
+        default=0,
+        help="Optional deterministic random subset size. Applied before --max-qids.",
+    )
+    parser.add_argument("--sample-seed", type=int, default=13)
     parser.add_argument("--num-shards", type=int, default=1)
     parser.add_argument("--shard-index", type=int, default=0)
     parser.add_argument("--doc-cache-size", type=int, default=64)
@@ -60,6 +68,47 @@ def parse_args() -> argparse.Namespace:
         "--same-doc-only",
         action="store_true",
         help="Only consider the boundary page if its document already appears in the current top-k docs.",
+    )
+    parser.add_argument(
+        "--boundary-doc-policy",
+        choices=["any", "topk_doc", "top1_doc", "weakest_doc"],
+        default="any",
+        help=(
+            "Observable document-neighborhood gate for the boundary page. topk_doc requires the "
+            "boundary document to appear in the current top-k pages; top1_doc requires it to match "
+            "the current top page document; weakest_doc requires it to match the exact-MaxSim weakest "
+            "top-k page that would be displaced."
+        ),
+    )
+    parser.add_argument(
+        "--min-boundary-doc-topk-count",
+        type=int,
+        default=0,
+        help="Require at least this many current top-k pages from the boundary page document.",
+    )
+    parser.add_argument(
+        "--max-base-margin-4-5",
+        type=float,
+        default=None,
+        help=(
+            "Require the base score margin between rank hit_k and boundary-rank to be at most this "
+            "value. This keeps swaps to uncertain base boundaries."
+        ),
+    )
+    parser.add_argument(
+        "--max-base-margin-ratio-4-5",
+        type=float,
+        default=None,
+        help=(
+            "Require (base_score@hit_k - base_score@boundary_rank) / abs(base_score@hit_k) to be "
+            "at most this value."
+        ),
+    )
+    parser.add_argument(
+        "--min-exact-margin",
+        type=float,
+        default=0.0,
+        help="Require boundary exact MaxSim score to beat the weakest top-k exact score by this margin.",
     )
     parser.add_argument(
         "--retrieval-model-name-or-path",
@@ -184,6 +233,15 @@ def ranked_docs(pred_row: dict[str, Any] | None, limit: int = 0) -> list[str]:
         if limit > 0 and len(docs) >= limit:
             break
     return docs
+
+
+def item_score(item: Any) -> float | None:
+    if not isinstance(item, (list, tuple)) or len(item) < 3:
+        return None
+    try:
+        return float(item[2])
+    except (TypeError, ValueError):
+        return None
 
 
 def first_rank(ranked: list[str], gold: set[str]) -> int | None:
@@ -364,6 +422,7 @@ def reorder_boundary(
     hit_k: int,
     boundary_rank: int,
     mode: str,
+    min_exact_margin: float,
 ) -> tuple[list[str], bool, str | None, str | None]:
     if len(base_pages) < boundary_rank or boundary_rank <= hit_k:
         return list(base_pages), False, None, None
@@ -372,7 +431,7 @@ def reorder_boundary(
     weakest_top = min(top_pages, key=lambda uid: exact_scores.get(uid, -math.inf))
     boundary_score = exact_scores.get(boundary_page, -math.inf)
     weakest_score = exact_scores.get(weakest_top, -math.inf)
-    if boundary_score <= weakest_score:
+    if boundary_score <= weakest_score or boundary_score - weakest_score < min_exact_margin:
         return list(base_pages), False, boundary_page, weakest_top
 
     if mode == "rerank_top_boundary":
@@ -406,6 +465,42 @@ def get_question(gold_row: dict[str, Any]) -> str:
     return ""
 
 
+def build_gate_case(
+    *,
+    qid: str,
+    reason: str,
+    base_pages: list[str],
+    top_pages: list[str],
+    boundary_page: str | None,
+    hit_k: int,
+    boundary_rank: int,
+    mode: str,
+    doc_policy: str,
+    boundary_doc_topk_count: int = 0,
+    base_boundary_margin: float | None = None,
+    base_boundary_margin_ratio: float | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    case: dict[str, Any] = {
+        "qid": qid,
+        "accepted": False,
+        "reason": reason,
+        "mode": mode,
+        "hit_k": hit_k,
+        "boundary_rank": boundary_rank,
+        "top_pages": top_pages,
+        "boundary_page": boundary_page,
+        "base_page_count": len(base_pages),
+        "boundary_doc_policy": doc_policy,
+        "boundary_doc_topk_count": boundary_doc_topk_count,
+        "base_boundary_margin": base_boundary_margin,
+        "base_boundary_margin_ratio": base_boundary_margin_ratio,
+    }
+    if extra:
+        case.update(extra)
+    return case
+
+
 def rerank_one(
     *,
     qid: str,
@@ -418,26 +513,134 @@ def rerank_one(
     base_pages = ranked_pages(base_row)
     output_row = dict(base_row)
     output_row["qid"] = str(base_row.get("qid", qid))
+    hit_k = int(args.hit_k)
+    boundary_rank = int(args.boundary_rank)
+    mode = str(args.mode)
+    doc_policy = str(args.boundary_doc_policy)
+    if bool(args.same_doc_only) and doc_policy == "any":
+        doc_policy = "topk_doc"
 
-    if len(base_pages) < int(args.boundary_rank):
-        case = {
-            "qid": qid,
-            "accepted": False,
-            "reason": "not_enough_pages",
-            "base_page_count": len(base_pages),
-        }
+    if len(base_pages) < boundary_rank:
+        case = build_gate_case(
+            qid=qid,
+            reason="not_enough_pages",
+            base_pages=base_pages,
+            top_pages=base_pages[:hit_k],
+            boundary_page=None,
+            hit_k=hit_k,
+            boundary_rank=boundary_rank,
+            mode=mode,
+            doc_policy=doc_policy,
+        )
         return output_row, case
 
-    boundary_page = base_pages[int(args.boundary_rank) - 1]
-    top_pages = base_pages[: int(args.hit_k)]
-    if args.same_doc_only and page_doc(boundary_page) not in {page_doc(uid) for uid in top_pages}:
-        case = {
-            "qid": qid,
-            "accepted": False,
-            "reason": "boundary_doc_not_in_topk",
-            "boundary_page": boundary_page,
-            "top_pages": top_pages,
-        }
+    boundary_page = base_pages[boundary_rank - 1]
+    boundary_doc = page_doc(boundary_page)
+    top_pages = base_pages[:hit_k]
+    top_docs = [page_doc(uid) for uid in top_pages]
+    top_doc_set = set(top_docs)
+    boundary_doc_topk_count = sum(1 for doc_id in top_docs if doc_id == boundary_doc)
+    item_map = prediction_item_by_uid(base_row)
+    base_hit_item_score = item_score(item_map.get(base_pages[hit_k - 1])) if len(base_pages) >= hit_k else None
+    base_boundary_item_score = item_score(item_map.get(boundary_page))
+    base_boundary_margin = (
+        base_hit_item_score - base_boundary_item_score
+        if base_hit_item_score is not None and base_boundary_item_score is not None
+        else None
+    )
+    base_boundary_margin_ratio = (
+        base_boundary_margin / max(abs(base_hit_item_score), 1e-12)
+        if base_boundary_margin is not None and base_hit_item_score is not None
+        else None
+    )
+
+    if doc_policy == "topk_doc" and boundary_doc not in top_doc_set:
+        case = build_gate_case(
+            qid=qid,
+            reason="boundary_doc_not_in_topk",
+            base_pages=base_pages,
+            top_pages=top_pages,
+            boundary_page=boundary_page,
+            hit_k=hit_k,
+            boundary_rank=boundary_rank,
+            mode=mode,
+            doc_policy=doc_policy,
+            boundary_doc_topk_count=boundary_doc_topk_count,
+            base_boundary_margin=base_boundary_margin,
+            base_boundary_margin_ratio=base_boundary_margin_ratio,
+        )
+        return output_row, case
+    if doc_policy == "top1_doc" and (not top_pages or boundary_doc != page_doc(top_pages[0])):
+        case = build_gate_case(
+            qid=qid,
+            reason="boundary_doc_not_top1_doc",
+            base_pages=base_pages,
+            top_pages=top_pages,
+            boundary_page=boundary_page,
+            hit_k=hit_k,
+            boundary_rank=boundary_rank,
+            mode=mode,
+            doc_policy=doc_policy,
+            boundary_doc_topk_count=boundary_doc_topk_count,
+            base_boundary_margin=base_boundary_margin,
+            base_boundary_margin_ratio=base_boundary_margin_ratio,
+        )
+        return output_row, case
+    if int(args.min_boundary_doc_topk_count) > 0 and boundary_doc_topk_count < int(args.min_boundary_doc_topk_count):
+        case = build_gate_case(
+            qid=qid,
+            reason="boundary_doc_topk_count_too_low",
+            base_pages=base_pages,
+            top_pages=top_pages,
+            boundary_page=boundary_page,
+            hit_k=hit_k,
+            boundary_rank=boundary_rank,
+            mode=mode,
+            doc_policy=doc_policy,
+            boundary_doc_topk_count=boundary_doc_topk_count,
+            base_boundary_margin=base_boundary_margin,
+            base_boundary_margin_ratio=base_boundary_margin_ratio,
+            extra={"min_boundary_doc_topk_count": int(args.min_boundary_doc_topk_count)},
+        )
+        return output_row, case
+    if args.max_base_margin_4_5 is not None and (
+        base_boundary_margin is None or base_boundary_margin > float(args.max_base_margin_4_5)
+    ):
+        case = build_gate_case(
+            qid=qid,
+            reason="base_boundary_margin_too_large",
+            base_pages=base_pages,
+            top_pages=top_pages,
+            boundary_page=boundary_page,
+            hit_k=hit_k,
+            boundary_rank=boundary_rank,
+            mode=mode,
+            doc_policy=doc_policy,
+            boundary_doc_topk_count=boundary_doc_topk_count,
+            base_boundary_margin=base_boundary_margin,
+            base_boundary_margin_ratio=base_boundary_margin_ratio,
+            extra={"max_base_margin_4_5": float(args.max_base_margin_4_5)},
+        )
+        return output_row, case
+    if args.max_base_margin_ratio_4_5 is not None and (
+        base_boundary_margin_ratio is None
+        or base_boundary_margin_ratio > float(args.max_base_margin_ratio_4_5)
+    ):
+        case = build_gate_case(
+            qid=qid,
+            reason="base_boundary_margin_ratio_too_large",
+            base_pages=base_pages,
+            top_pages=top_pages,
+            boundary_page=boundary_page,
+            hit_k=hit_k,
+            boundary_rank=boundary_rank,
+            mode=mode,
+            doc_policy=doc_policy,
+            boundary_doc_topk_count=boundary_doc_topk_count,
+            base_boundary_margin=base_boundary_margin,
+            base_boundary_margin_ratio=base_boundary_margin_ratio,
+            extra={"max_base_margin_ratio_4_5": float(args.max_base_margin_ratio_4_5)},
+        )
         return output_row, case
 
     local_pages = list(dict.fromkeys(top_pages + [boundary_page]))
@@ -457,25 +660,39 @@ def rerank_one(
     reordered_pages, accepted, boundary_page, weakest_top = reorder_boundary(
         base_pages=base_pages,
         exact_scores=exact_scores,
-        hit_k=int(args.hit_k),
-        boundary_rank=int(args.boundary_rank),
-        mode=str(args.mode),
+        hit_k=hit_k,
+        boundary_rank=boundary_rank,
+        mode=mode,
+        min_exact_margin=float(args.min_exact_margin),
     )
+    if accepted and doc_policy == "weakest_doc" and weakest_top and boundary_doc != page_doc(weakest_top):
+        accepted = False
+        reordered_pages = list(base_pages)
+        reject_reason = "boundary_doc_not_weakest_doc"
+    else:
+        reject_reason = "base_boundary_preserved"
 
-    item_map = prediction_item_by_uid(base_row)
     output_row["page_retrieval_results"] = [item_map[uid] for uid in reordered_pages if uid in item_map]
     gold_pages = gold_page_uids(gold_row)
     case = {
         "qid": qid,
         "question": question,
         "accepted": bool(accepted),
-        "reason": "exact_maxsim_boundary_win" if accepted else "base_boundary_preserved",
-        "mode": str(args.mode),
-        "hit_k": int(args.hit_k),
-        "boundary_rank": int(args.boundary_rank),
+        "reason": "exact_maxsim_boundary_win" if accepted else reject_reason,
+        "mode": mode,
+        "hit_k": hit_k,
+        "boundary_rank": boundary_rank,
         "top_pages": top_pages,
         "boundary_page": boundary_page,
         "weakest_top_page": weakest_top,
+        "boundary_doc_policy": doc_policy,
+        "boundary_doc_topk_count": boundary_doc_topk_count,
+        "min_boundary_doc_topk_count": int(args.min_boundary_doc_topk_count),
+        "base_boundary_margin": base_boundary_margin,
+        "base_boundary_margin_ratio": base_boundary_margin_ratio,
+        "max_base_margin_4_5": args.max_base_margin_4_5,
+        "max_base_margin_ratio_4_5": args.max_base_margin_ratio_4_5,
+        "min_exact_margin": float(args.min_exact_margin),
         "exact_scores": {uid: exact_scores.get(uid) for uid in local_pages},
         "boundary_exact_score": exact_scores.get(boundary_page) if boundary_page else None,
         "weakest_top_exact_score": exact_scores.get(weakest_top) if weakest_top else None,
@@ -554,6 +771,9 @@ def iter_qids(gold: dict[str, Any], base: dict[str, Any], args: argparse.Namespa
         if int(args.shard_index) < 0 or int(args.shard_index) >= int(args.num_shards):
             raise ValueError("--shard-index must be in [0, num_shards).")
         qids = [qid for idx, qid in enumerate(qids) if idx % int(args.num_shards) == int(args.shard_index)]
+    if int(args.sample_qids) > 0 and len(qids) > int(args.sample_qids):
+        rng = random.Random(int(args.sample_seed))
+        qids = sorted(rng.sample(qids, int(args.sample_qids)))
     if int(args.max_qids) > 0:
         qids = qids[: int(args.max_qids)]
     return qids
@@ -636,9 +856,16 @@ def main() -> None:
             "boundary_rank": int(args.boundary_rank),
             "mode": str(args.mode),
             "same_doc_only": bool(args.same_doc_only),
+            "boundary_doc_policy": str(args.boundary_doc_policy),
+            "min_boundary_doc_topk_count": int(args.min_boundary_doc_topk_count),
+            "max_base_margin_4_5": args.max_base_margin_4_5,
+            "max_base_margin_ratio_4_5": args.max_base_margin_ratio_4_5,
+            "min_exact_margin": float(args.min_exact_margin),
             "num_shards": int(args.num_shards),
             "shard_index": int(args.shard_index),
             "max_qids": int(args.max_qids),
+            "sample_qids": int(args.sample_qids),
+            "sample_seed": int(args.sample_seed),
         }
     )
 

@@ -551,8 +551,34 @@ python scripts/rerank_graph_boundary_exact_maxsim.py \
   --output-case-json "$MAXSIM_BOUNDARY_DIR/opendocvqa_exact_maxsim_boundary.cases.json"
 ```
 
-For a cheap smoke test before a full run, add `--max-qids 100`. If the full run loses many existing
-top-4 hits, keep it as an audit result and do not replace Graph-PPR.
+For a cheap smoke test before a full run, add `--sample-qids 300 --sample-seed 17`. If the full run
+loses many existing top-4 hits, keep it as an audit result and do not replace Graph-PPR.
+
+Gated subset smoke test after an unsafe full run:
+
+```bash
+MAXSIM_BOUNDARY_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/boundary_exact_maxsim
+mkdir -p "$MAXSIM_BOUNDARY_DIR"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$MMDOCIR_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$MMDOCIR_OUT/mmdocir_dev_graph_ppr_base.prediction.json" \
+  --embedding-dir "$MMDOCIR_ROOT/embeddings/colpali-v1.2_mm-docir_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --sample-qids 300 \
+  --sample-seed 17 \
+  --boundary-doc-policy weakest_doc \
+  --min-exact-margin 0.25 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.cases.json"
+```
+
+This gate is still label-free. It only permits a swap when rank 5 beats the weakest top-4 page by
+exact MaxSim and both pages are in the same document. If too few swaps are accepted, relax to
+`--boundary-doc-policy topk_doc --min-boundary-doc-topk-count 1`; if losses remain, add
+`--max-base-margin-ratio-4-5 0.02` to restrict swaps to uncertain Graph-PPR boundaries.
 
 ### Limitation Report / Failure Taxonomy Audit
 

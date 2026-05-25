@@ -389,6 +389,29 @@ for the current top-4 pages and rank 5 only, then swaps rank 5 into top 4 if exa
 weakest current top-4 page. The result is still experimental until full-dataset losses/recoveries
 are known.
 
+After the MMDocIR full-dev run was negative, use the gated subset mode before trying another full
+run. The gate is still observable-only: deterministic sample, document-neighborhood policy, optional
+base-margin uncertainty, and exact MaxSim margin.
+
+```bash
+MAXSIM_BOUNDARY_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/boundary_exact_maxsim
+mkdir -p "$MAXSIM_BOUNDARY_DIR"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$MMDOCIR_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$MMDOCIR_OUT/mmdocir_dev_graph_ppr_base.prediction.json" \
+  --embedding-dir "$MMDOCIR_ROOT/embeddings/colpali-v1.2_mm-docir_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --sample-qids 300 \
+  --sample-seed 17 \
+  --boundary-doc-policy weakest_doc \
+  --min-exact-margin 0.25 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.cases.json"
+```
+
 Full OpenDocVQA no-support result:
 
 | run | qids | accepted | base page hit@4 | candidate page hit@4 | recovered | lost | net | page recall@4 | doc recall@4 |

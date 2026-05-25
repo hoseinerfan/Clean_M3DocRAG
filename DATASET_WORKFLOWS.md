@@ -657,6 +657,32 @@ and rank 5, then swaps rank 5 into top 4 if MaxSim beats the weakest current top
 be reported against the frozen Graph-PPR base; if full-dev losses exceed recoveries, keep Graph-PPR
 as the final method and treat the MaxSim boundary run as a diagnostic.
 
+Gated subset smoke test for unsafe full-dev MaxSim runs:
+
+```bash
+MAXSIM_BOUNDARY_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/boundary_exact_maxsim
+mkdir -p "$MAXSIM_BOUNDARY_DIR"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$MMDOCIR_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$MMDOCIR_OUT/mmdocir_dev_graph_ppr_base.prediction.json" \
+  --embedding-dir "$MMDOCIR_ROOT/embeddings/colpali-v1.2_mm-docir_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --sample-qids 300 \
+  --sample-seed 17 \
+  --boundary-doc-policy weakest_doc \
+  --min-exact-margin 0.25 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.cases.json"
+```
+
+This gate remains non-oracle: it uses only base scores, document agreement, and exact MaxSim. Start
+with `weakest_doc` to avoid document swaps. If acceptance is too low, relax to
+`--boundary-doc-policy topk_doc --min-boundary-doc-topk-count 1`; if losses remain, add
+`--max-base-margin-ratio-4-5 0.02` to require an uncertain base rank-4/rank-5 boundary.
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |
