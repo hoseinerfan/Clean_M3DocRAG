@@ -71,6 +71,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-depth", type=int, default=3)
     parser.add_argument("--min-leaf", type=int, default=8)
     parser.add_argument(
+        "--run-weighting",
+        choices=("none", "equal_run"),
+        default="none",
+        help=(
+            "Training example weighting. equal_run gives each run equal total weight per "
+            "candidate so large full-dev datasets do not dominate smaller diagnostic subsets."
+        ),
+    )
+    parser.add_argument(
         "--cv-mode",
         choices=("leave_run_out", "qid_kfold", "fit_all"),
         default="leave_run_out",
@@ -221,6 +230,7 @@ class Example:
     features: dict[str, float]
     utility: float
     movement: str
+    weight: float = 1.0
 
 
 @dataclass
@@ -253,11 +263,18 @@ class TreeNode:
         return out
 
 
-def sse(values: list[float]) -> float:
-    if not values:
+def weighted_mean(examples: list[Example]) -> float:
+    total_weight = sum(max(0.0, example.weight) for example in examples)
+    if total_weight <= 0:
         return 0.0
-    avg = sum(values) / float(len(values))
-    return sum((value - avg) ** 2 for value in values)
+    return sum(example.utility * max(0.0, example.weight) for example in examples) / total_weight
+
+
+def weighted_sse(examples: list[Example]) -> float:
+    if not examples:
+        return 0.0
+    avg = weighted_mean(examples)
+    return sum(max(0.0, example.weight) * (example.utility - avg) ** 2 for example in examples)
 
 
 def train_tree(
@@ -268,11 +285,10 @@ def train_tree(
     min_leaf: int,
     depth: int = 0,
 ) -> TreeNode:
-    values = [example.utility for example in examples]
-    node = TreeNode(value=sum(values) / float(len(values)) if values else 0.0, n=len(examples))
+    node = TreeNode(value=weighted_mean(examples), n=len(examples))
     if depth >= max_depth or len(examples) < 2 * min_leaf:
         return node
-    parent_sse = sse(values)
+    parent_sse = weighted_sse(examples)
     best: tuple[float, str, float, list[Example], list[Example]] | None = None
     for feature in features:
         pairs = sorted((example.features.get(feature, 0.0), idx, example) for idx, example in enumerate(examples))
@@ -288,9 +304,7 @@ def train_tree(
             right_examples = [example for value, _, example in pairs if value > threshold]
             if len(left_examples) < min_leaf or len(right_examples) < min_leaf:
                 continue
-            child_sse = sse([example.utility for example in left_examples]) + sse(
-                [example.utility for example in right_examples]
-            )
+            child_sse = weighted_sse(left_examples) + weighted_sse(right_examples)
             gain = parent_sse - child_sse
             if best is None or gain > best[0]:
                 best = (gain, feature, threshold, left_examples, right_examples)
@@ -394,6 +408,12 @@ def load_all(args: argparse.Namespace) -> tuple[
                         movement=movement,
                     )
                 )
+    if args.run_weighting == "equal_run":
+        for examples in examples_by_candidate.values():
+            counts: Counter[str] = Counter(example.run_label for example in examples)
+            for example in examples:
+                count = counts.get(example.run_label, 0)
+                example.weight = 1.0 / float(count) if count > 0 else 1.0
     return gold_by_run, base_by_run, cand_by_run, examples_by_candidate
 
 
@@ -526,6 +546,7 @@ def run_router(
                 "text": tree_lines(tree),
                 "train_n": len(train_examples),
                 "train_mean_utility": mean([example.utility for example in train_examples]),
+                "train_weighted_mean_utility": weighted_mean(train_examples),
             }
         tree_reports_by_fold[fold_label] = tree_reports
 
@@ -603,6 +624,11 @@ def render_md(report: dict[str, Any]) -> str:
             + "."
         )
         lines.append("")
+    if report.get("run_weighting") == "equal_run":
+        lines.append(
+            "Training uses equal-run weighting so each run contributes equal total weight per candidate."
+        )
+        lines.append("")
     lines.append("## Final Cross-Validated Summary")
     lines.append("")
     headers = ["run", "n", f"base_hit@{hit_k}", f"routed_hit@{hit_k}", "recovered", "lost", "net", "selections"]
@@ -655,6 +681,7 @@ def main() -> None:
         "cv_mode": args.cv_mode,
         "max_depth": int(args.max_depth),
         "min_leaf": int(args.min_leaf),
+        "run_weighting": str(args.run_weighting),
         "excluded_case_feature_patterns": list(NON_OBSERVABLE_CASE_PATTERNS),
     }
     if args.output_json:

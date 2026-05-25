@@ -455,6 +455,31 @@ Conclusion: do not use unconditional boundary reranking on full OpenDocVQA. Keep
 Graph-PPR prediction as the full-dataset result until a non-oracle selector can identify likely
 right-document/wrong-page cases before applying boundary rescue.
 
+Cross-dataset conditioning test for the boundary method:
+
+```bash
+ROUTER_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/query_subtype_router
+mkdir -p "$ROUTER_DIR"
+
+python scripts/learn_query_subtype_router.py \
+  --run vidore "$VIDORE_GOLD" "$VIDORE_BASE" \
+  --candidate vidore content "$BOUNDARY_DIR/vidore_boundary_pairwise_content_posterior.prediction.json" "$BOUNDARY_DIR/vidore_boundary_pairwise_content_posterior.cases.json" \
+  --run mmdocir "$MMDOCIR_GOLD" "$MMDOCIR_BASE" \
+  --candidate mmdocir content "$BOUNDARY_DIR/mmdocir_boundary_pairwise_content_posterior.prediction.json" "$BOUNDARY_DIR/mmdocir_boundary_pairwise_content_posterior.cases.json" \
+  --run opendocvqa "$OPENDOC_GOLD" "$OPENDOC_BASE" \
+  --candidate opendocvqa content "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.prediction.json" "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.cases.json" \
+  --hit-k 4 \
+  --cv-mode leave_run_out \
+  --run-weighting equal_run \
+  --output-json "$ROUTER_DIR/content_boundary_router_loro_equalrun.json" \
+  --output-md "$ROUTER_DIR/content_boundary_router_loro_equalrun.md" \
+  --output-routed-dir "$ROUTER_DIR/routed_content_boundary_loro_equalrun"
+```
+
+This is the current non-one-dataset check. The router learns observable query/candidate features from
+the other runs and tests on the held-out run. `--run-weighting equal_run` prevents OpenDocVQA's 41k
+queries from overpowering ViDoRe/MMDocIR during selector learning.
+
 ### MMLongBench DocQA
 
 ```bash

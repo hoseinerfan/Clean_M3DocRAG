@@ -349,3 +349,30 @@ base top-4 page hit was absent or weak, so losses were structurally limited. On 
 page hit@4 is already high; unconditional boundary swaps destroy many correct base top-4 pages. Treat
 content posterior as a diagnostic/rescue component until there is a non-oracle selector for when the
 base top-4 page set is likely wrong.
+
+Cross-dataset conditioning requirement:
+
+The conditioning step must be evaluated as a transfer problem, not tuned on one dataset. Use
+`scripts/learn_query_subtype_router.py` with leave-one-run-out evaluation and equal-run weighting.
+This makes the selector learn from the other datasets and then test on the held-out dataset; OpenDocVQA
+does not dominate training just because it has many more queries.
+
+```bash
+python scripts/learn_query_subtype_router.py \
+  --run vidore "$VIDORE_GOLD" "$VIDORE_BASE" \
+  --candidate vidore content "$BOUNDARY_DIR/vidore_boundary_pairwise_content_posterior.prediction.json" "$BOUNDARY_DIR/vidore_boundary_pairwise_content_posterior.cases.json" \
+  --run mmdocir "$MMDOCIR_GOLD" "$MMDOCIR_BASE" \
+  --candidate mmdocir content "$BOUNDARY_DIR/mmdocir_boundary_pairwise_content_posterior.prediction.json" "$BOUNDARY_DIR/mmdocir_boundary_pairwise_content_posterior.cases.json" \
+  --run opendocvqa "$OPENDOC_GOLD" "$OPENDOC_BASE" \
+  --candidate opendocvqa content "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.prediction.json" "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.cases.json" \
+  --hit-k 4 \
+  --cv-mode leave_run_out \
+  --run-weighting equal_run \
+  --output-json "$ROUTER_DIR/content_boundary_router_loro_equalrun.json" \
+  --output-md "$ROUTER_DIR/content_boundary_router_loro_equalrun.md" \
+  --output-routed-dir "$ROUTER_DIR/routed_content_boundary_loro_equalrun"
+```
+
+This is the required test before claiming a full-dataset conditioned boundary method. If the held-out
+OpenDocVQA row is still negative, keep Graph-PPR as the full-dataset method and report content posterior
+only as a hard-subset rescue component.
