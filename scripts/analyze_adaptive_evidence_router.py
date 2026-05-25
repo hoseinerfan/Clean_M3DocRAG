@@ -23,6 +23,8 @@ from analyze_layout_evidence_gate import (
     metric_scores,
     metric_value,
     movement_for_hit,
+    ranked_docs,
+    ranked_pages,
     read_jsonl,
     rule_label,
 )
@@ -31,6 +33,7 @@ from analyze_layout_evidence_gate import (
 BASE_LABEL = "base"
 SELF_CALIBRATED_METHODS = [
     "robust_z",
+    "robust_z_graph_consensus",
     "robust_z_evidence_gain",
     "robust_z_qpp_veto",
     "percentile",
@@ -67,6 +70,17 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Candidate prediction for a run. CASE_JSON may be '-' when the candidate has "
             "no per-query evidence case file."
+        ),
+    )
+    parser.add_argument(
+        "--support",
+        action="append",
+        nargs=3,
+        metavar=("RUN_LABEL", "SUPPORT_LABEL", "PREDICTION"),
+        default=[],
+        help=(
+            "Optional non-selected support prediction for a run. Support rankings are not "
+            "routed to directly; they add cross-view agreement features for candidates."
         ),
     )
     parser.add_argument("--hit-k", type=int, default=4)
@@ -210,7 +224,11 @@ def adaptive_query_features(question: str) -> dict[str, Any]:
 
 def load_inputs(
     args: argparse.Namespace,
-) -> tuple[dict[str, tuple[Path, Path]], dict[str, list[tuple[str, Path, str]]]]:
+) -> tuple[
+    dict[str, tuple[Path, Path]],
+    dict[str, list[tuple[str, Path, str]]],
+    dict[str, list[tuple[str, Path]]],
+]:
     runs: dict[str, tuple[Path, Path]] = {}
     for raw_label, gold, baseline in args.run:
         label = str(raw_label).strip()
@@ -250,11 +268,132 @@ def load_inputs(
     missing = sorted(label for label in runs if not candidates.get(label))
     if missing:
         raise ValueError(f"Every run needs at least one --candidate. Missing: {', '.join(missing)}")
-    return runs, candidates
+
+    supports: dict[str, list[tuple[str, Path]]] = defaultdict(list)
+    seen_supports: set[tuple[str, str]] = set()
+    for run_label, raw_support_label, prediction in args.support:
+        if run_label not in runs:
+            raise ValueError(f"Support references unknown run label: {run_label}")
+        support_label = clean_label(raw_support_label)
+        key = (run_label, support_label)
+        if key in seen_supports:
+            raise ValueError(f"Duplicate support for run {run_label}: {support_label}")
+        seen_supports.add(key)
+        prediction_path = Path(prediction)
+        require_existing_file(
+            prediction_path,
+            f"support prediction for run '{run_label}' support '{support_label}'",
+        )
+        supports[run_label].append((support_label, prediction_path))
+    return runs, candidates, supports
+
+
+def overlap_fraction_values(left: list[str], right: list[str]) -> float:
+    left_set = set(left)
+    if not left_set:
+        return 0.0
+    return len(left_set & set(right)) / float(len(left_set))
+
+
+def support_agreement_features(
+    *,
+    baseline_row: dict[str, Any],
+    candidate_row: dict[str, Any],
+    support_rows: dict[str, dict[str, Any]],
+    hit_k: int,
+) -> dict[str, Any]:
+    candidate_pages = ranked_pages(candidate_row, hit_k)
+    candidate_docs = ranked_docs(candidate_row, hit_k)
+    base_rank = {uid: rank for rank, uid in enumerate(ranked_pages(baseline_row), start=1)}
+    promoted_pages = [uid for uid in candidate_pages if base_rank.get(uid, 10**9) > hit_k]
+
+    max_top4_overlap = 0.0
+    max_top10_overlap = 0.0
+    max_top20_overlap = 0.0
+    max_doc_overlap = 0.0
+    max_promoted_top4 = 0
+    max_promoted_top10 = 0
+    max_promoted_top20 = 0
+    best_mean_rank = 10**9
+    best_max_rank = 10**9
+    any_top1_in_top4 = False
+
+    out: dict[str, Any] = {
+        "support_view_count": len(support_rows),
+        "graph_support_top4_overlap_frac_max": 0.0,
+        "graph_support_top10_overlap_frac_max": 0.0,
+        "graph_support_top20_overlap_frac_max": 0.0,
+        "graph_support_doc_overlap_top4_max": 0.0,
+        "graph_support_promoted_top4_count_max": 0,
+        "graph_support_promoted_top10_count_max": 0,
+        "graph_support_promoted_top20_count_max": 0,
+        "graph_support_candidate_top4_mean_rank_min": float(best_mean_rank),
+        "graph_support_candidate_top4_max_rank_min": float(best_max_rank),
+        "graph_support_top1_in_top4_any": False,
+    }
+    for support_label, support_row in sorted(support_rows.items()):
+        support_pages = ranked_pages(support_row)
+        support_docs = ranked_docs(support_row, hit_k)
+        support_rank = {uid: rank for rank, uid in enumerate(support_pages, start=1)}
+
+        top4_overlap = overlap_fraction_values(candidate_pages, support_pages[:hit_k])
+        top10_overlap = overlap_fraction_values(candidate_pages, support_pages[:10])
+        top20_overlap = overlap_fraction_values(candidate_pages, support_pages[:20])
+        doc_overlap = overlap_fraction_values(candidate_docs, support_docs)
+        promoted_top4 = sum(1 for uid in promoted_pages if support_rank.get(uid, 10**9) <= hit_k)
+        promoted_top10 = sum(1 for uid in promoted_pages if support_rank.get(uid, 10**9) <= 10)
+        promoted_top20 = sum(1 for uid in promoted_pages if support_rank.get(uid, 10**9) <= 20)
+        candidate_support_ranks = [support_rank.get(uid, 10**9) for uid in candidate_pages]
+        mean_rank = mean([float(rank) for rank in candidate_support_ranks]) if candidate_support_ranks else 10**9
+        max_rank = max(candidate_support_ranks) if candidate_support_ranks else 10**9
+        top1_in_top4 = bool(candidate_pages and candidate_pages[0] in set(support_pages[:hit_k]))
+
+        prefix = f"support.{support_label}"
+        out.update(
+            {
+                f"{prefix}.candidate_top4_overlap_frac": top4_overlap,
+                f"{prefix}.candidate_top10_overlap_frac": top10_overlap,
+                f"{prefix}.candidate_top20_overlap_frac": top20_overlap,
+                f"{prefix}.doc_overlap_top4": doc_overlap,
+                f"{prefix}.promoted_top4_count": promoted_top4,
+                f"{prefix}.promoted_top10_count": promoted_top10,
+                f"{prefix}.promoted_top20_count": promoted_top20,
+                f"{prefix}.candidate_top4_mean_rank": mean_rank,
+                f"{prefix}.candidate_top4_max_rank": float(max_rank),
+                f"{prefix}.top1_in_top4": top1_in_top4,
+            }
+        )
+
+        max_top4_overlap = max(max_top4_overlap, top4_overlap)
+        max_top10_overlap = max(max_top10_overlap, top10_overlap)
+        max_top20_overlap = max(max_top20_overlap, top20_overlap)
+        max_doc_overlap = max(max_doc_overlap, doc_overlap)
+        max_promoted_top4 = max(max_promoted_top4, promoted_top4)
+        max_promoted_top10 = max(max_promoted_top10, promoted_top10)
+        max_promoted_top20 = max(max_promoted_top20, promoted_top20)
+        best_mean_rank = min(best_mean_rank, mean_rank)
+        best_max_rank = min(best_max_rank, max_rank)
+        any_top1_in_top4 = any_top1_in_top4 or top1_in_top4
+
+    out.update(
+        {
+            "graph_support_top4_overlap_frac_max": max_top4_overlap,
+            "graph_support_top10_overlap_frac_max": max_top10_overlap,
+            "graph_support_top20_overlap_frac_max": max_top20_overlap,
+            "graph_support_doc_overlap_top4_max": max_doc_overlap,
+            "graph_support_promoted_top4_count_max": max_promoted_top4,
+            "graph_support_promoted_top10_count_max": max_promoted_top10,
+            "graph_support_promoted_top20_count_max": max_promoted_top20,
+            "graph_support_candidate_top4_mean_rank_min": float(best_mean_rank),
+            "graph_support_candidate_top4_max_rank_min": float(best_max_rank),
+            "graph_support_top1_in_top4_any": any_top1_in_top4,
+        }
+    )
+    return out
 
 
 def build_bundles(args: argparse.Namespace) -> list[dict[str, Any]]:
-    runs, candidates_by_run = load_inputs(args)
+    runs, candidates_by_run, supports_by_run = load_inputs(args)
     bundles: list[dict[str, Any]] = []
     for run_label, (gold_path, baseline_path) in runs.items():
         gold = {str(row["qid"]): row for row in read_jsonl(gold_path)}
@@ -265,6 +404,9 @@ def build_bundles(args: argparse.Namespace) -> list[dict[str, Any]]:
                 load_prediction(prediction_path),
                 load_cases_optional(case_path),
             )
+        support_payloads: dict[str, dict[str, dict[str, Any]]] = {}
+        for support_label, prediction_path in supports_by_run.get(run_label, []):
+            support_payloads[support_label] = load_prediction(prediction_path)
 
         qids = sorted(set(gold) & set(baseline))
         for qid in qids:
@@ -297,6 +439,19 @@ def build_bundles(args: argparse.Namespace) -> list[dict[str, Any]]:
                     candidate_row=candidate_row,
                     case_row=case_row,
                     hit_k=int(args.hit_k),
+                )
+                support_rows = {
+                    support_label: support_prediction[qid]
+                    for support_label, support_prediction in support_payloads.items()
+                    if qid in support_prediction
+                }
+                features.update(
+                    support_agreement_features(
+                        baseline_row=base_row,
+                        candidate_row=candidate_row,
+                        support_rows=support_rows,
+                        hit_k=int(args.hit_k),
+                    )
                 )
                 features.update(adaptive_query_features(str(gold_row.get("question", ""))))
                 pairs[candidate_label] = {
@@ -497,6 +652,10 @@ def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> 
     positive_evidence_count_gain = float(
         f.get("candidate_top4_positive_evidence_count_gain_vs_base", 0.0)
     )
+    support_view_count = float(f.get("support_view_count", 0.0))
+    graph_support_promoted_top20_count = float(
+        f.get("graph_support_promoted_top20_count_max", 0.0)
+    )
 
     top_doc_safe = bool(f.get("candidate_top1_doc_in_base_top4"))
     doc_subset = bool(f.get("candidate_top4_doc_subset_base_top4"))
@@ -516,6 +675,13 @@ def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> 
 
     if profile == "robust_z":
         return robust_z_accept
+
+    if profile == "robust_z_graph_consensus":
+        return bool(
+            robust_z_accept
+            and support_view_count > 0
+            and graph_support_promoted_top20_count >= 1
+        )
 
     if profile == "robust_z_evidence_gain":
         return bool(
@@ -659,6 +825,11 @@ def display_rule_label(rule: dict[str, Any]) -> str:
                 "robust_z("
                 "same_base_docs AND promoted_pages AND selective_query_evidence "
                 "AND top4_evidence_robust_z >= 1)"
+            )
+        if profile == "robust_z_graph_consensus":
+            return (
+                "robust_z_graph_consensus("
+                "robust_z AND at_least_one_promoted_top4_page_in_support_top20)"
             )
         if profile == "robust_z_evidence_gain":
             return (
