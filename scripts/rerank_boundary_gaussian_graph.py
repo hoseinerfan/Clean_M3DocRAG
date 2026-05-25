@@ -80,6 +80,7 @@ def parse_args() -> argparse.Namespace:
             "pairwise_posterior_preserve",
             "pairwise_posterior_adaptive_preserve",
             "pairwise_counterfactual_posterior",
+            "pairwise_counterfactual_evidence_posterior",
         ),
         default="relative_z",
         help=(
@@ -96,7 +97,9 @@ def parse_args() -> argparse.Namespace:
             "pairwise_posterior_adaptive_preserve scales that preservation prior by "
             "the base evidence concentration relative to graph/support concentration. "
             "pairwise_counterfactual_posterior averages pairwise posterior scores over "
-            "base/graph/support evidence-source counterfactuals."
+            "base/graph/support evidence-source counterfactuals. "
+            "pairwise_counterfactual_evidence_posterior averages only external-evidence "
+            "counterfactuals, keeping base as the prior but excluding the base-only null model."
         ),
     )
     parser.add_argument(
@@ -534,11 +537,12 @@ def pairwise_counterfactual_posterior_scores(
     graph_scores: dict[str, float],
     support_ranks: dict[str, dict[str, int]],
     args: argparse.Namespace,
+    include_base_model: bool,
 ) -> tuple[dict[str, float], dict[str, Any], dict[str, dict[str, float]]]:
-    models: list[tuple[str, float, float]] = [
-        ("base", 0.0, 0.0),
-        ("graph", 1.0, 0.0),
-    ]
+    models: list[tuple[str, float, float]] = []
+    if include_base_model:
+        models.append(("base", 0.0, 0.0))
+    models.append(("graph", 1.0, 0.0))
     if support_ranks:
         models.extend([
             ("support", 0.0, 1.0),
@@ -768,10 +772,15 @@ def rerank_one(
         "pairwise_posterior_preserve",
         "pairwise_posterior_adaptive_preserve",
         "pairwise_counterfactual_posterior",
+        "pairwise_counterfactual_evidence_posterior",
     }
     pairwise_preserve_mode = args.decision_test == "pairwise_posterior_preserve"
     pairwise_adaptive_preserve_mode = args.decision_test == "pairwise_posterior_adaptive_preserve"
-    pairwise_counterfactual_mode = args.decision_test == "pairwise_counterfactual_posterior"
+    pairwise_counterfactual_mode = args.decision_test in {
+        "pairwise_counterfactual_posterior",
+        "pairwise_counterfactual_evidence_posterior",
+    }
+    include_base_counterfactual_model = args.decision_test == "pairwise_counterfactual_posterior"
     boundary_top = max(int(args.boundary_top_pages), int(args.hit_k) + 1)
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
@@ -865,6 +874,7 @@ def rerank_one(
                 graph_scores=graph_scores,
                 support_ranks=support_ranks,
                 args=args,
+                include_base_model=include_base_counterfactual_model,
             )
         else:
             posterior_scores, posterior_diag = pairwise_posterior_scores(
