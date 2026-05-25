@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -33,6 +34,7 @@ from analyze_layout_evidence_gate import (
 BASE_LABEL = "base"
 SELF_CALIBRATED_METHODS = [
     "robust_z",
+    "robust_z_graph_adaptive_consensus",
     "robust_z_graph_hit_consensus",
     "robust_z_graph_top10_consensus",
     "robust_z_graph_consensus",
@@ -316,6 +318,7 @@ def support_agreement_features(
     max_promoted_top4 = 0
     max_promoted_top10 = 0
     max_promoted_top20 = 0
+    best_promoted_rank = 10**9
     best_mean_rank = 10**9
     best_max_rank = 10**9
     any_top1_in_top4 = False
@@ -329,6 +332,7 @@ def support_agreement_features(
         "graph_support_promoted_top4_count_max": 0,
         "graph_support_promoted_top10_count_max": 0,
         "graph_support_promoted_top20_count_max": 0,
+        "graph_support_promoted_min_rank": float(best_promoted_rank),
         "graph_support_candidate_top4_mean_rank_min": float(best_mean_rank),
         "graph_support_candidate_top4_max_rank_min": float(best_max_rank),
         "graph_support_top1_in_top4_any": False,
@@ -345,6 +349,8 @@ def support_agreement_features(
         promoted_top4 = sum(1 for uid in promoted_pages if support_rank.get(uid, 10**9) <= hit_k)
         promoted_top10 = sum(1 for uid in promoted_pages if support_rank.get(uid, 10**9) <= 10)
         promoted_top20 = sum(1 for uid in promoted_pages if support_rank.get(uid, 10**9) <= 20)
+        promoted_ranks = [support_rank.get(uid, 10**9) for uid in promoted_pages]
+        promoted_min_rank = min(promoted_ranks) if promoted_ranks else 10**9
         candidate_support_ranks = [support_rank.get(uid, 10**9) for uid in candidate_pages]
         mean_rank = mean([float(rank) for rank in candidate_support_ranks]) if candidate_support_ranks else 10**9
         max_rank = max(candidate_support_ranks) if candidate_support_ranks else 10**9
@@ -360,6 +366,7 @@ def support_agreement_features(
                 f"{prefix}.promoted_top4_count": promoted_top4,
                 f"{prefix}.promoted_top10_count": promoted_top10,
                 f"{prefix}.promoted_top20_count": promoted_top20,
+                f"{prefix}.promoted_min_rank": float(promoted_min_rank),
                 f"{prefix}.candidate_top4_mean_rank": mean_rank,
                 f"{prefix}.candidate_top4_max_rank": float(max_rank),
                 f"{prefix}.top1_in_top4": top1_in_top4,
@@ -373,6 +380,7 @@ def support_agreement_features(
         max_promoted_top4 = max(max_promoted_top4, promoted_top4)
         max_promoted_top10 = max(max_promoted_top10, promoted_top10)
         max_promoted_top20 = max(max_promoted_top20, promoted_top20)
+        best_promoted_rank = min(best_promoted_rank, promoted_min_rank)
         best_mean_rank = min(best_mean_rank, mean_rank)
         best_max_rank = min(best_max_rank, max_rank)
         any_top1_in_top4 = any_top1_in_top4 or top1_in_top4
@@ -386,6 +394,7 @@ def support_agreement_features(
             "graph_support_promoted_top4_count_max": max_promoted_top4,
             "graph_support_promoted_top10_count_max": max_promoted_top10,
             "graph_support_promoted_top20_count_max": max_promoted_top20,
+            "graph_support_promoted_min_rank": float(best_promoted_rank),
             "graph_support_candidate_top4_mean_rank_min": float(best_mean_rank),
             "graph_support_candidate_top4_max_rank_min": float(best_max_rank),
             "graph_support_top1_in_top4_any": any_top1_in_top4,
@@ -664,6 +673,7 @@ def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> 
     graph_support_promoted_top4_count = float(
         f.get("graph_support_promoted_top4_count_max", 0.0)
     )
+    graph_support_promoted_min_rank = float(f.get("graph_support_promoted_min_rank", 10**9))
 
     top_doc_safe = bool(f.get("candidate_top1_doc_in_base_top4"))
     doc_subset = bool(f.get("candidate_top4_doc_subset_base_top4"))
@@ -683,6 +693,18 @@ def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> 
 
     if profile == "robust_z":
         return robust_z_accept
+
+    if profile == "robust_z_graph_adaptive_consensus":
+        support_rank_cutoff = (
+            max(1, int(math.ceil(0.20 * candidate_page_count)))
+            if candidate_page_count > 0
+            else 10
+        )
+        return bool(
+            robust_z_accept
+            and support_view_count > 0
+            and graph_support_promoted_min_rank <= support_rank_cutoff
+        )
 
     if profile == "robust_z_graph_hit_consensus":
         return bool(
@@ -852,6 +874,11 @@ def display_rule_label(rule: dict[str, Any]) -> str:
             return (
                 "robust_z_graph_consensus("
                 "robust_z AND at_least_one_promoted_top4_page_in_support_top20)"
+            )
+        if profile == "robust_z_graph_adaptive_consensus":
+            return (
+                "robust_z_graph_adaptive_consensus("
+                "robust_z AND support_rank <= ceil(0.20 * candidate_page_count))"
             )
         if profile == "robust_z_graph_top10_consensus":
             return (
