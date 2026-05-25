@@ -22,6 +22,7 @@ All MMDocIR numbers below are page hit@4 unless otherwise noted.
 | Evidence community nodes | 1111-1114 / 1658 | -3 to 0 | Not useful yet |
 | Query-position graph nodes | 1114 / 1658 | 0 | Conceptually useful but empirically neutral so far |
 | Heading/breadcrumb anchor nodes | pending | pending | Graph-native section bridge for query-named headings; implemented, needs ablation |
+| Entity/alias anchor nodes | pending | pending | Corpus entity graph with alias normalization; implemented, needs markdown-backed ablation |
 | Structural metadata reranker, conservative parser | 1118 / 1658 | +4, lost=0 | Best targeted gain, but rule-based/heuristic |
 | Query anchor evidence nodes, uniform w0.20 r0.05 | 1117 / 1658 | +3, lost=0 | Best graph-native novelty result so far |
 | Query anchor r0.10 + tight structural metadata | 1123 / 1658 | +9, lost=0 | Best current MMDocIR result, but includes heuristic structural layer |
@@ -54,7 +55,7 @@ Strongest thesis-facing novelty:
 
 1. Reciprocal source reliability estimation from dense/SPLADE cross-support.
 2. Query-adaptive graph propagation controlled by reliability, transition, and same-document coherence.
-3. Typed evidence nodes in a heterogeneous graph: query-position nodes, query-anchor nodes, and planned page-type/visual-tag nodes.
+3. Typed evidence nodes in a heterogeneous graph: query-position nodes, query-anchor nodes, heading/breadcrumb nodes, entity/alias nodes, and planned page-type/visual-tag nodes.
 4. Failure-driven graph augmentation: target cases where the gold page exists in the dense/sparse pool but graph ranking fails to localize it.
 5. Authored hyperlink graph augmentation for Wikipedia-derived PDF corpora: PDF annotation links create real document/document transitions rather than synthetic similarity edges.
 
@@ -77,10 +78,11 @@ The graph-native methods are the main novelty path. They should be prioritized w
 1. Query anchor evidence nodes.
 2. SPLADE/BM25 retriever-induced page-page graph views.
 3. Heading/breadcrumb anchor nodes.
-4. Page-type/modality nodes.
-5. Section-role nodes.
-6. Visual tag nodes from VLM/captioning.
-7. Reliability-weighted propagation and source weighting.
+4. Entity/alias anchor nodes.
+5. Page-type/modality nodes.
+6. Section-role nodes.
+7. Visual tag nodes from VLM/captioning.
+8. Reliability-weighted propagation and source weighting.
 
 ## Next Experiments
 

@@ -396,6 +396,26 @@ the query names a section, table, note, topic, or manual subsection. Use `query_
 stronger ablation when same-document page confusion is high, because it also lets non-query-matched
 heading nodes propagate page mass within candidate sections.
 
+Optional entity/alias graph anchors:
+
+```bash
+ENTITY_ALIAS_MODE=query_gated \
+ENTITY_ALIAS_FIELD="markdown" \
+ENTITY_ALIAS_EDGE_WEIGHT=0.10 \
+ENTITY_ALIAS_RESTART_WEIGHT=0.05 \
+ENTITY_ALIAS_MAX_PAGE_MATCHES=80 \
+ENTITY_ALIAS_MAX_DOC_MATCHES=20 \
+ENTITY_ALIAS_WEIGHT_MODE=local_idf
+```
+
+This extracts corpus entity nodes from the configured page field and normalizes lightweight aliases,
+including parenthetical aliases such as `International Business Machines (IBM)` and corpus-level
+acronym links when both the long form and acronym appear. The default field is Markdown only; it does
+not fall back to OCR, VLM text, or plain text unless those fields are explicitly passed. Start with
+`query_gated` for query-named companies, tickers, standards, laws, methods, datasets, chemicals, and
+fiscal-year anchors. Use `query_gated_shared` as the stronger graph-propagation ablation after the
+gated run is safe.
+
 Run the best-config doc-shortlist check on the smaller datasets first.
 
 Retriever-induced page-page graph edges:

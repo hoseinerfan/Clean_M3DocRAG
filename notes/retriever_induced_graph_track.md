@@ -438,6 +438,39 @@ Interpretation by limitation bucket:
 3. OpenDocVQA: lower priority unless OCR/markdown includes meaningful headings; the dominant
    bottleneck is document/pack selection, not local page localization.
 
+### Entity/Alias Anchor Nodes
+
+Implemented in `scripts/graph_rerank_page_retrieval_predictions.py` and exposed through
+`scripts/run_external_graph_ppr_pipeline.sh`.
+
+Method:
+
+1. Parse deterministic entity candidates from configured page fields, defaulting to `markdown`.
+2. Normalize parenthetical aliases such as `International Business Machines (IBM)`.
+3. Link corpus-level acronyms to long forms when both appear in the corpus.
+4. Create entity nodes for companies, tickers, standards, laws, methods, datasets, chemicals, and
+   fiscal-year anchors.
+5. Drop broad entity nodes that match too many candidate pages or documents.
+6. In `query_gated` and `query_gated_shared` modes, add restart mass only to entity nodes supported
+   by the query.
+
+Recommended first ablation:
+
+```bash
+ENTITY_ALIAS_MODE=query_gated \
+ENTITY_ALIAS_FIELD="markdown" \
+ENTITY_ALIAS_EDGE_WEIGHT=0.10 \
+ENTITY_ALIAS_RESTART_WEIGHT=0.05 \
+ENTITY_ALIAS_MAX_PAGE_MATCHES=80 \
+ENTITY_ALIAS_MAX_DOC_MATCHES=20 \
+ENTITY_ALIAS_WEIGHT_MODE=local_idf \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+The default is deliberately Markdown-only. There is no implicit OCR, VLM-text, or plain-text
+fallback; datasets without a real Markdown field need upstream Markdown generation before this graph
+view is meaningful.
+
 The regenerated report now also prints the categorical views needed for the limitation write-up:
 retrievability ceiling, failure category by limitation group, limitation by page-rank bucket,
 limitation by document-rank bucket, query-cue slices, gold-label shape, top-k evidence tags,

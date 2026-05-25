@@ -136,6 +136,15 @@ class HeadingBreadcrumbPolicy:
 
 
 @dataclass
+class EntityAliasPolicy:
+    entity_page_weights: dict[str, dict[str, float]]
+    entity_node_weights: dict[str, float]
+    entity_labels: dict[str, str]
+    query_seed_nodes: set[str]
+    metadata: dict[str, object]
+
+
+@dataclass
 class ConstraintCompetitionPolicy:
     doc_to_page_multipliers: dict[str, float]
     metadata: dict[str, object]
@@ -181,6 +190,8 @@ class DocPageCatalog:
     page_number_indices: dict[str, dict[int, set[int]]]
     page_texts: dict[str, str]
     page_breadcrumbs: dict[str, list[str]]
+    page_entities: dict[str, dict[str, list[str]]]
+    entity_alias_map: dict[str, str]
 
 
 def parse_args() -> argparse.Namespace:
@@ -752,6 +763,68 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.10,
         help="Floor for local_idf heading-breadcrumb node weights.",
+    )
+    parser.add_argument(
+        "--entity-alias-mode",
+        choices=["none", "query_gated", "shared", "query_gated_shared"],
+        default="none",
+        help=(
+            "Add corpus entity/alias graph nodes from configured page fields. query_gated "
+            "only adds entities that match the query; shared adds all non-broad entity "
+            "nodes as page-page links; query_gated_shared uses shared links plus restart "
+            "mass on query-matched entity nodes."
+        ),
+    )
+    parser.add_argument(
+        "--entity-alias-field",
+        nargs="*",
+        default=["markdown"],
+        help=(
+            "doc_pages JSONL fields parsed for entity/alias nodes. Defaults to markdown; "
+            "no OCR/text fallback is used unless fields are explicitly provided."
+        ),
+    )
+    parser.add_argument("--entity-alias-edge-weight", type=float, default=0.10)
+    parser.add_argument("--entity-alias-restart-weight", type=float, default=0.05)
+    parser.add_argument(
+        "--entity-alias-max-entities-per-page",
+        type=int,
+        default=24,
+        help="Maximum normalized entity labels retained per page.",
+    )
+    parser.add_argument("--entity-alias-min-token-len", type=int, default=2)
+    parser.add_argument(
+        "--entity-alias-query-min-overlap",
+        type=float,
+        default=0.60,
+        help=(
+            "Minimum fraction of entity tokens that must appear in the query for "
+            "query-gated entity seeds. Exact alias/phrase matches always pass."
+        ),
+    )
+    parser.add_argument(
+        "--entity-alias-max-page-matches",
+        type=int,
+        default=80,
+        help="Drop entity nodes matching more than this many candidate pages. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--entity-alias-max-doc-matches",
+        type=int,
+        default=20,
+        help="Drop entity nodes spanning more than this many candidate docs. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--entity-alias-weight-mode",
+        choices=["uniform", "local_idf"],
+        default="local_idf",
+        help="local_idf downweights entity nodes that match many candidate pages.",
+    )
+    parser.add_argument(
+        "--entity-alias-min-node-weight",
+        type=float,
+        default=0.10,
+        help="Floor for local_idf entity-alias node weights.",
     )
     parser.add_argument(
         "--constraint-competition-mode",
@@ -1527,6 +1600,79 @@ HEADING_BREADCRUMB_STOPWORDS = {
     "with",
 }
 MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
+ACRONYM_RE = re.compile(r"\b[A-Z][A-Z0-9&./+-]{1,11}\b")
+TICKER_RE = re.compile(r"\b(?:NYSE|NASDAQ|LSE|ASX|OTC|EPA|BIT|TYO|HKEX|SIX)\s*[:：]\s*([A-Z.]{1,8})\b")
+STANDARD_RE = re.compile(
+    r"\b(?:ISO|IEC|IEEE|IFRS|IAS|ASC|FASB|GAAP|GDPR|HIPAA|CFR|U\.S\. GAAP)"
+    r"(?:[ \t]+(?:No\.?[ \t]*)?[A-Z0-9](?:[A-Z0-9/:-]*[A-Z0-9])?){0,4}\b"
+)
+LAW_RE = re.compile(
+    r"\b[A-Z][A-Za-z]+(?:-[A-Z][A-Za-z]+)?(?:[ \t]+[A-Z][A-Za-z]+){0,5}[ \t]+"
+    r"(?:Act|Law|Regulation|Directive|Code|Rule|Standard)\b"
+)
+CHEMICAL_RE = re.compile(r"\b(?:[A-Z][a-z]?\d*){2,8}[+-]?\b")
+TITLE_ENTITY_RE = re.compile(
+    r"\b[A-Z][A-Za-z0-9&./+-]*(?:[ \t]+(?:of|and|for|the|de|du|des|la|le|"
+    r"l'|d'|&|[A-Z][A-Za-z0-9&./+-]*)){1,7}\b"
+)
+PAREN_ALIAS_RE = re.compile(
+    r"\b([A-Z][A-Za-z0-9&./+'-]*(?:[ \t]+(?:of|and|for|the|de|du|des|la|le|"
+    r"l'|d'|&|[A-Z][A-Za-z0-9&./+'-]*)){1,8})\s*\(([A-Z][A-Z0-9&./+-]{1,11})\)"
+)
+FY_RE = re.compile(r"\b(?:FY\s*)?(\d{4})\s*(?:fiscal\s+year|FY)?\b", flags=re.IGNORECASE)
+ENTITY_ALIAS_STOPWORDS = {
+    "Abstract",
+    "Analysis",
+    "Annual Report",
+    "Appendix",
+    "Background",
+    "Chapter",
+    "Conclusion",
+    "Contents",
+    "Figure",
+    "Introduction",
+    "Management",
+    "Methodology",
+    "Notes",
+    "Overview",
+    "Page",
+    "Report",
+    "Results",
+    "Section",
+    "Summary",
+    "Table",
+}
+ENTITY_ALIAS_ACRONYM_STOPWORDS = {
+    "AND",
+    "ARE",
+    "CAN",
+    "CEO",
+    "CFO",
+    "COO",
+    "DOC",
+    "FAQ",
+    "FOR",
+    "HOW",
+    "INC",
+    "LLC",
+    "LTD",
+    "NOT",
+    "PDF",
+    "THE",
+    "TOC",
+    "USA",
+    "USD",
+    "WHAT",
+    "WHEN",
+    "WHERE",
+    "WHO",
+    "WHY",
+}
+ENTITY_CORPORATE_SUFFIX_RE = re.compile(
+    r"\b(?:incorporated|inc|corporation|corp|company|co|limited|ltd|plc|"
+    r"group|holdings?|sa|sas|se|ag|nv|llc|lp)\b\.?",
+    flags=re.IGNORECASE,
+)
 
 
 def manifest_text_block(value: object) -> str:
@@ -1613,6 +1759,191 @@ def extract_markdown_breadcrumbs_from_text(
     return breadcrumbs
 
 
+def clean_entity_alias(value: str) -> str:
+    text = str(value or "").strip(" \t\n\r,.;:!?[]{}\"'`")
+    text = re.sub(r"\s+", " ", text.replace("\x0c", " ").replace("\u0000", " "))
+    return text.strip()
+
+
+def entity_alias_key(value: str, *, strip_suffix: bool = True) -> str:
+    text = clean_entity_alias(value).lower()
+    text = text.replace("&", " and ")
+    text = re.sub(r"['’]s\b", "", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    if strip_suffix:
+        text = ENTITY_CORPORATE_SUFFIX_RE.sub(" ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def entity_alias_tokens(value: str, *, min_token_len: int) -> list[str]:
+    tokens: list[str] = []
+    key = entity_alias_key(value, strip_suffix=True)
+    for token in re.findall(r"[a-z0-9]+", key):
+        if token.isdigit() or len(token) >= min_token_len:
+            tokens.append(token)
+    return tokens
+
+
+def is_acronym(value: str) -> bool:
+    text = clean_entity_alias(value)
+    if not text or " " in text:
+        return False
+    letters = re.sub(r"[^A-Za-z0-9]", "", text)
+    return len(letters) >= 2 and letters.upper() == letters
+
+
+def acronym_for_phrase(value: str) -> str:
+    stop = {"and", "of", "for", "the", "de", "du", "des", "la", "le", "l", "d"}
+    pieces = [
+        token[0].upper()
+        for token in re.findall(r"[A-Za-z][A-Za-z0-9]*", clean_entity_alias(value))
+        if token.lower() not in stop
+    ]
+    return "".join(pieces)
+
+
+def looks_like_entity_alias(value: str, *, min_token_len: int) -> bool:
+    label = clean_entity_alias(value)
+    if not label:
+        return False
+    if len(label) < min_token_len or len(label) > 120:
+        return False
+    if label in ENTITY_ALIAS_STOPWORDS:
+        return False
+    if re.fullmatch(r"\d+(?:[.,]\d+)?", label):
+        return False
+    if is_acronym(label):
+        normalized = re.sub(r"[^A-Z0-9]", "", label.upper())
+        if normalized in ENTITY_ALIAS_ACRONYM_STOPWORDS:
+            return False
+        return len(normalized) >= 2
+    tokens = entity_alias_tokens(label, min_token_len=min_token_len)
+    if not tokens:
+        return False
+    alpha_tokens = re.findall(r"[A-Za-z][A-Za-z0-9]*", label)
+    if len(alpha_tokens) == 1 and not re.search(r"\d", label):
+        return False
+    return True
+
+
+def add_entity_alias_candidate(
+    aliases: list[str],
+    seen: set[str],
+    value: str,
+    *,
+    min_token_len: int,
+) -> None:
+    label = clean_entity_alias(value)
+    if not looks_like_entity_alias(label, min_token_len=min_token_len):
+        return
+    key = entity_alias_key(label, strip_suffix=True)
+    if not key or key in seen:
+        return
+    seen.add(key)
+    aliases.append(label)
+
+
+def extract_entity_aliases_from_text(
+    text: str,
+    *,
+    max_entities: int,
+    min_token_len: int,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    aliases: list[str] = []
+    seen: set[str] = set()
+    alias_pairs: list[tuple[str, str]] = []
+    if not text or max_entities <= 0:
+        return aliases, alias_pairs
+
+    for match in PAREN_ALIAS_RE.finditer(text):
+        long_form = clean_entity_alias(match.group(1))
+        short_form = clean_entity_alias(match.group(2))
+        if looks_like_entity_alias(long_form, min_token_len=min_token_len) and looks_like_entity_alias(
+            short_form,
+            min_token_len=min_token_len,
+        ):
+            alias_pairs.append((long_form, short_form))
+            add_entity_alias_candidate(
+                aliases,
+                seen,
+                long_form,
+                min_token_len=min_token_len,
+            )
+            add_entity_alias_candidate(
+                aliases,
+                seen,
+                short_form,
+                min_token_len=min_token_len,
+            )
+
+    patterns = [TICKER_RE, STANDARD_RE, LAW_RE, TITLE_ENTITY_RE, ACRONYM_RE, CHEMICAL_RE]
+    for pattern in patterns:
+        for match in pattern.finditer(text):
+            value = match.group(1) if pattern is TICKER_RE else match.group(0)
+            add_entity_alias_candidate(
+                aliases,
+                seen,
+                value,
+                min_token_len=min_token_len,
+            )
+            if len(aliases) >= max_entities:
+                break
+        if len(aliases) >= max_entities:
+            break
+
+    for match in re.finditer(r"\bFY\s*(\d{4})\b", text, flags=re.IGNORECASE):
+        add_entity_alias_candidate(
+            aliases,
+            seen,
+            f"FY{match.group(1)}",
+            min_token_len=min_token_len,
+        )
+        if len(aliases) >= max_entities:
+            break
+    return aliases[:max_entities], alias_pairs
+
+
+def build_entity_alias_map(
+    raw_page_entities: dict[str, list[str]],
+    alias_pairs: list[tuple[str, str]],
+) -> dict[str, str]:
+    alias_to_canonical: dict[str, str] = {}
+
+    def register(alias: str, canonical: str, *, overwrite: bool = True) -> None:
+        alias_key = entity_alias_key(alias, strip_suffix=True)
+        canonical_key = entity_alias_key(canonical, strip_suffix=True)
+        if alias_key and canonical_key:
+            if not overwrite and alias_key in alias_to_canonical:
+                return
+            alias_to_canonical[alias_key] = canonical_key
+
+    for long_form, short_form in alias_pairs:
+        long_key = entity_alias_key(long_form, strip_suffix=True)
+        if not long_key:
+            continue
+        register(long_form, long_form)
+        register(short_form, long_form)
+
+    known_acronyms = {
+        entity_alias_key(alias, strip_suffix=False)
+        for aliases in raw_page_entities.values()
+        for alias in aliases
+        if is_acronym(alias)
+    }
+    for aliases in raw_page_entities.values():
+        for alias in aliases:
+            register(alias, alias, overwrite=False)
+            acronym = acronym_for_phrase(alias)
+            if 2 <= len(acronym) <= 8 and acronym.lower() in known_acronyms:
+                register(acronym, alias)
+    return alias_to_canonical
+
+
+def normalize_entity_alias_signature(alias: str, alias_map: dict[str, str]) -> str:
+    key = entity_alias_key(alias, strip_suffix=True)
+    return alias_map.get(key, key)
+
+
 def load_doc_page_catalog(
     path: Path,
     *,
@@ -1623,13 +1954,20 @@ def load_doc_page_catalog(
     heading_max_per_page: int = 8,
     heading_min_tokens: int = 1,
     heading_min_token_len: int = 3,
+    entity_fields: Iterable[str] = (),
+    load_page_entities: bool = False,
+    entity_max_per_page: int = 24,
+    entity_min_token_len: int = 2,
 ) -> DocPageCatalog:
     counts: dict[str, int] = {}
     page_number_indices: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
     page_texts: dict[str, str] = {}
     page_breadcrumbs: dict[str, list[str]] = {}
+    raw_page_entities: dict[str, list[str]] = {}
+    alias_pairs: list[tuple[str, str]] = []
     text_field_names = [str(field).strip() for field in text_fields if str(field).strip()]
     heading_field_names = [str(field).strip() for field in heading_fields if str(field).strip()]
+    entity_field_names = [str(field).strip() for field in entity_fields if str(field).strip()]
     if not path.exists():
         raise FileNotFoundError(f"doc_pages JSONL does not exist: {path}")
     with path.open("r", encoding="utf-8") as handle:
@@ -1690,11 +2028,50 @@ def load_doc_page_catalog(
                         break
                 if breadcrumbs:
                     page_breadcrumbs[uid] = breadcrumbs
+            if load_page_entities:
+                parts = []
+                seen_parts = set()
+                for field_name in entity_field_names:
+                    text = manifest_text_block(row.get(field_name))
+                    if text and text not in seen_parts:
+                        parts.append(text)
+                        seen_parts.add(text)
+                if parts:
+                    aliases, pairs = extract_entity_aliases_from_text(
+                        "\n".join(parts),
+                        max_entities=max(0, int(entity_max_per_page)) * 2,
+                        min_token_len=max(1, int(entity_min_token_len)),
+                    )
+                    if aliases:
+                        raw_page_entities[uid] = aliases
+                    alias_pairs.extend(pairs)
+
+    entity_alias_map = build_entity_alias_map(raw_page_entities, alias_pairs)
+    page_entities: dict[str, dict[str, list[str]]] = {}
+    for uid, aliases in raw_page_entities.items():
+        by_signature: dict[str, list[str]] = defaultdict(list)
+        for alias in aliases:
+            signature = normalize_entity_alias_signature(alias, entity_alias_map)
+            if not signature:
+                continue
+            labels = by_signature[signature]
+            if alias not in labels:
+                labels.append(alias)
+        if by_signature:
+            limited = dict(
+                sorted(
+                    by_signature.items(),
+                    key=lambda item: (-max(len(label) for label in item[1]), item[0]),
+                )[: max(0, int(entity_max_per_page))]
+            )
+            page_entities[uid] = limited
     return DocPageCatalog(
         page_counts=counts,
         page_number_indices={doc_id: dict(values) for doc_id, values in page_number_indices.items()},
         page_texts=page_texts,
         page_breadcrumbs=page_breadcrumbs,
+        page_entities=page_entities,
+        entity_alias_map=entity_alias_map,
     )
 
 
@@ -5453,6 +5830,268 @@ def add_heading_breadcrumb_restart(
     return added
 
 
+def entity_alias_node_id(signature: str) -> str:
+    digest = hashlib.sha1(signature.lower().encode("utf-8")).hexdigest()[:12]
+    return f"entity_alias::{digest}"
+
+
+def entity_alias_specificity_weight(
+    *, match_count: int, candidate_count: int, args: argparse.Namespace
+) -> float:
+    if str(args.entity_alias_weight_mode) != "local_idf":
+        return 1.0
+    if match_count <= 0 or candidate_count <= 1:
+        return 1.0
+    try:
+        raw = math.log((float(candidate_count) + 1.0) / (float(match_count) + 1.0)) / math.log(
+            float(candidate_count) + 1.0
+        )
+    except (ValueError, ZeroDivisionError):
+        raw = 1.0
+    return clamp(raw, float(args.entity_alias_min_node_weight), 1.0)
+
+
+def entity_alias_label_for_signature(signature: str, labels: Iterable[str]) -> str:
+    ordered = sorted(
+        {clean_entity_alias(label) for label in labels if clean_entity_alias(label)},
+        key=lambda label: (-len(label), label.lower()),
+    )
+    return ordered[0] if ordered else signature
+
+
+def query_entity_alias_signatures(
+    question: str,
+    *,
+    alias_map: dict[str, str],
+    args: argparse.Namespace,
+) -> set[str]:
+    max_entities = max(1, int(args.entity_alias_max_entities_per_page) * 2)
+    aliases, pairs = extract_entity_aliases_from_text(
+        question,
+        max_entities=max_entities,
+        min_token_len=max(1, int(args.entity_alias_min_token_len)),
+    )
+    for anchor in extract_query_anchors(
+        question,
+        max_anchors=max_entities,
+        min_entity_len=max(1, int(args.entity_alias_min_token_len)),
+    ):
+        aliases.append(anchor)
+    local_alias_map = dict(alias_map)
+    local_alias_map.update(build_entity_alias_map({"query": aliases}, pairs))
+    signatures = {
+        normalize_entity_alias_signature(alias, local_alias_map)
+        for alias in aliases
+        if normalize_entity_alias_signature(alias, local_alias_map)
+    }
+    return signatures
+
+
+def entity_alias_matches_question(
+    *,
+    signature: str,
+    labels: list[str],
+    query_signatures: set[str],
+    query_tokens: set[str],
+    args: argparse.Namespace,
+) -> bool:
+    if signature in query_signatures:
+        return True
+    min_token_len = max(1, int(args.entity_alias_min_token_len))
+    for label in labels:
+        label_key = entity_alias_key(label, strip_suffix=True)
+        if label_key and label_key in query_signatures:
+            return True
+        label_tokens = set(entity_alias_tokens(label, min_token_len=min_token_len))
+        if not label_tokens or not query_tokens:
+            continue
+        if len(label_tokens) == 1:
+            if label_tokens & query_tokens:
+                return True
+            continue
+        overlap = len(label_tokens & query_tokens) / max(1, len(label_tokens))
+        if overlap >= clamp(float(args.entity_alias_query_min_overlap), 0.0, 1.0):
+            return True
+    signature_tokens = set(entity_alias_tokens(signature, min_token_len=min_token_len))
+    if len(signature_tokens) > 1 and query_tokens:
+        overlap = len(signature_tokens & query_tokens) / max(1, len(signature_tokens))
+        return overlap >= clamp(float(args.entity_alias_query_min_overlap), 0.0, 1.0)
+    return False
+
+
+def build_entity_alias_policy(
+    *,
+    question: str,
+    records: dict[str, PageRecord],
+    page_entities: dict[str, dict[str, list[str]]],
+    entity_alias_map: dict[str, str],
+    args: argparse.Namespace,
+) -> EntityAliasPolicy:
+    mode = str(args.entity_alias_mode)
+    entity_page_weights: dict[str, dict[str, float]] = {}
+    entity_node_weights: dict[str, float] = {}
+    entity_labels: dict[str, str] = {}
+    query_seed_nodes: set[str] = set()
+    raw_entity_page_weights: dict[str, dict[str, float]] = defaultdict(dict)
+    raw_entity_docs: dict[str, set[str]] = defaultdict(set)
+    raw_entity_labels: dict[str, set[str]] = defaultdict(set)
+    raw_entity_signatures: dict[str, str] = {}
+    dropped_broad_entity_count = 0
+
+    if mode != "none" and page_entities:
+        max_entities_per_page = max(0, int(args.entity_alias_max_entities_per_page))
+        for uid, record in records.items():
+            entities = page_entities.get(uid, {})
+            if not entities:
+                continue
+            for signature, labels in list(entities.items())[:max_entities_per_page]:
+                if not signature:
+                    continue
+                node_id = entity_alias_node_id(signature)
+                raw_entity_page_weights[node_id][uid] = 1.0
+                raw_entity_docs[node_id].add(record.doc_id)
+                raw_entity_labels[node_id].update(labels or [signature])
+                raw_entity_signatures.setdefault(node_id, signature)
+
+        query_signatures = query_entity_alias_signatures(
+            question,
+            alias_map=entity_alias_map,
+            args=args,
+        )
+        query_tokens = set(
+            entity_alias_tokens(
+                question,
+                min_token_len=max(1, int(args.entity_alias_min_token_len)),
+            )
+        )
+        max_page_matches = max(0, int(args.entity_alias_max_page_matches))
+        max_doc_matches = max(0, int(args.entity_alias_max_doc_matches))
+        for node_id, page_weights in raw_entity_page_weights.items():
+            doc_count = len(raw_entity_docs.get(node_id, set()))
+            if max_page_matches > 0 and len(page_weights) > max_page_matches:
+                dropped_broad_entity_count += 1
+                continue
+            if max_doc_matches > 0 and doc_count > max_doc_matches:
+                dropped_broad_entity_count += 1
+                continue
+            labels = sorted(raw_entity_labels.get(node_id, set()))
+            signature = raw_entity_signatures.get(node_id, node_id)
+            is_query_seed = entity_alias_matches_question(
+                signature=signature,
+                labels=labels,
+                query_signatures=query_signatures,
+                query_tokens=query_tokens,
+                args=args,
+            )
+            if mode in {"query_gated", "query_gated_shared"} and is_query_seed:
+                query_seed_nodes.add(node_id)
+            if mode == "query_gated" and node_id not in query_seed_nodes:
+                continue
+            entity_page_weights[node_id] = dict(page_weights)
+            entity_labels[node_id] = entity_alias_label_for_signature(signature, labels)
+            entity_node_weights[node_id] = entity_alias_specificity_weight(
+                match_count=len(page_weights),
+                candidate_count=len(records),
+                args=args,
+            )
+
+    page_with_entity_count = sum(1 for uid in records if page_entities.get(uid))
+    page_match_count = sum(len(pages) for pages in entity_page_weights.values())
+    metadata: dict[str, object] = {
+        "entity_alias_mode": mode,
+        "entity_alias_field": list(args.entity_alias_field),
+        "entity_alias_edge_weight": float(args.entity_alias_edge_weight),
+        "entity_alias_restart_weight": float(args.entity_alias_restart_weight),
+        "entity_alias_max_entities_per_page": int(args.entity_alias_max_entities_per_page),
+        "entity_alias_min_token_len": int(args.entity_alias_min_token_len),
+        "entity_alias_query_min_overlap": float(args.entity_alias_query_min_overlap),
+        "entity_alias_max_page_matches": int(args.entity_alias_max_page_matches),
+        "entity_alias_max_doc_matches": int(args.entity_alias_max_doc_matches),
+        "entity_alias_weight_mode": str(args.entity_alias_weight_mode),
+        "entity_alias_min_node_weight": float(args.entity_alias_min_node_weight),
+        "entity_alias_page_entities_available": bool(page_entities),
+        "entity_alias_alias_map_count": len(entity_alias_map),
+        "entity_alias_candidate_page_with_entity_count": page_with_entity_count,
+        "entity_alias_raw_node_count": len(raw_entity_page_weights),
+        "entity_alias_node_count": len(entity_page_weights),
+        "entity_alias_query_seed_node_count": len(query_seed_nodes),
+        "entity_alias_dropped_broad_entity_count": dropped_broad_entity_count,
+        "entity_alias_page_match_count": page_match_count,
+        "mean_entity_alias_node_weight": (
+            statistics.fmean(entity_node_weights.values()) if entity_node_weights else None
+        ),
+        "entity_alias_labels": [
+            entity_labels[node_id] for node_id in sorted(entity_labels)
+        ][:50],
+        "entity_alias_query_seed_labels": [
+            entity_labels[node_id]
+            for node_id in sorted(query_seed_nodes)
+            if node_id in entity_labels
+        ][:50],
+    }
+    return EntityAliasPolicy(
+        entity_page_weights=entity_page_weights,
+        entity_node_weights=entity_node_weights,
+        entity_labels=entity_labels,
+        query_seed_nodes=query_seed_nodes,
+        metadata=metadata,
+    )
+
+
+def add_entity_alias_edges(
+    *,
+    graph: dict[str, dict[str, float]],
+    policy: EntityAliasPolicy,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    if str(args.entity_alias_mode) == "none":
+        return {
+            "entity_alias_edge_count_directed": 0,
+            "entity_alias_seed_node_count": 0,
+        }
+    edge_count = 0
+    seeded_node_count = 0
+    for entity_node, pages in policy.entity_page_weights.items():
+        if not pages:
+            continue
+        seeded_node_count += 1
+        node_weight = policy.entity_node_weights.get(entity_node, 1.0)
+        for uid, page_weight in pages.items():
+            edge_weight = (
+                float(args.entity_alias_edge_weight)
+                * float(node_weight)
+                * float(page_weight)
+            )
+            if edge_weight > 0:
+                add_undirected_edge(graph, entity_node, uid, edge_weight)
+                edge_count += 2
+    return {
+        "entity_alias_edge_count_directed": edge_count,
+        "entity_alias_seed_node_count": seeded_node_count,
+    }
+
+
+def add_entity_alias_restart(
+    *,
+    seed: dict[str, float],
+    policy: EntityAliasPolicy,
+    args: argparse.Namespace,
+) -> int:
+    if str(args.entity_alias_mode) == "none":
+        return 0
+    restart_weight = float(args.entity_alias_restart_weight)
+    if restart_weight <= 0:
+        return 0
+    added = 0
+    for entity_node in sorted(policy.query_seed_nodes):
+        if entity_node not in policy.entity_page_weights:
+            continue
+        node_weight = policy.entity_node_weights.get(entity_node, 1.0)
+        seed[entity_node] = seed.get(entity_node, 0.0) + restart_weight * node_weight
+        added += 1
+    return added
+
+
 def page_record_best_rank(record: PageRecord) -> int | None:
     ranks = [
         rank
@@ -6083,6 +6722,15 @@ def build_qid_graph_ranking(
         page_breadcrumbs=page_breadcrumbs,
         args=args,
     )
+    page_entities = doc_page_catalog.page_entities if doc_page_catalog is not None else {}
+    entity_alias_map = doc_page_catalog.entity_alias_map if doc_page_catalog is not None else {}
+    entity_alias_policy = build_entity_alias_policy(
+        question=question,
+        records=records,
+        page_entities=page_entities,
+        entity_alias_map=entity_alias_map,
+        args=args,
+    )
     constraint_competition_policy = build_constraint_competition_policy(
         question=question,
         records=records,
@@ -6140,6 +6788,11 @@ def build_qid_graph_ranking(
     heading_breadcrumb_metadata = add_heading_breadcrumb_edges(
         graph=graph,
         policy=heading_breadcrumb_policy,
+        args=args,
+    )
+    entity_alias_metadata = add_entity_alias_edges(
+        graph=graph,
+        policy=entity_alias_policy,
         args=args,
     )
     pdf_hyperlink_metadata = add_pdf_hyperlink_edges(
@@ -6213,6 +6866,11 @@ def build_qid_graph_ranking(
     heading_breadcrumb_seed_node_count = add_heading_breadcrumb_restart(
         seed=restart_vector.seed,
         policy=heading_breadcrumb_policy,
+        args=args,
+    )
+    entity_alias_seed_node_count = add_entity_alias_restart(
+        seed=restart_vector.seed,
+        policy=entity_alias_policy,
         args=args,
     )
     ppr = run_ppr(
@@ -6313,12 +6971,15 @@ def build_qid_graph_ranking(
         **query_anchor_evidence_metadata,
         **heading_breadcrumb_policy.metadata,
         **heading_breadcrumb_metadata,
+        **entity_alias_policy.metadata,
+        **entity_alias_metadata,
         **constraint_competition_policy.metadata,
         **pdf_hyperlink_metadata,
         **external_page_graph_metadata,
         "position_evidence_restart_seed_node_count": position_seed_node_count,
         "query_anchor_restart_seed_node_count": query_anchor_seed_node_count,
         "heading_breadcrumb_restart_seed_node_count": heading_breadcrumb_seed_node_count,
+        "entity_alias_restart_seed_node_count": entity_alias_seed_node_count,
         "adaptive_adjacent_edge_count": len(adjacent_edge_multipliers),
         "mean_adaptive_adjacent_edge_multiplier": (
             statistics.fmean(adjacent_edge_multipliers) if adjacent_edge_multipliers else None
@@ -6412,6 +7073,10 @@ def main() -> None:
             heading_max_per_page=int(args.heading_breadcrumb_max_headings_per_page),
             heading_min_tokens=int(args.heading_breadcrumb_min_tokens),
             heading_min_token_len=int(args.heading_breadcrumb_min_token_len),
+            entity_fields=args.entity_alias_field,
+            load_page_entities=str(args.entity_alias_mode) != "none",
+            entity_max_per_page=int(args.entity_alias_max_entities_per_page),
+            entity_min_token_len=int(args.entity_alias_min_token_len),
         )
 
     fused_payload: dict[str, dict] = {}
@@ -6659,6 +7324,17 @@ def main() -> None:
                 "heading_breadcrumb_min_node_weight": float(
                     args.heading_breadcrumb_min_node_weight
                 ),
+                "entity_alias_mode": args.entity_alias_mode,
+                "entity_alias_field": list(args.entity_alias_field),
+                "entity_alias_edge_weight": float(args.entity_alias_edge_weight),
+                "entity_alias_restart_weight": float(args.entity_alias_restart_weight),
+                "entity_alias_max_entities_per_page": int(args.entity_alias_max_entities_per_page),
+                "entity_alias_min_token_len": int(args.entity_alias_min_token_len),
+                "entity_alias_query_min_overlap": float(args.entity_alias_query_min_overlap),
+                "entity_alias_max_page_matches": int(args.entity_alias_max_page_matches),
+                "entity_alias_max_doc_matches": int(args.entity_alias_max_doc_matches),
+                "entity_alias_weight_mode": args.entity_alias_weight_mode,
+                "entity_alias_min_node_weight": float(args.entity_alias_min_node_weight),
                 "constraint_competition_mode": args.constraint_competition_mode,
                 "constraint_competition_strength": float(args.constraint_competition_strength),
                 "query_local_evidence_doc_top_k": int(args.query_local_evidence_doc_top_k),
@@ -6831,6 +7507,12 @@ def main() -> None:
         "doc_page_breadcrumb_page_count": (
             len(doc_page_catalog.page_breadcrumbs) if doc_page_catalog is not None else 0
         ),
+        "doc_page_entity_page_count": (
+            len(doc_page_catalog.page_entities) if doc_page_catalog is not None else 0
+        ),
+        "doc_page_entity_alias_map_count": (
+            len(doc_page_catalog.entity_alias_map) if doc_page_catalog is not None else 0
+        ),
         "position_evidence_mode": args.position_evidence_mode,
         "position_evidence_scope": args.position_evidence_scope,
         "position_evidence_doc_top_k": int(args.position_evidence_doc_top_k),
@@ -6894,6 +7576,17 @@ def main() -> None:
         "heading_breadcrumb_max_doc_matches": int(args.heading_breadcrumb_max_doc_matches),
         "heading_breadcrumb_weight_mode": args.heading_breadcrumb_weight_mode,
         "heading_breadcrumb_min_node_weight": float(args.heading_breadcrumb_min_node_weight),
+        "entity_alias_mode": args.entity_alias_mode,
+        "entity_alias_field": list(args.entity_alias_field),
+        "entity_alias_edge_weight": float(args.entity_alias_edge_weight),
+        "entity_alias_restart_weight": float(args.entity_alias_restart_weight),
+        "entity_alias_max_entities_per_page": int(args.entity_alias_max_entities_per_page),
+        "entity_alias_min_token_len": int(args.entity_alias_min_token_len),
+        "entity_alias_query_min_overlap": float(args.entity_alias_query_min_overlap),
+        "entity_alias_max_page_matches": int(args.entity_alias_max_page_matches),
+        "entity_alias_max_doc_matches": int(args.entity_alias_max_doc_matches),
+        "entity_alias_weight_mode": args.entity_alias_weight_mode,
+        "entity_alias_min_node_weight": float(args.entity_alias_min_node_weight),
         "constraint_competition_mode": args.constraint_competition_mode,
         "constraint_competition_strength": float(args.constraint_competition_strength),
         "query_local_evidence_doc_top_k": int(args.query_local_evidence_doc_top_k),
@@ -7436,6 +8129,84 @@ def main() -> None:
         "mean_heading_breadcrumb_restart_seed_node_count": (
             statistics.fmean(
                 float(row["graph"].get("heading_breadcrumb_restart_seed_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "entity_alias_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("entity_alias_node_count", 0)) > 0
+        ),
+        "entity_alias_query_seed_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("entity_alias_query_seed_node_count", 0)) > 0
+        ),
+        "mean_entity_alias_candidate_page_with_entity_count": (
+            statistics.fmean(
+                float(row["graph"].get("entity_alias_candidate_page_with_entity_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_entity_alias_node_count": (
+            statistics.fmean(
+                float(row["graph"].get("entity_alias_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_entity_alias_query_seed_node_count": (
+            statistics.fmean(
+                float(row["graph"].get("entity_alias_query_seed_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_entity_alias_page_match_count": (
+            statistics.fmean(
+                float(row["graph"].get("entity_alias_page_match_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_entity_alias_edge_count_directed": (
+            statistics.fmean(
+                float(row["graph"].get("entity_alias_edge_count_directed", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_entity_alias_node_weight": (
+            statistics.fmean(
+                float(row["graph"].get("mean_entity_alias_node_weight", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_entity_alias_node_weight") is not None
+            )
+            if any(
+                row["graph"].get("mean_entity_alias_node_weight") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_entity_alias_dropped_broad_entity_count": (
+            statistics.fmean(
+                float(row["graph"].get("entity_alias_dropped_broad_entity_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_entity_alias_restart_seed_node_count": (
+            statistics.fmean(
+                float(row["graph"].get("entity_alias_restart_seed_node_count", 0.0))
                 for row in per_qid
             )
             if per_qid
