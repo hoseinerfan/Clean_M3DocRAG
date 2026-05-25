@@ -69,12 +69,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--decision-test",
-        choices=("relative_z", "paired_gaussian", "posterior_rerank"),
+        choices=("relative_z", "paired_gaussian", "posterior_rerank", "posterior_mixture"),
         default="relative_z",
         help=(
             "Swap decision. relative_z keeps the original graph-z boundary test. "
             "paired_gaussian uses a one-sided Gaussian test over standardized paired evidence. "
-            "posterior_rerank sorts the local top pages by the graph posterior directly."
+            "posterior_rerank sorts the local top pages by the graph posterior directly. "
+            "posterior_mixture sorts by an entropy-weighted base-prior/graph-posterior mixture."
         ),
     )
     parser.add_argument(
@@ -258,17 +259,69 @@ def best_paired_swap(
     return best_top, best_boundary, best_z, best_components
 
 
-def reorder_local_by_posterior(
+def distribution_concentration(probabilities: dict[str, float]) -> float:
+    if len(probabilities) <= 1:
+        return 0.0
+    values = [max(0.0, value) for value in probabilities.values()]
+    total = sum(values)
+    if total <= 0:
+        return 0.0
+    normalized = [value / total for value in values if value > 0]
+    entropy = -sum(value * math.log(value) for value in normalized)
+    max_entropy = math.log(float(len(probabilities)))
+    if max_entropy <= 0:
+        return 0.0
+    return max(0.0, min(1.0, 1.0 - (entropy / max_entropy)))
+
+
+def posterior_mixture_scores(
+    *,
+    local_pages: list[str],
+    base_rank: dict[str, int],
+    graph_scores: dict[str, float],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    base_prior = normalize({
+        uid: 1.0 / float(base_rank.get(uid, 10**9))
+        for uid in local_pages
+    })
+    graph_posterior = normalize({
+        uid: graph_scores.get(uid, 0.0)
+        for uid in local_pages
+    })
+    base_concentration = distribution_concentration(base_prior)
+    graph_concentration = distribution_concentration(graph_posterior)
+    total_concentration = base_concentration + graph_concentration
+    if total_concentration <= 1e-12:
+        base_weight = 0.5
+    else:
+        base_weight = base_concentration / total_concentration
+    mixture_scores = {
+        uid: base_weight * base_prior.get(uid, 0.0)
+        + (1.0 - base_weight) * graph_posterior.get(uid, 0.0)
+        for uid in local_pages
+    }
+    diagnostics = {
+        "base_weight": base_weight,
+        "graph_weight": 1.0 - base_weight,
+        "base_concentration": base_concentration,
+        "graph_concentration": graph_concentration,
+        "base_prior": base_prior,
+        "graph_posterior": graph_posterior,
+    }
+    return mixture_scores, diagnostics
+
+
+def reorder_local_by_scores(
     *,
     base_pages: list[str],
     local_pages: list[str],
-    graph_scores: dict[str, float],
+    scores: dict[str, float],
     base_rank: dict[str, int],
 ) -> list[str]:
     local_set = set(local_pages)
     reordered_local = sorted(
         local_pages,
-        key=lambda uid: (-graph_scores.get(uid, 0.0), base_rank.get(uid, 10**9)),
+        key=lambda uid: (-scores.get(uid, 0.0), base_rank.get(uid, 10**9)),
     )
     return reordered_local + [uid for uid in base_pages if uid not in local_set]
 
@@ -369,11 +422,12 @@ def rerank_one(
     if len(base_pages) <= int(args.hit_k):
         return base_row, {"qid": qid, "accepted": False, "reason": "not_enough_pages"}
 
+    posterior_modes = {"posterior_rerank", "posterior_mixture"}
     boundary_top = max(int(args.boundary_top_pages), int(args.hit_k) + 1)
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
     boundary_pages = base_pages[int(args.hit_k) : boundary_top]
-    if args.same_top_docs_only and args.decision_test != "posterior_rerank":
+    if args.same_top_docs_only and args.decision_test not in posterior_modes:
         top_docs = {page_doc(uid) for uid in top_pages}
         boundary_pages = [uid for uid in boundary_pages if page_doc(uid) in top_docs]
     if not boundary_pages:
@@ -399,14 +453,32 @@ def rerank_one(
     paired_p: float | None = None
     paired_z_threshold: float | None = None
     paired_components: dict[str, float] = {}
+    posterior_scores = graph_scores
+    posterior_diag: dict[str, Any] = {}
 
-    if args.decision_test == "posterior_rerank":
+    if args.decision_test in posterior_modes:
+        if args.decision_test == "posterior_mixture":
+            posterior_scores, posterior_diag = posterior_mixture_scores(
+                local_pages=local_pages,
+                base_rank=base_rank,
+                graph_scores=graph_scores,
+            )
+        else:
+            posterior_diag = {
+                "base_weight": 0.0,
+                "graph_weight": 1.0,
+                "base_concentration": None,
+                "graph_concentration": distribution_concentration(normalize({
+                    uid: graph_scores.get(uid, 0.0)
+                    for uid in local_pages
+                })),
+            }
         weakest_top = min(top_pages, key=lambda uid: z_scores.get(uid, -10**9))
         best_boundary = max(boundary_pages, key=lambda uid: z_scores.get(uid, -10**9))
-        reordered_pages = reorder_local_by_posterior(
+        reordered_pages = reorder_local_by_scores(
             base_pages=base_pages,
             local_pages=local_pages,
-            graph_scores=graph_scores,
+            scores=posterior_scores,
             base_rank=base_rank,
         )
         accepted = reordered_pages != base_pages
@@ -428,7 +500,7 @@ def rerank_one(
 
     weakest_top_z = z_scores.get(weakest_top, 0.0)
     best_boundary_z = z_scores.get(best_boundary, 0.0)
-    if args.decision_test == "posterior_rerank":
+    if args.decision_test in posterior_modes:
         pass
     elif args.decision_test == "paired_gaussian":
         accepted = bool(
@@ -458,14 +530,18 @@ def rerank_one(
         "local_page_count": len(local_pages),
         "posterior_rerank_changed_count": (
             sum(1 for left, right in zip(local_pages, reordered_pages[: len(local_pages)]) if left != right)
-            if args.decision_test == "posterior_rerank"
+            if args.decision_test in posterior_modes
             else None
         ),
         "posterior_top_pages": (
             reordered_pages[: min(10, len(local_pages))]
-            if args.decision_test == "posterior_rerank"
+            if args.decision_test in posterior_modes
             else []
         ),
+        "posterior_base_weight": posterior_diag.get("base_weight"),
+        "posterior_graph_weight": posterior_diag.get("graph_weight"),
+        "posterior_base_concentration": posterior_diag.get("base_concentration"),
+        "posterior_graph_concentration": posterior_diag.get("graph_concentration"),
         "boundary_page_count": len(boundary_pages),
         "graph_edge_count": graph_diag["edge_count"],
         "decision_test": str(args.decision_test),
@@ -482,7 +558,7 @@ def rerank_one(
     if not accepted:
         return base_row, case
 
-    if args.decision_test != "posterior_rerank":
+    if args.decision_test not in posterior_modes:
         reordered_pages = list(base_pages)
         top_idx = reordered_pages.index(weakest_top)
         boundary_idx = reordered_pages.index(best_boundary)
