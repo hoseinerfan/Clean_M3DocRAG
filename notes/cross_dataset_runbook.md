@@ -1,6 +1,6 @@
 # Cross-Dataset Runbook
 
-Last updated: 2026-05-22
+Last updated: 2026-05-25
 
 Purpose: keep the operational commands from the dataset chats in one place. Per-dataset folders still contain the detailed READMEs; this file is the compact checklist to resume work without searching old chats.
 
@@ -50,7 +50,7 @@ This corresponds to the row we call `denseheavy125_medium_both`. ViDoSeek has a 
 | SciEGQA | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
 | ViDoRe V3 | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
 | ViDoSeek | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
-| OpenDocVQA | Full OCR shards merged; OCR text sanity passed; OCR-backed SPLADE/doc-RRF completed and improved retrieval. | Run Graph-PPR using OCR-backed SPLADE. |
+| OpenDocVQA | Full OCR-backed Graph-PPR completed: page R@4 `58.63%`, page R@20 `76.62%`, doc R@4 `60.35%`, doc R@20 `79.22%`. | Run/evaluate full-dev `pairwise_content_posterior`; omit support if no independent graph-view support prediction exists. |
 | MMLongBench DocQA | Prepared: 708 docs, 30,917 pages, 14,466 QAs, 19 missing gold pages; embedding job was submitted. | Check embedding completion, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
 | DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. | Embed pages, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
 
@@ -423,29 +423,32 @@ doc@4=0.6069
 doc@20=0.7818
 ```
 
-Run OpenDocVQA Graph-PPR next:
+OpenDocVQA Graph-PPR completed with the frozen `denseheavy125_medium_both` profile:
+
+```text
+qid_count 41017
+page_recall@1 0.3988
+page_recall@4 0.5863
+page_recall@20 0.7662
+doc_recall@4 0.6035
+doc_recall@20 0.7922
+page_hit@4 26173
+doc_hit@4 26901
+```
+
+Next full-dev boundary test:
 
 ```bash
-DATA_NAME=opendocvqa \
-DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa" \
-DENSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
-SPARSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_splade_ret1000.prediction.json" \
-OUT_DIR="$LOCAL_OUTPUT_DIR/opendocvqa/graph_ppr_plain_top224_splade" \
-GRAPH_PROFILE=page_rank_probe \
-GRAPH_LABEL="opendocvqa_denseheavy125_medium_both" \
-FINAL_TOP_PAGES=1000 \
-PER_DOC_PAGE_LIMIT=0 \
-DENSE_WEIGHT=1.25 \
-SPARSE_WEIGHT=0.75 \
-RESTART_PROB=0.15 \
-PPR_ITERS=30 \
-PAGE_DOC_EDGE_WEIGHT=1.0 \
-SAME_DOC_WINDOW=1 \
-ADJACENT_PAGE_EDGE_WEIGHT=0.25 \
-FINAL_PAGE_SEED_WEIGHT=1.0 \
-FINAL_PPR_PAGE_WEIGHT=0.5 \
-FINAL_PPR_DOC_WEIGHT=0.25 \
-bash scripts/run_external_graph_ppr_pipeline.sh
+python scripts/rerank_boundary_gaussian_graph.py \
+  --gold "$OPENDOC_GOLD" \
+  --base-prediction "$OPENDOC_BASE" \
+  --doc-pages-jsonl "$OPENDOC_DOC_PAGES" \
+  --decision-test pairwise_content_posterior \
+  --hit-k 4 \
+  --boundary-top-pages 10 \
+  --output-prediction-json "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.prediction.json" \
+  --output-summary-json "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.summary.json" \
+  --output-case-json "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.cases.json"
 ```
 
 ### MMLongBench DocQA

@@ -215,7 +215,7 @@ SPLADE_DEVICE=auto \
 bash scripts/run_external_doc_rrf_pipeline.sh
 ```
 
-OpenDocVQA is not ready for this exact SPLADE/RRF check yet because the converted `doc_pages_dev.jsonl` has image paths and source IDs but no OCR/markdown text. Running the exporter fails fast with `--require-nonempty`. If `SKIP_EXPORT=1` reuses the failed all-empty output, SPLADE will index blank page strings and the result is invalid; ignore that run even if it completes. The driver now passes `--require-nonempty-text` into the SPLADE index builder by default to prevent this failure mode.
+Historical OpenDocVQA warning: the first converted `doc_pages_dev.jsonl` had image paths and source IDs but no OCR/markdown text. Any all-empty SPLADE output from that stage is invalid and should still be ignored. OpenDocVQA now has OCR-backed page text and valid SPLADE/Graph-PPR results; keep `--require-nonempty-text` enabled so this failure mode cannot silently recur.
 
 Generate OCR page text first. This wrapper uses Tesseract over the prepared page images and shards the 206k-page workload:
 
@@ -441,7 +441,7 @@ GRAPH_LABEL="vidore-v3_plain_top224_splade_graph1000_top20_best" \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
-OpenDocVQA needs the EasyOCR/Tesseract page-text shards to finish first. After SPLADE has been rebuilt from real OCR text, use the same graph-PPR runner with the OCR-backed SPLADE prediction:
+OpenDocVQA OCR-backed SPLADE and Graph-PPR are now complete. The command shape below remains the reproducibility path for the frozen `denseheavy125_medium_both` page-preserving graph run:
 
 ```bash
 unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
@@ -453,7 +453,20 @@ DATA_ROOT="$LOCAL_DATA_DIR/opendocvqa" \
 DENSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/plain_top224_ret1000_prediction.json" \
 SPARSE_PRED="$LOCAL_OUTPUT_DIR/opendocvqa/doc_rrf_plain_top224_splade/opendocvqa_splade_ret1000.prediction.json" \
 OUT_DIR="$LOCAL_OUTPUT_DIR/opendocvqa/graph_ppr_plain_top224_splade" \
-GRAPH_LABEL="opendocvqa_plain_top224_splade_graph1000_top20_best" \
+GRAPH_PROFILE=page_rank_probe \
+GRAPH_LABEL="opendocvqa_denseheavy125_medium_both" \
+FINAL_TOP_PAGES=1000 \
+PER_DOC_PAGE_LIMIT=0 \
+DENSE_WEIGHT=1.25 \
+SPARSE_WEIGHT=0.75 \
+RESTART_PROB=0.15 \
+PPR_ITERS=30 \
+PAGE_DOC_EDGE_WEIGHT=1.0 \
+SAME_DOC_WINDOW=1 \
+ADJACENT_PAGE_EDGE_WEIGHT=0.25 \
+FINAL_PAGE_SEED_WEIGHT=1.0 \
+FINAL_PPR_PAGE_WEIGHT=0.5 \
+FINAL_PPR_DOC_WEIGHT=0.25 \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
@@ -463,6 +476,7 @@ Observed page-ranking-probe results from `GRAPH_PROFILE=page_rank_probe`:
 |---|---:|---:|---:|---:|---:|---|
 | SciEGQA-Bench | 1623 | 0.7686 | 0.9091 | 0.9298 | 0.9852 | strong page-ranking result; not the doc-shortlist-best profile |
 | ViDoSeek | 1142 | 0.8905 | 0.9982 | 0.9991 | 1.0000 | slight page@4 drop vs plain_top224, better deeper page recall |
+| OpenDocVQA | 41017 | 0.5863 | 0.7662 | 0.6035 | 0.7922 | OCR-backed `denseheavy125_medium_both`; broad win over `plain_top224` |
 
 Do not mix these with the doc-shortlist-best results; they use different output caps and slightly different PPR weights.
 
@@ -529,9 +543,10 @@ Short label: `denseheavy125_medium_both`.
 | SciEGQA-Bench | 1623 | `denseheavy125_medium_both` | 0.5508 *(plain 0.5228)* | 0.8152 *(plain 0.7394)* | 0.9248 *(plain 0.8758)* | 0.9291 *(plain 0.9070)* | 0.9871 *(plain 0.9772)* | broad page/doc win |
 | MMDocIR | 1658 | `denseheavy125_medium_both` | 0.4596 *(plain 0.4136)* | 0.6719 *(plain 0.6075)* | 0.7889 *(plain 0.7480)* | 0.8160 *(plain 0.8058)* | 0.8938 *(plain 0.8890)* | clear page@1/@4/@20 win |
 | ViDoRe V3 | 14514 | `denseheavy125_medium_both` | 0.3902 *(plain 0.1730)* | 0.6465 *(plain 0.3312)* | 0.8227 *(plain 0.5431)* | 0.9099 *(plain 0.8854)* | 0.9788 *(plain 0.9809)* | large page gain; tiny doc@20 loss |
+| OpenDocVQA | 41017 | `denseheavy125_medium_both` | 0.3988 *(plain 0.3516)* | 0.5863 *(plain 0.5122)* | 0.7662 *(plain 0.6599)* | 0.6035 *(plain 0.5307)* | 0.7922 *(plain 0.6955)* | OCR-backed SPLADE graph result; broad early-rank win |
 | ViDoSeek | 1142 | `denseheavy150_m3best_pagepreserve` | 0.6909 *(plain 0.6830)* | 0.9037 *(plain 0.8958)* | 0.9982 *(plain 0.9842)* | 0.9991 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; heavier row best for this dataset |
 
-Use `denseheavy125_medium_both` as the current frozen single page-labeled config. ViDoSeek's best individual row is `denseheavy150_m3best_pagepreserve`, but the `1.25/0.75 + medium_both` setting is the best common setting across SciEGQA, MMDocIR, and ViDoRe V3 and remains close on ViDoSeek. Do not claim universal superiority at every metric; report page@1 separately and keep `plain_top224` as the required baseline.
+Use `denseheavy125_medium_both` as the current frozen single page-labeled config. ViDoSeek's best individual row is `denseheavy150_m3best_pagepreserve`, but the `1.25/0.75 + medium_both` setting is the best common setting across SciEGQA, MMDocIR, ViDoRe V3, and OpenDocVQA and remains close on ViDoSeek. Do not claim universal superiority at every metric; report page@1 separately and keep `plain_top224` as the required baseline.
 
 ## Dataset Summary
 

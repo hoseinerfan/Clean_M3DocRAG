@@ -271,3 +271,69 @@ This mode does not learn dataset thresholds. It compares fixed, self-normalized 
 
 For `robust_z` and `percentile`, regenerate the OCR evidence graph case JSON after this code change;
 OCR extraction itself does not need to be rerun.
+
+## Boundary Reasoning And Content Evidence Update
+
+The later right-document/wrong-page experiments moved from OCR/layout routing to a label-free
+local boundary reasoner. The problem setting is top-4 page localization when the gold page is
+near the decision boundary, usually rank 5-10, while the document is already correct.
+
+Subset baseline on `rankable_rightdoc_wrongpage_100`:
+
+| dataset | base page hit@4 | base doc hit@4 |
+| --- | ---: | ---: |
+| ViDoRe V3 | 0 | 100 |
+| MMDocIR | 45 | 97 |
+
+Method audit:
+
+| category | method | ViDoRe recovered/lost/net | MMDocIR recovered/lost/net | MMDocIR page hit@4 | conclusion |
+| --- | --- | ---: | ---: | ---: | --- |
+| OCR/layout evidence | raw `ocr_docanchored` | 49 / 0 / +49 | about 13 / 14-17 / negative-to-flat | about 42-44 | strong on ViDoRe, unstable on MMDocIR |
+| self-calibrated OCR | `robust_z` | 34 / 0 / +34 | 13 / 14 / -1 | 44 | still loses too many MMDocIR hits |
+| graph support gate | `robust_z_graph_top10_consensus` | 34 / 0 / +34 | 13 / 13 / 0 | 45 | safer, limited upside |
+| boundary Gaussian | `relative_z` | 58 / 0 / +58 | 10 / 5 / +5 | 50 | first useful non-OCR boundary rescue |
+| paired Gaussian | `paired_gaussian c90` | 40 / 0 / +40 | 1 / 1 / 0 | 45 | too conservative |
+| full posterior | `posterior_rerank` | 85 / 0 / +85 | 20 / 13 / +7 | 52 | large ViDoRe gain, too lossy on MMDocIR |
+| pairwise posterior | `pairwise_posterior` | 64 / 0 / +64 | 7 / 2 / +5 | 50 | best risk-adjusted method before content |
+| preserve prior | `pairwise_posterior_preserve` | 48 / 0 / +48 | 3 / 1 / +2 | 47 | too conservative |
+| adaptive preserve | `pairwise_posterior_adaptive_preserve` | 49 / 0 / +49 | 4 / 1 / +3 | 48 | still over-preserves base top-4 |
+| counterfactual posterior | `pairwise_counterfactual_posterior` | 48 / 0 / +48 | 3 / 1 / +2 | 47 | base-only null model dominates |
+| evidence-only counterfactual | `pairwise_counterfactual_evidence_posterior` | 57 / 0 / +57 | 6 / 3 / +3 | 48 | useful diagnostic, not best |
+| content posterior | `pairwise_content_posterior` | 62 / 0 / +62 | 13 / 3 / +10 | 55 | best risk-adjusted subset result so far |
+| content counterfactual | `pairwise_counterfactual_content_posterior` | 58 / 0 / +58 | 12 / 2 / +10 | 55 | safer ablation, same MMDocIR net |
+
+Routing/selection audits:
+
+| router | ViDoRe net | MMDocIR recovered/lost/net | MMDocIR page hit@4 | note |
+| --- | ---: | ---: | ---: | --- |
+| query subtype LORO, non-oracle | +58 | 20 / 11 / +9 | 54 | useful but still loses too many top-4 pages |
+| agreement signature raw | +56 | 19 / 11 / +8 | 53 | rank signatures only, no case/gold leakage |
+| agreement signature LCB c90 n5 | 0 | 12 / 9 / +3 | 48 | too conservative cross-dataset |
+| agreement signature LCB c75 n3 | 0 | 14 / 9 / +5 | 50 | weaker than direct content posterior |
+
+Current interpretation:
+
+1. More graph/rank routing alone does not separate valid boundary pages from same-document distractors.
+2. Direct query-page content evidence is the first independent signal that improves MMDocIR without destroying ViDoRe.
+3. `pairwise_content_posterior` is the current main boundary method; `pairwise_counterfactual_content_posterior` is a conservative ablation.
+4. Whole-dataset testing should start with OpenDocVQA, using `--doc-pages-jsonl` and no support file if no independent graph-view support prediction exists.
+
+Canonical subset command shape:
+
+```bash
+python scripts/rerank_boundary_gaussian_graph.py \
+  --gold "$GOLD" \
+  --base-prediction "$BASE" \
+  --support graph_view "$GRAPH_SUPPORT" \
+  --doc-pages-jsonl "$DOC_PAGES" \
+  --decision-test pairwise_content_posterior \
+  --hit-k 4 \
+  --boundary-top-pages 10 \
+  --output-prediction-json "$BOUNDARY_DIR/${RUN_LABEL}_boundary_pairwise_content_posterior.prediction.json" \
+  --output-summary-json "$BOUNDARY_DIR/${RUN_LABEL}_boundary_pairwise_content_posterior.summary.json" \
+  --output-case-json "$BOUNDARY_DIR/${RUN_LABEL}_boundary_pairwise_content_posterior.cases.json"
+```
+
+When no independent support prediction exists, omit the `--support ...` line rather than passing the
+base prediction as support.
