@@ -69,13 +69,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--decision-test",
-        choices=("relative_z", "paired_gaussian", "posterior_rerank", "posterior_mixture"),
+        choices=(
+            "relative_z",
+            "paired_gaussian",
+            "posterior_rerank",
+            "posterior_mixture",
+            "posterior_disagreement",
+        ),
         default="relative_z",
         help=(
             "Swap decision. relative_z keeps the original graph-z boundary test. "
             "paired_gaussian uses a one-sided Gaussian test over standardized paired evidence. "
             "posterior_rerank sorts the local top pages by the graph posterior directly. "
-            "posterior_mixture sorts by an entropy-weighted base-prior/graph-posterior mixture."
+            "posterior_mixture sorts by an entropy-weighted base-prior/graph-posterior mixture. "
+            "posterior_disagreement weights graph by JS(base, graph) times graph confidence."
         ),
     )
     parser.add_argument(
@@ -274,6 +281,34 @@ def distribution_concentration(probabilities: dict[str, float]) -> float:
     return max(0.0, min(1.0, 1.0 - (entropy / max_entropy)))
 
 
+def kl_divergence(left: dict[str, float], right: dict[str, float]) -> float:
+    total = 0.0
+    for key, left_value in left.items():
+        if left_value <= 0:
+            continue
+        right_value = right.get(key, 0.0)
+        if right_value <= 0:
+            return math.inf
+        total += left_value * math.log(left_value / right_value)
+    return total
+
+
+def normalized_js_divergence(left: dict[str, float], right: dict[str, float]) -> float:
+    left_prob = normalize(left)
+    right_prob = normalize(right)
+    keys = set(left_prob) | set(right_prob)
+    if len(keys) <= 1:
+        return 0.0
+    mixture = {
+        key: 0.5 * left_prob.get(key, 0.0) + 0.5 * right_prob.get(key, 0.0)
+        for key in keys
+    }
+    js_value = 0.5 * kl_divergence(left_prob, mixture) + 0.5 * kl_divergence(right_prob, mixture)
+    if not math.isfinite(js_value):
+        return 1.0
+    return max(0.0, min(1.0, js_value / math.log(2.0)))
+
+
 def posterior_mixture_scores(
     *,
     local_pages: list[str],
@@ -305,6 +340,42 @@ def posterior_mixture_scores(
         "graph_weight": 1.0 - base_weight,
         "base_concentration": base_concentration,
         "graph_concentration": graph_concentration,
+        "base_prior": base_prior,
+        "graph_posterior": graph_posterior,
+    }
+    return mixture_scores, diagnostics
+
+
+def posterior_disagreement_scores(
+    *,
+    local_pages: list[str],
+    base_rank: dict[str, int],
+    graph_scores: dict[str, float],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    base_prior = normalize({
+        uid: 1.0 / float(base_rank.get(uid, 10**9))
+        for uid in local_pages
+    })
+    graph_posterior = normalize({
+        uid: graph_scores.get(uid, 0.0)
+        for uid in local_pages
+    })
+    base_concentration = distribution_concentration(base_prior)
+    graph_concentration = distribution_concentration(graph_posterior)
+    movement_strength = normalized_js_divergence(base_prior, graph_posterior)
+    graph_weight = max(0.0, min(1.0, graph_concentration * movement_strength))
+    base_weight = 1.0 - graph_weight
+    mixture_scores = {
+        uid: base_weight * base_prior.get(uid, 0.0)
+        + graph_weight * graph_posterior.get(uid, 0.0)
+        for uid in local_pages
+    }
+    diagnostics = {
+        "base_weight": base_weight,
+        "graph_weight": graph_weight,
+        "base_concentration": base_concentration,
+        "graph_concentration": graph_concentration,
+        "base_graph_js": movement_strength,
         "base_prior": base_prior,
         "graph_posterior": graph_posterior,
     }
@@ -422,7 +493,7 @@ def rerank_one(
     if len(base_pages) <= int(args.hit_k):
         return base_row, {"qid": qid, "accepted": False, "reason": "not_enough_pages"}
 
-    posterior_modes = {"posterior_rerank", "posterior_mixture"}
+    posterior_modes = {"posterior_rerank", "posterior_mixture", "posterior_disagreement"}
     boundary_top = max(int(args.boundary_top_pages), int(args.hit_k) + 1)
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
@@ -459,6 +530,12 @@ def rerank_one(
     if args.decision_test in posterior_modes:
         if args.decision_test == "posterior_mixture":
             posterior_scores, posterior_diag = posterior_mixture_scores(
+                local_pages=local_pages,
+                base_rank=base_rank,
+                graph_scores=graph_scores,
+            )
+        elif args.decision_test == "posterior_disagreement":
+            posterior_scores, posterior_diag = posterior_disagreement_scores(
                 local_pages=local_pages,
                 base_rank=base_rank,
                 graph_scores=graph_scores,
@@ -542,6 +619,7 @@ def rerank_one(
         "posterior_graph_weight": posterior_diag.get("graph_weight"),
         "posterior_base_concentration": posterior_diag.get("base_concentration"),
         "posterior_graph_concentration": posterior_diag.get("graph_concentration"),
+        "posterior_base_graph_js": posterior_diag.get("base_graph_js"),
         "boundary_page_count": len(boundary_pages),
         "graph_edge_count": graph_diag["edge_count"],
         "decision_test": str(args.decision_test),
