@@ -383,7 +383,6 @@ Optional heading/breadcrumb graph anchors:
 ```bash
 HEADING_BREADCRUMB_MODE=query_gated \
 HEADING_BREADCRUMB_FIELD="markdown" \
-HEADING_BREADCRUMB_EXTRACTION_MODE=markdown \
 HEADING_BREADCRUMB_EDGE_WEIGHT=0.15 \
 HEADING_BREADCRUMB_RESTART_WEIGHT=0.10 \
 HEADING_BREADCRUMB_MAX_PAGE_MATCHES=50 \
@@ -396,24 +395,6 @@ and connects candidate pages sharing the same normalized breadcrumb. Start with 
 the query names a section, table, note, topic, or manual subsection. Use `query_gated_shared` as a
 stronger ablation when same-document page confusion is high, because it also lets non-query-matched
 heading nodes propagate page mass within candidate sections.
-
-For MMDocIR, `doc_pages_dev.jsonl` does not currently include `markdown`; it has `ocr_text` and
-`vlm_text`. Use the plain-text fallback there:
-
-```bash
-HEADING_BREADCRUMB_MODE=query_gated \
-HEADING_BREADCRUMB_FIELD="ocr_text vlm_text" \
-HEADING_BREADCRUMB_EXTRACTION_MODE=markdown_or_text \
-HEADING_BREADCRUMB_EDGE_WEIGHT=0.10 \
-HEADING_BREADCRUMB_RESTART_WEIGHT=0.05 \
-HEADING_BREADCRUMB_MAX_HEADINGS_PER_PAGE=6 \
-HEADING_BREADCRUMB_MAX_PAGE_MATCHES=50 \
-HEADING_BREADCRUMB_MAX_DOC_MATCHES=20 \
-HEADING_BREADCRUMB_WEIGHT_MODE=local_idf
-```
-
-The OCR/VLM fallback is intentionally opt-in and should use lower weights than clean Markdown
-because plain text has more title and boilerplate noise.
 
 Run the best-config doc-shortlist check on the smaller datasets first.
 
@@ -650,9 +631,7 @@ Operational findings:
 2. MMDocIR is mixed, but document discovery is now the largest limitation. Boundary rescue can only
    attack the 239 right-document failures; the 305 document-retrieval-gap failures need stronger
    document/support recall. Heading/breadcrumb anchors are still a good cheap test for financial
-   reports and academic papers because section names can bridge pages inside a retrieved document;
-   on MMDocIR, run them over `ocr_text`/`vlm_text` with `markdown_or_text` because no `markdown`
-   field is present.
+   reports and academic papers because section names can bridge pages inside a retrieved document.
 3. OpenDocVQA is not primarily a boundary/localization problem under this packed-document setup.
    More than 95% of page failures are document-retrieval gaps, so unconditional page-local reranking
    should not be expected to help and already produced a negative full-dev result.

@@ -374,7 +374,6 @@ Recommended first ablation:
 ```bash
 HEADING_BREADCRUMB_MODE=query_gated \
 HEADING_BREADCRUMB_FIELD="markdown" \
-HEADING_BREADCRUMB_EXTRACTION_MODE=markdown \
 HEADING_BREADCRUMB_EDGE_WEIGHT=0.15 \
 HEADING_BREADCRUMB_RESTART_WEIGHT=0.10 \
 HEADING_BREADCRUMB_MAX_PAGE_MATCHES=50 \
@@ -383,32 +382,12 @@ HEADING_BREADCRUMB_WEIGHT_MODE=local_idf \
 bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
-MMDocIR-specific fallback, because the dev page catalog has `ocr_text` and `vlm_text` but no
-`markdown` field:
-
-```bash
-HEADING_BREADCRUMB_MODE=query_gated \
-HEADING_BREADCRUMB_FIELD="ocr_text vlm_text" \
-HEADING_BREADCRUMB_EXTRACTION_MODE=markdown_or_text \
-HEADING_BREADCRUMB_EDGE_WEIGHT=0.10 \
-HEADING_BREADCRUMB_RESTART_WEIGHT=0.05 \
-HEADING_BREADCRUMB_MAX_HEADINGS_PER_PAGE=6 \
-HEADING_BREADCRUMB_MAX_PAGE_MATCHES=50 \
-HEADING_BREADCRUMB_MAX_DOC_MATCHES=20 \
-HEADING_BREADCRUMB_WEIGHT_MODE=local_idf \
-bash scripts/run_external_graph_ppr_pipeline.sh
-```
-
-The fallback extracts short heading-like lines from OCR/VLM text. It is noisier than Markdown, so
-keep it query-gated and start with lower edge/restart weights.
-
 Interpretation by limitation bucket:
 
 1. ViDoRe: likely useful for right-document boundary and same-document sibling failures when section
    names or report headings survive in markdown.
 2. MMDocIR: useful as a cheap section bridge for financial reports and academic papers, but cannot
-   solve the 305 document-retrieval-gap failures alone. Use the OCR/VLM fallback unless a future
-   page catalog includes Markdown headings.
+   solve the 305 document-retrieval-gap failures alone.
 3. OpenDocVQA: lower priority unless OCR/markdown includes meaningful headings; the dominant
    bottleneck is document/pack selection, not local page localization.
 

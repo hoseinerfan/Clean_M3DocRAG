@@ -708,22 +708,7 @@ def parse_args() -> argparse.Namespace:
         "--heading-breadcrumb-field",
         nargs="*",
         default=["markdown"],
-        help=(
-            "doc_pages JSONL fields parsed for heading breadcrumbs. Use markdown "
-            "for converted Markdown, or fields such as ocr_text/vlm_text with "
-            "--heading-breadcrumb-extraction-mode markdown_or_text."
-        ),
-    )
-    parser.add_argument(
-        "--heading-breadcrumb-extraction-mode",
-        choices=["markdown", "markdown_or_text", "text"],
-        default="markdown",
-        help=(
-            "How to extract heading labels from heading fields. markdown uses only '# ' "
-            "Markdown headings. markdown_or_text falls back to OCR/plain-text heading-like "
-            "lines when no Markdown headings are present. text uses only the OCR/plain-text "
-            "line heuristic."
-        ),
+        help="doc_pages JSONL fields parsed for Markdown heading breadcrumbs.",
     )
     parser.add_argument("--heading-breadcrumb-edge-weight", type=float, default=0.10)
     parser.add_argument("--heading-breadcrumb-restart-weight", type=float, default=0.10)
@@ -1542,33 +1527,6 @@ HEADING_BREADCRUMB_STOPWORDS = {
     "with",
 }
 MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
-PLAIN_TEXT_HEADING_PREFIX_RE = re.compile(
-    r"^\s*(?:[A-Z]?\d+(?:\.\d+)*[\).:]?|[IVXLCDM]{1,8}[\).])\s+\S+"
-)
-PLAIN_TEXT_HEADING_KEYWORDS = {
-    "abstract",
-    "acknowledgements",
-    "appendix",
-    "background",
-    "balance sheet",
-    "business",
-    "cash flow",
-    "conclusion",
-    "contents",
-    "discussion",
-    "financial statements",
-    "highlights",
-    "introduction",
-    "management discussion",
-    "methodology",
-    "notes",
-    "overview",
-    "results",
-    "revenue recognition",
-    "risk factor",
-    "statement of",
-    "summary",
-}
 
 
 def manifest_text_block(value: object) -> str:
@@ -1655,118 +1613,12 @@ def extract_markdown_breadcrumbs_from_text(
     return breadcrumbs
 
 
-def is_plain_text_heading_candidate(line: str, *, min_tokens: int, min_token_len: int) -> bool:
-    stripped = clean_markdown_heading_label(line)
-    if not stripped:
-        return False
-    if len(stripped) > 120:
-        return False
-    if re.search(r"https?://|www\.|@|\bdoi\b", stripped, flags=re.IGNORECASE):
-        return False
-    if re.search(r"\brecommended citation\b|\bfor media\b|\bfor release\b", stripped, flags=re.IGNORECASE):
-        return False
-    if stripped.endswith(","):
-        return False
-    if stripped.endswith(".") and not PLAIN_TEXT_HEADING_PREFIX_RE.match(stripped):
-        return False
-
-    raw_words = re.findall(r"[A-Za-z][A-Za-z'-]*|\d+", stripped)
-    if len(raw_words) > 12:
-        return False
-    tokens = heading_breadcrumb_tokens(stripped, min_token_len=min_token_len)
-    if len(set(tokens)) < min_tokens:
-        return False
-
-    if PLAIN_TEXT_HEADING_PREFIX_RE.match(stripped):
-        return True
-
-    lower = stripped.lower()
-    if any(keyword in lower for keyword in PLAIN_TEXT_HEADING_KEYWORDS):
-        return True
-
-    alpha_words = [word for word in raw_words if re.search(r"[A-Za-z]", word)]
-    if not alpha_words:
-        return False
-
-    uppercase_words = [
-        word
-        for word in alpha_words
-        if len(word) > 1 and word.upper() == word and word.lower() != word
-    ]
-    titlecase_words = [
-        word
-        for word in alpha_words
-        if word[:1].upper() == word[:1] and word[1:].lower() == word[1:]
-    ]
-    uppercase_frac = len(uppercase_words) / max(1, len(alpha_words))
-    titlecase_frac = len(titlecase_words) / max(1, len(alpha_words))
-    if uppercase_frac >= 0.65 and len(alpha_words) <= 10:
-        return True
-    return titlecase_frac >= 0.55 and 3 <= len(alpha_words) <= 10
-
-
-def extract_plain_text_breadcrumbs_from_text(
-    text: str,
-    *,
-    max_headings_per_page: int,
-    min_tokens: int,
-    min_token_len: int,
-) -> list[str]:
-    if not text or max_headings_per_page <= 0:
-        return []
-    breadcrumbs: list[str] = []
-    seen: set[str] = set()
-    for raw_line in text.splitlines():
-        line = clean_markdown_heading_label(raw_line)
-        if not is_plain_text_heading_candidate(
-            line,
-            min_tokens=min_tokens,
-            min_token_len=min_token_len,
-        ):
-            continue
-        key = " ".join(heading_breadcrumb_tokens(line, min_token_len=min_token_len))
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        breadcrumbs.append(line)
-        if len(breadcrumbs) >= max_headings_per_page:
-            break
-    return breadcrumbs
-
-
-def extract_heading_breadcrumbs_from_text(
-    text: str,
-    *,
-    extraction_mode: str,
-    max_headings_per_page: int,
-    min_tokens: int,
-    min_token_len: int,
-) -> list[str]:
-    mode = str(extraction_mode)
-    if mode != "text":
-        markdown_breadcrumbs = extract_markdown_breadcrumbs_from_text(
-            text,
-            max_headings_per_page=max_headings_per_page,
-            min_tokens=min_tokens,
-            min_token_len=min_token_len,
-        )
-        if markdown_breadcrumbs or mode == "markdown":
-            return markdown_breadcrumbs
-    return extract_plain_text_breadcrumbs_from_text(
-        text,
-        max_headings_per_page=max_headings_per_page,
-        min_tokens=min_tokens,
-        min_token_len=min_token_len,
-    )
-
-
 def load_doc_page_catalog(
     path: Path,
     *,
     text_fields: Iterable[str] = (),
     load_page_texts: bool = False,
     heading_fields: Iterable[str] = (),
-    heading_extraction_mode: str = "markdown",
     load_page_breadcrumbs: bool = False,
     heading_max_per_page: int = 8,
     heading_min_tokens: int = 1,
@@ -1816,9 +1668,8 @@ def load_doc_page_catalog(
                     raw_text = manifest_text_block(row.get(field_name))
                     if not raw_text:
                         continue
-                    for breadcrumb in extract_heading_breadcrumbs_from_text(
+                    for breadcrumb in extract_markdown_breadcrumbs_from_text(
                         raw_text,
-                        extraction_mode=heading_extraction_mode,
                         max_headings_per_page=max(0, int(heading_max_per_page)),
                         min_tokens=max(1, int(heading_min_tokens)),
                         min_token_len=max(1, int(heading_min_token_len)),
@@ -5506,9 +5357,6 @@ def build_heading_breadcrumb_policy(
     metadata: dict[str, object] = {
         "heading_breadcrumb_mode": mode,
         "heading_breadcrumb_field": list(args.heading_breadcrumb_field),
-        "heading_breadcrumb_extraction_mode": str(
-            args.heading_breadcrumb_extraction_mode
-        ),
         "heading_breadcrumb_edge_weight": float(args.heading_breadcrumb_edge_weight),
         "heading_breadcrumb_restart_weight": float(args.heading_breadcrumb_restart_weight),
         "heading_breadcrumb_max_headings_per_page": int(
@@ -6560,7 +6408,6 @@ def main() -> None:
                 in {"query_local_softmax", "query_local_selector"}
             ),
             heading_fields=args.heading_breadcrumb_field,
-            heading_extraction_mode=str(args.heading_breadcrumb_extraction_mode),
             load_page_breadcrumbs=str(args.heading_breadcrumb_mode) != "none",
             heading_max_per_page=int(args.heading_breadcrumb_max_headings_per_page),
             heading_min_tokens=int(args.heading_breadcrumb_min_tokens),
@@ -6788,7 +6635,6 @@ def main() -> None:
                 ),
                 "heading_breadcrumb_mode": args.heading_breadcrumb_mode,
                 "heading_breadcrumb_field": list(args.heading_breadcrumb_field),
-                "heading_breadcrumb_extraction_mode": args.heading_breadcrumb_extraction_mode,
                 "heading_breadcrumb_edge_weight": float(args.heading_breadcrumb_edge_weight),
                 "heading_breadcrumb_restart_weight": float(
                     args.heading_breadcrumb_restart_weight
@@ -7034,7 +6880,6 @@ def main() -> None:
         ),
         "heading_breadcrumb_mode": args.heading_breadcrumb_mode,
         "heading_breadcrumb_field": list(args.heading_breadcrumb_field),
-        "heading_breadcrumb_extraction_mode": args.heading_breadcrumb_extraction_mode,
         "heading_breadcrumb_edge_weight": float(args.heading_breadcrumb_edge_weight),
         "heading_breadcrumb_restart_weight": float(args.heading_breadcrumb_restart_weight),
         "heading_breadcrumb_max_headings_per_page": int(
