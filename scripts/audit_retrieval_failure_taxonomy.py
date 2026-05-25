@@ -650,11 +650,22 @@ def limitation_next_step(group: str) -> str:
 def matrix_rows(
     mapping: dict[str, dict[str, int]],
     columns: list[str],
+    totals_by_row: dict[str, int] | None = None,
 ) -> list[list[Any]]:
     rows: list[list[Any]] = []
-    for row_key, counts in sorted(mapping.items(), key=lambda item: (-sum(item[1].values()), item[0])):
-        rows.append([row_key, sum(counts.values()), *[counts.get(column, 0) for column in columns]])
+    for row_key, counts in sorted(
+        mapping.items(),
+        key=lambda item: (-(totals_by_row or {}).get(item[0], sum(item[1].values())), item[0]),
+    ):
+        row_total = (totals_by_row or {}).get(row_key, sum(counts.values()))
+        rows.append([row_key, row_total, *[counts.get(column, 0) for column in columns]])
     return rows
+
+
+def ordered_present_columns(counts: dict[str, int], preferred: list[str]) -> list[str]:
+    preferred_present = [column for column in preferred if column in counts]
+    preferred_set = set(preferred_present)
+    return preferred_present + sorted(column for column in counts if column not in preferred_set)
 
 
 def fmt_stat(value: float | int | None) -> str:
@@ -696,6 +707,10 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
         lines.extend(["", f"## {run['run']}", ""])
         failure_n = int(run["page_failure_count"])
         solved_n = int(run["page_hit_at_k_count"])
+        group_totals = {
+            str(group): int(count)
+            for group, count in run["failure_limitation_group_counts"].items()
+        }
         lines.append(
             f"Page-hit failures: **{failure_n} / {run['n']} ({pct(failure_n, run['n'])})**. "
             f"Already solved at page@{run['hit_k']}: **{solved_n} / {run['n']} ({pct(solved_n, run['n'])})**."
@@ -774,7 +789,11 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
         lines.extend(
             table(
                 ["limitation", "failures", *category_columns],
-                matrix_rows(run["failure_category_by_limitation"], category_columns),
+                matrix_rows(
+                    run["failure_category_by_limitation"],
+                    category_columns,
+                    totals_by_row=group_totals,
+                ),
             )
         )
         lines.extend(["", "### Rank Position Diagnostics", ""])
@@ -815,29 +834,67 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
         lines.extend(["", "Failed gold-document rank buckets:", ""])
         lines.extend(table(["gold_doc_rank_bucket", "count"], doc_bucket_rows))
         lines.extend(["", "Failure type by failed gold-page rank bucket:", ""])
-        page_bucket_columns = ["boundary_5_10", "rank_11_20", "rank_21_50", "rank_51_100", "rank_gt100", "missing"]
+        page_bucket_columns = ordered_present_columns(
+            run["failure_page_rank_bucket_counts"],
+            [
+                f"boundary_{int(run['hit_k']) + 1}_{int(run['boundary_k'])}",
+                "boundary_5_10",
+                "rank_11_20",
+                "rank_21_50",
+                "rank_51_100",
+                "rank_gt100",
+                "missing",
+            ],
+        )
         lines.extend(
             table(
                 ["limitation", "failures", *page_bucket_columns],
-                matrix_rows(run["failure_page_rank_bucket_by_limitation"], page_bucket_columns),
+                matrix_rows(
+                    run["failure_page_rank_bucket_by_limitation"],
+                    page_bucket_columns,
+                    totals_by_row=group_totals,
+                ),
             )
         )
         lines.extend(["", "Failure type by failed gold-document rank bucket:", ""])
-        doc_bucket_columns = ["top4", "doc_5_10", "doc_11_20", "doc_21_50", "doc_51_100", "doc_gt100", "missing"]
+        doc_bucket_columns = ordered_present_columns(
+            run["failure_doc_rank_bucket_counts"],
+            [
+                f"top{int(run['hit_k'])}",
+                f"doc_{int(run['hit_k']) + 1}_10",
+                "doc_5_10",
+                "doc_11_20",
+                "doc_21_50",
+                "doc_51_100",
+                "doc_gt100",
+                "missing",
+            ],
+        )
         lines.extend(
             table(
                 ["limitation", "failures", *doc_bucket_columns],
-                matrix_rows(run["failure_doc_rank_bucket_by_limitation"], doc_bucket_columns),
+                matrix_rows(
+                    run["failure_doc_rank_bucket_by_limitation"],
+                    doc_bucket_columns,
+                    totals_by_row=group_totals,
+                ),
             )
         )
         lines.extend(["", "### Failure By Query Cue", ""])
-        lines.append("Query cues are multi-label, so row counts can sum above the number of failures.")
+        lines.append(
+            "Query cues are multi-label: `cases` is the actual failure count for the limitation, "
+            "while cue columns count label instances."
+        )
         lines.append("")
         cue_columns = ["numeric", "visual_table", "page_locator", "comparison", "reasoning", "uncued"]
         lines.extend(
             table(
-                ["limitation", "failures", *cue_columns],
-                matrix_rows(run["failure_query_cue_by_limitation"], cue_columns),
+                ["limitation", "cases", *cue_columns],
+                matrix_rows(
+                    run["failure_query_cue_by_limitation"],
+                    cue_columns,
+                    totals_by_row=group_totals,
+                ),
             )
         )
         lines.extend(["", "Failure limitation by cue:", ""])
@@ -847,6 +904,11 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
         cue_rows.sort(key=lambda row: (-int(row[1]), str(row[0])))
         lines.extend(table(["query_cue", "cases", "limitation_groups"], cue_rows))
         lines.extend(["", "### Gold Label Shape And Top-K Evidence Tags", ""])
+        lines.append(
+            "Evidence tags are multi-label: `cases` is the actual failure count for the limitation, "
+            "while tag columns count label instances."
+        )
+        lines.append("")
         tag_columns = [
             "multi_gold_page",
             "multi_gold_doc",
@@ -858,8 +920,12 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
         ]
         lines.extend(
             table(
-                ["limitation", "failures", *tag_columns],
-                matrix_rows(run["failure_tag_by_limitation"], tag_columns),
+                ["limitation", "cases", *tag_columns],
+                matrix_rows(
+                    run["failure_tag_by_limitation"],
+                    tag_columns,
+                    totals_by_row=group_totals,
+                ),
             )
         )
         score_rows = []
