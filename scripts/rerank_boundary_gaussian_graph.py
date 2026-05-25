@@ -75,6 +75,7 @@ def parse_args() -> argparse.Namespace:
             "posterior_rerank",
             "posterior_mixture",
             "posterior_disagreement",
+            "posterior_temperature",
         ),
         default="relative_z",
         help=(
@@ -82,7 +83,8 @@ def parse_args() -> argparse.Namespace:
             "paired_gaussian uses a one-sided Gaussian test over standardized paired evidence. "
             "posterior_rerank sorts the local top pages by the graph posterior directly. "
             "posterior_mixture sorts by an entropy-weighted base-prior/graph-posterior mixture. "
-            "posterior_disagreement weights graph by JS(base, graph) times graph confidence."
+            "posterior_disagreement weights graph by JS(base, graph) times graph confidence. "
+            "posterior_temperature uses a rank prior plus temperature-scaled graph z-likelihood."
         ),
     )
     parser.add_argument(
@@ -382,6 +384,46 @@ def posterior_disagreement_scores(
     return mixture_scores, diagnostics
 
 
+def posterior_temperature_scores(
+    *,
+    local_pages: list[str],
+    base_rank: dict[str, int],
+    graph_scores: dict[str, float],
+) -> tuple[dict[str, float], dict[str, Any]]:
+    base_prior = normalize({
+        uid: 1.0 / float(base_rank.get(uid, 10**9))
+        for uid in local_pages
+    })
+    graph_posterior = normalize({
+        uid: graph_scores.get(uid, 0.0)
+        for uid in local_pages
+    })
+    graph_z = robust_z_scores({
+        uid: graph_scores.get(uid, 0.0)
+        for uid in local_pages
+    })
+    graph_concentration = distribution_concentration(graph_posterior)
+    graph_entropy = max(1e-12, 1.0 - graph_concentration)
+    graph_beta = 1.0 / graph_entropy
+    scores = {
+        uid: math.log(max(base_prior.get(uid, 0.0), 1e-300))
+        + graph_beta * graph_z.get(uid, 0.0)
+        for uid in local_pages
+    }
+    diagnostics = {
+        "base_weight": None,
+        "graph_weight": None,
+        "base_concentration": distribution_concentration(base_prior),
+        "graph_concentration": graph_concentration,
+        "base_graph_js": normalized_js_divergence(base_prior, graph_posterior),
+        "temperature": graph_entropy,
+        "graph_beta": graph_beta,
+        "base_prior": base_prior,
+        "graph_posterior": graph_posterior,
+    }
+    return scores, diagnostics
+
+
 def reorder_local_by_scores(
     *,
     base_pages: list[str],
@@ -493,7 +535,12 @@ def rerank_one(
     if len(base_pages) <= int(args.hit_k):
         return base_row, {"qid": qid, "accepted": False, "reason": "not_enough_pages"}
 
-    posterior_modes = {"posterior_rerank", "posterior_mixture", "posterior_disagreement"}
+    posterior_modes = {
+        "posterior_rerank",
+        "posterior_mixture",
+        "posterior_disagreement",
+        "posterior_temperature",
+    }
     boundary_top = max(int(args.boundary_top_pages), int(args.hit_k) + 1)
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
@@ -536,6 +583,12 @@ def rerank_one(
             )
         elif args.decision_test == "posterior_disagreement":
             posterior_scores, posterior_diag = posterior_disagreement_scores(
+                local_pages=local_pages,
+                base_rank=base_rank,
+                graph_scores=graph_scores,
+            )
+        elif args.decision_test == "posterior_temperature":
+            posterior_scores, posterior_diag = posterior_temperature_scores(
                 local_pages=local_pages,
                 base_rank=base_rank,
                 graph_scores=graph_scores,
@@ -620,6 +673,8 @@ def rerank_one(
         "posterior_base_concentration": posterior_diag.get("base_concentration"),
         "posterior_graph_concentration": posterior_diag.get("graph_concentration"),
         "posterior_base_graph_js": posterior_diag.get("base_graph_js"),
+        "posterior_temperature": posterior_diag.get("temperature"),
+        "posterior_graph_beta": posterior_diag.get("graph_beta"),
         "boundary_page_count": len(boundary_pages),
         "graph_edge_count": graph_diag["edge_count"],
         "decision_test": str(args.decision_test),
