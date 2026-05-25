@@ -571,6 +571,48 @@ as routing features. The main categories are `doc_miss_topk`, `doc_missing_from_
 `right_doc_boundary_page`, `right_doc_adjacent_page`, `right_doc_same_doc_sibling`,
 `right_doc_late_page`, and `right_doc_gold_page_missing_from_pool`.
 
+Exact MaxSim boundary verifier for Graph-PPR:
+
+```bash
+MAXSIM_BOUNDARY_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/boundary_exact_maxsim
+mkdir -p "$MAXSIM_BOUNDARY_DIR"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$VIDORE_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$VIDORE_OUT/vidore-v3_dev_graph_ppr_base.prediction.json" \
+  --embedding-dir "$VIDORE_ROOT/embeddings/colpali-v1.2_vidore-v3_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/vidore_exact_maxsim_boundary.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/vidore_exact_maxsim_boundary.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/vidore_exact_maxsim_boundary.cases.json"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$MMDOCIR_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$MMDOCIR_OUT/mmdocir_dev_graph_ppr_base.prediction.json" \
+  --embedding-dir "$MMDOCIR_ROOT/embeddings/colpali-v1.2_mm-docir_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary.cases.json"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$OPENDOC_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$OPENDOC_OUT/opendocvqa_denseheavy125_medium_both.prediction.json" \
+  --embedding-dir "$OPENDOC_ROOT/embeddings/colpali-v1.2_opendocvqa_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/opendocvqa_exact_maxsim_boundary.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/opendocvqa_exact_maxsim_boundary.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/opendocvqa_exact_maxsim_boundary.cases.json"
+```
+
+This is a local, label-free boundary test: exact ColPali MaxSim scores only the current top-4 pages
+and rank 5, then swaps rank 5 into top 4 if MaxSim beats the weakest current top-4 page. It should
+be reported against the frozen Graph-PPR base; if full-dev losses exceed recoveries, keep Graph-PPR
+as the final method and treat the MaxSim boundary run as a diagnostic.
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |

@@ -302,6 +302,7 @@ Method audit:
 | evidence-only counterfactual | `pairwise_counterfactual_evidence_posterior` | 57 / 0 / +57 | 6 / 3 / +3 | 48 | useful diagnostic, not best |
 | content posterior | `pairwise_content_posterior` | 62 / 0 / +62 | 13 / 3 / +10 | 55 | best risk-adjusted subset result so far |
 | content counterfactual | `pairwise_counterfactual_content_posterior` | 58 / 0 / +58 | 12 / 2 / +10 | 55 | safer ablation, same MMDocIR net |
+| exact MaxSim boundary | `rerank_graph_boundary_exact_maxsim.py` | pending | pending | pending | label-free top-4/rank-5 verifier for full Graph-PPR |
 
 Routing/selection audits:
 
@@ -337,6 +338,25 @@ python scripts/rerank_boundary_gaussian_graph.py \
 
 When no independent support prediction exists, omit the `--support ...` line rather than passing the
 base prediction as support.
+
+Exact MaxSim boundary verifier command shape:
+
+```bash
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$GOLD" \
+  --base-prediction "$BASE" \
+  --embedding-dir "$EMBEDDING_DIR" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/${RUN_LABEL}_exact_maxsim_boundary.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/${RUN_LABEL}_exact_maxsim_boundary.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/${RUN_LABEL}_exact_maxsim_boundary.cases.json"
+```
+
+This scorer is a local verifier rather than a learned selector: it recomputes exact ColPali MaxSim
+for the current top-4 pages and rank 5 only, then swaps rank 5 into top 4 if exact MaxSim beats the
+weakest current top-4 page. The result is still experimental until full-dataset losses/recoveries
+are known.
 
 Full OpenDocVQA no-support result:
 

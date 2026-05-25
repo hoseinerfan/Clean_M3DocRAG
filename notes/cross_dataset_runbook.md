@@ -507,6 +507,53 @@ This clusters observable features without gold labels. Labels are used only afte
 estimate held-out cluster utility and decide whether a cluster should route to the candidate or keep
 base.
 
+### Exact MaxSim Boundary Verifier
+
+Use this targeted non-OCR test when the current Graph-PPR result has likely boundary failures. It
+does not learn thresholds or use gold at decision time. For each query, it computes exact ColPali
+MaxSim on only the current top-4 pages plus rank 5, then swaps rank 5 into top 4 only when exact
+MaxSim scores it above the weakest current top-4 page.
+
+Full-dev command shape:
+
+```bash
+MAXSIM_BOUNDARY_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/boundary_exact_maxsim
+mkdir -p "$MAXSIM_BOUNDARY_DIR"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$VIDORE_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$VIDORE_OUT/vidore-v3_dev_graph_ppr_base.prediction.json" \
+  --embedding-dir "$VIDORE_ROOT/embeddings/colpali-v1.2_vidore-v3_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/vidore_exact_maxsim_boundary.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/vidore_exact_maxsim_boundary.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/vidore_exact_maxsim_boundary.cases.json"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$MMDOCIR_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$MMDOCIR_OUT/mmdocir_dev_graph_ppr_base.prediction.json" \
+  --embedding-dir "$MMDOCIR_ROOT/embeddings/colpali-v1.2_mm-docir_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary.cases.json"
+
+python scripts/rerank_graph_boundary_exact_maxsim.py \
+  --gold "$OPENDOC_DATA/MMQA_dev.jsonl" \
+  --base-prediction "$OPENDOC_OUT/opendocvqa_denseheavy125_medium_both.prediction.json" \
+  --embedding-dir "$OPENDOC_ROOT/embeddings/colpali-v1.2_opendocvqa_dev" \
+  --hit-k 4 \
+  --boundary-rank 5 \
+  --output-prediction-json "$MAXSIM_BOUNDARY_DIR/opendocvqa_exact_maxsim_boundary.prediction.json" \
+  --output-summary-json "$MAXSIM_BOUNDARY_DIR/opendocvqa_exact_maxsim_boundary.summary.json" \
+  --output-case-json "$MAXSIM_BOUNDARY_DIR/opendocvqa_exact_maxsim_boundary.cases.json"
+```
+
+For a cheap smoke test before a full run, add `--max-qids 100`. If the full run loses many existing
+top-4 hits, keep it as an audit result and do not replace Graph-PPR.
+
 ### Failure Taxonomy Audit
 
 After a full Graph-PPR result exists, categorize its remaining page-hit failures:
