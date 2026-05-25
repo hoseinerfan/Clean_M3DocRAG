@@ -7,7 +7,7 @@ import json
 import math
 from collections import Counter, defaultdict
 from pathlib import Path
-from statistics import median
+from statistics import NormalDist, median
 from typing import Any
 
 from analyze_layout_evidence_gate import (
@@ -66,6 +66,28 @@ def parse_args() -> argparse.Namespace:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Only allow swaps from boundary pages whose document appears in base top-k docs.",
+    )
+    parser.add_argument(
+        "--decision-test",
+        choices=("relative_z", "paired_gaussian"),
+        default="relative_z",
+        help=(
+            "Swap decision. relative_z keeps the original graph-z boundary test. "
+            "paired_gaussian uses a one-sided Gaussian test over standardized paired evidence."
+        ),
+    )
+    parser.add_argument(
+        "--paired-confidence",
+        type=float,
+        default=0.95,
+        help="One-sided confidence required by --decision-test paired_gaussian.",
+    )
+    parser.add_argument(
+        "--paired-evidence",
+        nargs="+",
+        choices=("graph", "support", "base"),
+        default=["graph", "support"],
+        help="Self-normalized evidence sources combined by Stouffer z in paired_gaussian mode.",
     )
     parser.add_argument("--z-margin", type=float, default=0.0)
     parser.add_argument(
@@ -148,6 +170,91 @@ def support_rank_maps(
         pages = ranked_pages(prediction.get(qid))
         maps[label] = {uid: rank for rank, uid in enumerate(pages, start=1)}
     return maps
+
+
+def min_support_rank(uid: str, support_ranks: dict[str, dict[str, int]]) -> int | None:
+    ranks = [
+        rank_map[uid]
+        for rank_map in support_ranks.values()
+        if uid in rank_map
+    ]
+    if not ranks:
+        return None
+    return min(ranks)
+
+
+def evidence_z_maps(
+    *,
+    local_pages: list[str],
+    base_rank: dict[str, int],
+    support_ranks: dict[str, dict[str, int]],
+    graph_scores: dict[str, float],
+    args: argparse.Namespace,
+) -> dict[str, dict[str, float]]:
+    base_values = {
+        uid: 1.0 / (float(args.base_rrf_k) + float(base_rank.get(uid, 10**9)))
+        for uid in local_pages
+    }
+    support_values: dict[str, float] = {}
+    for uid in local_pages:
+        support_value = 0.0
+        for rank_map in support_ranks.values():
+            rank = rank_map.get(uid)
+            if rank is not None and rank <= int(args.support_top_pages):
+                support_value = max(
+                    support_value,
+                    1.0 / (float(args.support_rrf_k) + float(rank)),
+                )
+        support_values[uid] = support_value
+    return {
+        "base": robust_z_scores(base_values),
+        "graph": robust_z_scores({uid: graph_scores.get(uid, 0.0) for uid in local_pages}),
+        "support": robust_z_scores(support_values),
+    }
+
+
+def paired_gaussian_score(
+    *,
+    top_page: str,
+    boundary_page: str,
+    evidence_maps: dict[str, dict[str, float]],
+    evidence_sources: list[str],
+) -> tuple[float, dict[str, float]]:
+    components: dict[str, float] = {}
+    for source in evidence_sources:
+        z_map = evidence_maps.get(source, {})
+        components[source] = z_map.get(boundary_page, 0.0) - z_map.get(top_page, 0.0)
+    if not components:
+        return -math.inf, components
+    z_value = sum(components.values()) / math.sqrt(float(len(components)))
+    return z_value, components
+
+
+def best_paired_swap(
+    *,
+    top_pages: list[str],
+    boundary_pages: list[str],
+    evidence_maps: dict[str, dict[str, float]],
+    evidence_sources: list[str],
+) -> tuple[str, str, float, dict[str, float]]:
+    best_top = top_pages[0]
+    best_boundary = boundary_pages[0]
+    best_z = -math.inf
+    best_components: dict[str, float] = {}
+    for top_page in top_pages:
+        for boundary_page in boundary_pages:
+            paired_z, components = paired_gaussian_score(
+                top_page=top_page,
+                boundary_page=boundary_page,
+                evidence_maps=evidence_maps,
+                evidence_sources=evidence_sources,
+            )
+            if paired_z > best_z:
+                best_top = top_page
+                best_boundary = boundary_page
+                best_z = paired_z
+                best_components = components
+    return best_top, best_boundary, best_z, best_components
 
 
 def local_graph_scores(
@@ -264,16 +371,49 @@ def rerank_one(
         support_ranks=support_ranks,
         args=args,
     )
-    z_scores = robust_z_scores({uid: graph_scores.get(uid, 0.0) for uid in local_pages})
+    evidence_maps = evidence_z_maps(
+        local_pages=local_pages,
+        base_rank=base_rank,
+        support_ranks=support_ranks,
+        graph_scores=graph_scores,
+        args=args,
+    )
+    z_scores = evidence_maps["graph"]
+    paired_z: float | None = None
+    paired_p: float | None = None
+    paired_z_threshold: float | None = None
+    paired_components: dict[str, float] = {}
 
-    weakest_top = min(top_pages, key=lambda uid: z_scores.get(uid, -10**9))
-    best_boundary = max(boundary_pages, key=lambda uid: z_scores.get(uid, -10**9))
+    if args.decision_test == "paired_gaussian":
+        confidence = float(args.paired_confidence)
+        if not 0.5 < confidence < 1.0:
+            raise ValueError("--paired-confidence must be between 0.5 and 1.0")
+        weakest_top, best_boundary, paired_z, paired_components = best_paired_swap(
+            top_pages=top_pages,
+            boundary_pages=boundary_pages,
+            evidence_maps=evidence_maps,
+            evidence_sources=[str(source) for source in args.paired_evidence],
+        )
+        paired_p = NormalDist().cdf(float(paired_z))
+        paired_z_threshold = NormalDist().inv_cdf(confidence)
+    else:
+        weakest_top = min(top_pages, key=lambda uid: z_scores.get(uid, -10**9))
+        best_boundary = max(boundary_pages, key=lambda uid: z_scores.get(uid, -10**9))
+
     weakest_top_z = z_scores.get(weakest_top, 0.0)
     best_boundary_z = z_scores.get(best_boundary, 0.0)
-    accepted = bool(
-        best_boundary_z >= float(args.min_boundary_z)
-        and best_boundary_z > weakest_top_z + float(args.z_margin)
-    )
+    if args.decision_test == "paired_gaussian":
+        accepted = bool(
+            best_boundary_z >= float(args.min_boundary_z)
+            and paired_z is not None
+            and paired_z_threshold is not None
+            and paired_z >= paired_z_threshold
+        )
+    else:
+        accepted = bool(
+            best_boundary_z >= float(args.min_boundary_z)
+            and best_boundary_z > weakest_top_z + float(args.z_margin)
+        )
 
     case = {
         "qid": qid,
@@ -290,10 +430,16 @@ def rerank_one(
         "local_page_count": len(local_pages),
         "boundary_page_count": len(boundary_pages),
         "graph_edge_count": graph_diag["edge_count"],
-        "support_min_rank_best_boundary": min(
-            (rank_map.get(best_boundary, 10**9) for rank_map in support_ranks.values()),
-            default=10**9,
-        ),
+        "decision_test": str(args.decision_test),
+        "selection_mode": "paired_gaussian" if args.decision_test == "paired_gaussian" else "relative_z",
+        "paired_evidence": [str(source) for source in args.paired_evidence],
+        "paired_z": paired_z,
+        "paired_p": paired_p,
+        "paired_confidence": float(args.paired_confidence),
+        "paired_z_threshold": paired_z_threshold,
+        "paired_components": paired_components,
+        "support_min_rank_best_boundary": min_support_rank(best_boundary, support_ranks),
+        "support_min_rank_weakest_top": min_support_rank(weakest_top, support_ranks),
     }
     if not accepted:
         return base_row, case
@@ -436,6 +582,9 @@ def main() -> None:
             "base_seed_weight": float(args.base_seed_weight),
             "support_seed_weight": float(args.support_seed_weight),
             "same_top_docs_only": bool(args.same_top_docs_only),
+            "decision_test": str(args.decision_test),
+            "paired_confidence": float(args.paired_confidence),
+            "paired_evidence": [str(source) for source in args.paired_evidence],
             "z_margin": float(args.z_margin),
             "min_boundary_z": float(args.min_boundary_z),
         }
