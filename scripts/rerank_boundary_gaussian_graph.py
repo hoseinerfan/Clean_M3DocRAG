@@ -76,6 +76,7 @@ def parse_args() -> argparse.Namespace:
             "posterior_mixture",
             "posterior_disagreement",
             "posterior_temperature",
+            "pairwise_posterior",
         ),
         default="relative_z",
         help=(
@@ -84,7 +85,9 @@ def parse_args() -> argparse.Namespace:
             "posterior_rerank sorts the local top pages by the graph posterior directly. "
             "posterior_mixture sorts by an entropy-weighted base-prior/graph-posterior mixture. "
             "posterior_disagreement weights graph by JS(base, graph) times graph confidence. "
-            "posterior_temperature uses a rank prior plus temperature-scaled graph z-likelihood."
+            "posterior_temperature uses a rank prior plus temperature-scaled graph z-likelihood. "
+            "pairwise_posterior uses a local posterior score but applies only one "
+            "boundary-vs-top replacement if the boundary page has higher posterior odds."
         ),
     )
     parser.add_argument(
@@ -424,6 +427,93 @@ def posterior_temperature_scores(
     return scores, diagnostics
 
 
+def support_rrf_values(
+    *,
+    local_pages: list[str],
+    support_ranks: dict[str, dict[str, int]],
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    values: dict[str, float] = {}
+    for uid in local_pages:
+        value = 0.0
+        for rank_map in support_ranks.values():
+            rank = rank_map.get(uid)
+            if rank is not None and rank <= int(args.support_top_pages):
+                value = max(value, 1.0 / (float(args.support_rrf_k) + float(rank)))
+        values[uid] = value
+    return values
+
+
+def stable_sigmoid(value: float) -> float:
+    if value >= 0:
+        exp_neg = math.exp(-min(value, 700.0))
+        return 1.0 / (1.0 + exp_neg)
+    exp_pos = math.exp(max(value, -700.0))
+    return exp_pos / (1.0 + exp_pos)
+
+
+def pairwise_posterior_scores(
+    *,
+    local_pages: list[str],
+    base_rank: dict[str, int],
+    graph_scores: dict[str, float],
+    support_ranks: dict[str, dict[str, int]],
+    args: argparse.Namespace,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    base_prior = normalize({
+        uid: 1.0 / float(base_rank.get(uid, 10**9))
+        for uid in local_pages
+    })
+    graph_posterior = normalize({
+        uid: graph_scores.get(uid, 0.0)
+        for uid in local_pages
+    })
+    support_values = support_rrf_values(
+        local_pages=local_pages,
+        support_ranks=support_ranks,
+        args=args,
+    )
+    support_posterior = normalize(support_values)
+    graph_z = robust_z_scores({
+        uid: graph_scores.get(uid, 0.0)
+        for uid in local_pages
+    })
+    support_z = robust_z_scores(support_values)
+
+    graph_concentration = distribution_concentration(graph_posterior)
+    support_concentration = distribution_concentration(support_posterior)
+    graph_entropy = max(1e-12, 1.0 - graph_concentration)
+    support_entropy = max(1e-12, 1.0 - support_concentration)
+    graph_beta = 1.0 / graph_entropy
+    support_beta = 0.0 if not support_ranks else 1.0 / support_entropy
+
+    scores = {
+        uid: math.log(max(base_prior.get(uid, 0.0), 1e-300))
+        + graph_beta * graph_z.get(uid, 0.0)
+        + support_beta * support_z.get(uid, 0.0)
+        for uid in local_pages
+    }
+    diagnostics = {
+        "base_weight": None,
+        "graph_weight": None,
+        "support_weight": None,
+        "base_concentration": distribution_concentration(base_prior),
+        "graph_concentration": graph_concentration,
+        "support_concentration": support_concentration if support_ranks else None,
+        "base_graph_js": normalized_js_divergence(base_prior, graph_posterior),
+        "temperature": {
+            "graph": graph_entropy,
+            "support": support_entropy if support_ranks else None,
+        },
+        "graph_beta": graph_beta,
+        "support_beta": support_beta if support_ranks else None,
+        "base_prior": base_prior,
+        "graph_posterior": graph_posterior,
+        "support_posterior": support_posterior if support_ranks else {},
+    }
+    return scores, diagnostics
+
+
 def reorder_local_by_scores(
     *,
     base_pages: list[str],
@@ -541,6 +631,7 @@ def rerank_one(
         "posterior_disagreement",
         "posterior_temperature",
     }
+    pairwise_posterior_mode = args.decision_test == "pairwise_posterior"
     boundary_top = max(int(args.boundary_top_pages), int(args.hit_k) + 1)
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
@@ -573,6 +664,10 @@ def rerank_one(
     paired_components: dict[str, float] = {}
     posterior_scores = graph_scores
     posterior_diag: dict[str, Any] = {}
+    pairwise_score_margin: float | None = None
+    pairwise_probability: float | None = None
+    weakest_top_pairwise_score: float | None = None
+    best_boundary_pairwise_score: float | None = None
 
     if args.decision_test in posterior_modes:
         if args.decision_test == "posterior_mixture":
@@ -612,6 +707,21 @@ def rerank_one(
             base_rank=base_rank,
         )
         accepted = reordered_pages != base_pages
+    elif pairwise_posterior_mode:
+        posterior_scores, posterior_diag = pairwise_posterior_scores(
+            local_pages=local_pages,
+            base_rank=base_rank,
+            graph_scores=graph_scores,
+            support_ranks=support_ranks,
+            args=args,
+        )
+        weakest_top = min(top_pages, key=lambda uid: posterior_scores.get(uid, -math.inf))
+        best_boundary = max(boundary_pages, key=lambda uid: posterior_scores.get(uid, -math.inf))
+        weakest_top_pairwise_score = posterior_scores.get(weakest_top, -math.inf)
+        best_boundary_pairwise_score = posterior_scores.get(best_boundary, -math.inf)
+        pairwise_score_margin = best_boundary_pairwise_score - weakest_top_pairwise_score
+        pairwise_probability = stable_sigmoid(pairwise_score_margin)
+        accepted = bool(pairwise_score_margin > 0.0)
     elif args.decision_test == "paired_gaussian":
         confidence = float(args.paired_confidence)
         if not 0.5 < confidence < 1.0:
@@ -630,7 +740,7 @@ def rerank_one(
 
     weakest_top_z = z_scores.get(weakest_top, 0.0)
     best_boundary_z = z_scores.get(best_boundary, 0.0)
-    if args.decision_test in posterior_modes:
+    if args.decision_test in posterior_modes or pairwise_posterior_mode:
         pass
     elif args.decision_test == "paired_gaussian":
         accepted = bool(
@@ -675,6 +785,12 @@ def rerank_one(
         "posterior_base_graph_js": posterior_diag.get("base_graph_js"),
         "posterior_temperature": posterior_diag.get("temperature"),
         "posterior_graph_beta": posterior_diag.get("graph_beta"),
+        "posterior_support_beta": posterior_diag.get("support_beta"),
+        "posterior_support_concentration": posterior_diag.get("support_concentration"),
+        "pairwise_score_margin": pairwise_score_margin,
+        "pairwise_probability": pairwise_probability,
+        "weakest_top_pairwise_score": weakest_top_pairwise_score,
+        "best_boundary_pairwise_score": best_boundary_pairwise_score,
         "boundary_page_count": len(boundary_pages),
         "graph_edge_count": graph_diag["edge_count"],
         "decision_test": str(args.decision_test),
