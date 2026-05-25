@@ -357,6 +357,17 @@ def build_features(
         "pages_with_regions",
         "explicit_region_pages",
         "fallback_region_pages",
+        "evidence_score_positive_mean",
+        "evidence_score_positive_median",
+        "evidence_score_positive_mad",
+        "evidence_score_positive_p75",
+        "evidence_score_positive_p90",
+        "candidate_top4_max_evidence_score",
+        "candidate_top4_mean_evidence_score",
+        "candidate_top4_positive_evidence_count",
+        "candidate_top4_max_evidence_percentile",
+        "candidate_top4_mean_evidence_percentile",
+        "candidate_top4_max_evidence_robust_z",
     ]:
         if key in case_row:
             features[key] = safe_float(case_row.get(key))

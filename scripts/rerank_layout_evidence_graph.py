@@ -800,6 +800,8 @@ def evidence_scores_for_qid(
             "explicit_region_pages": 0,
             "fallback_region_pages": 0,
             "positive_query_region_count": 0,
+            "positive_evidence_page_count": 0,
+            **evidence_distribution_stats({}),
         }
 
     raw_region_scores = bm25_region_scores(
@@ -867,6 +869,7 @@ def evidence_scores_for_qid(
         "fallback_region_pages": fallback_region_pages,
         "positive_query_region_count": len(raw_region_scores),
         "positive_evidence_page_count": sum(score > 0 for score in page_scores.values()),
+        **evidence_distribution_stats(page_scores),
     }
 
 
@@ -1002,6 +1005,80 @@ def mean(values: list[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
+def quantile(values: list[float], q: float) -> float:
+    if not values:
+        return 0.0
+    ordered = sorted(float(value) for value in values)
+    if len(ordered) == 1:
+        return ordered[0]
+    pos = max(0.0, min(1.0, float(q))) * (len(ordered) - 1)
+    lo = int(math.floor(pos))
+    hi = int(math.ceil(pos))
+    if lo == hi:
+        return ordered[lo]
+    frac = pos - lo
+    return (ordered[lo] * (1.0 - frac)) + (ordered[hi] * frac)
+
+
+def percentile_rank(value: float, values: list[float]) -> float:
+    if not values:
+        return 0.0
+    return sum(float(item) <= float(value) for item in values) / float(len(values))
+
+
+def evidence_distribution_stats(evidence_scores: dict[str, float]) -> dict[str, float]:
+    positive_scores = [float(score) for score in evidence_scores.values() if float(score) > 0]
+    if not positive_scores:
+        return {
+            "evidence_score_positive_mean": 0.0,
+            "evidence_score_positive_median": 0.0,
+            "evidence_score_positive_mad": 0.0,
+            "evidence_score_positive_p75": 0.0,
+            "evidence_score_positive_p90": 0.0,
+        }
+    median = statistics.median(positive_scores)
+    deviations = [abs(score - median) for score in positive_scores]
+    return {
+        "evidence_score_positive_mean": statistics.fmean(positive_scores),
+        "evidence_score_positive_median": median,
+        "evidence_score_positive_mad": statistics.median(deviations) if deviations else 0.0,
+        "evidence_score_positive_p75": quantile(positive_scores, 0.75),
+        "evidence_score_positive_p90": quantile(positive_scores, 0.90),
+    }
+
+
+def candidate_evidence_case_features(
+    evidence_scores: dict[str, float],
+    ranked_pages: list[str],
+    hit_k: int,
+) -> dict[str, float]:
+    positive_scores = [float(score) for score in evidence_scores.values() if float(score) > 0]
+    top_scores = [float(evidence_scores.get(uid, 0.0)) for uid in ranked_pages[:hit_k]]
+    top_positive = [score for score in top_scores if score > 0]
+    if not top_scores:
+        top_scores = [0.0]
+    median = statistics.median(positive_scores) if positive_scores else 0.0
+    mad = statistics.median([abs(score - median) for score in positive_scores]) if positive_scores else 0.0
+    max_score = max(top_scores)
+    mean_score = statistics.fmean(top_scores)
+    if mad > 0:
+        robust_z = (max_score - median) / mad
+    else:
+        robust_z = 1.0 if positive_scores and max_score > median else 0.0
+    return {
+        "candidate_top4_max_evidence_score": max_score,
+        "candidate_top4_mean_evidence_score": mean_score,
+        "candidate_top4_positive_evidence_count": len(top_positive),
+        "candidate_top4_max_evidence_percentile": percentile_rank(max_score, positive_scores),
+        "candidate_top4_mean_evidence_percentile": (
+            statistics.fmean([percentile_rank(score, positive_scores) for score in top_scores])
+            if positive_scores
+            else 0.0
+        ),
+        "candidate_top4_max_evidence_robust_z": robust_z,
+    }
+
+
 def rerank_prediction(
     *,
     prediction: dict[str, dict[str, Any]],
@@ -1062,6 +1139,11 @@ def rerank_prediction(
         output[qid] = new_row
 
         candidate_ranked_pages = [uid for uid, _score in scored]
+        case_evidence_features = candidate_evidence_case_features(
+            evidence_scores,
+            candidate_ranked_pages,
+            int(args.hit_k),
+        )
         if qid in gold_by_qid:
             gold_row = gold_by_qid[qid]
             gold_pages = gold_page_uids(gold_row)
@@ -1097,6 +1179,17 @@ def rerank_prediction(
                     "fallback_region_pages": q_stats.get("fallback_region_pages", 0),
                     "positive_query_region_count": q_stats.get("positive_query_region_count", 0),
                     "positive_evidence_page_count": q_stats.get("positive_evidence_page_count", 0),
+                    **{
+                        key: q_stats.get(key, 0.0)
+                        for key in [
+                            "evidence_score_positive_mean",
+                            "evidence_score_positive_median",
+                            "evidence_score_positive_mad",
+                            "evidence_score_positive_p75",
+                            "evidence_score_positive_p90",
+                        ]
+                    },
+                    **case_evidence_features,
                 }
             )
 

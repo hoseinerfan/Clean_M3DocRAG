@@ -235,3 +235,33 @@ trade away document localization relative to the graph page-preserving base.
 For stricter risk control, add `--max-page-hit-loss 0` to require a no-page-loss router, or set a
 small budget such as `--max-page-hit-loss 7` when the goal is to improve net page hits while
 limiting regressions.
+
+Training-free self-normalized comparison:
+
+```bash
+python scripts/analyze_adaptive_evidence_router.py \
+  --router-mode self_calibrated \
+  --self-calibrated-profile all \
+  --run mmdocir "$MMDOCIR_GOLD" "$MMDOCIR_BASE" \
+  --candidate mmdocir ocr_docanchored "$MMDOCIR_OCR_DOCANCHORED" "$MMDOCIR_OCR_DOCANCHORED_CASES" \
+  --run vidore "$VIDORE_GOLD" "$VIDORE_BASE" \
+  --candidate vidore ocr_docanchored "$VIDORE_OCR_DOCANCHORED" "$VIDORE_OCR_DOCANCHORED_CASES" \
+  --hit-k 4 \
+  --max-doc-hit-loss 0 \
+  --max-page-hit-loss 0 \
+  --output-md "$ROUTER_DIR/adaptive_evidence_router_self_calibrated_all.md" \
+  --output-json "$ROUTER_DIR/adaptive_evidence_router_self_calibrated_all.json" \
+  --output-router-json "$ROUTER_DIR/adaptive_evidence_router_self_calibrated_all_rule.json" \
+  --output-routed-dir "$ROUTER_DIR/routed_predictions_self_calibrated_all"
+```
+
+This mode does not learn dataset thresholds. It compares five fixed, self-normalized evidence tests:
+
+1. `robust_z`: candidate top-4 evidence must be high relative to the query's own evidence-score median and MAD.
+2. `percentile`: candidate top-4 evidence must land in the query's own upper evidence percentile.
+3. `consensus`: the candidate must preserve base top documents while OCR evidence supports the promoted pages.
+4. `pareto`: the candidate must add OCR evidence while keeping base document agreement and at least some base top-4 page support.
+5. `qpp`: the base ranking must look locally uncertain and the candidate must be at least as committed at the top-4 boundary.
+
+For `robust_z` and `percentile`, regenerate the OCR evidence graph case JSON after this code change;
+OCR extraction itself does not need to be rerun.

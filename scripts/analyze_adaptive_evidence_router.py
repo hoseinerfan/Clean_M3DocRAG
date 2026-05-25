@@ -29,6 +29,8 @@ from analyze_layout_evidence_gate import (
 
 
 BASE_LABEL = "base"
+SELF_CALIBRATED_METHODS = ["robust_z", "percentile", "consensus", "pareto", "qpp"]
+SELF_CALIBRATED_PROFILES = SELF_CALIBRATED_METHODS + ["conservative", "balanced"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +106,22 @@ def parse_args() -> argparse.Namespace:
         "--router-json",
         default="",
         help="Optional previously learned router JSON to apply/report instead of selecting best.",
+    )
+    parser.add_argument(
+        "--router-mode",
+        choices=["learned", "self_calibrated"],
+        default="learned",
+        help=(
+            "learned searches threshold rules on the provided runs. self_calibrated uses a "
+            "fixed training-free per-query rule based on document preservation, local base "
+            "uncertainty, and query-local evidence coverage."
+        ),
+    )
+    parser.add_argument(
+        "--self-calibrated-profile",
+        choices=SELF_CALIBRATED_PROFILES + ["all"],
+        default="conservative",
+        help="Training-free router profile used when --router-mode self_calibrated.",
     )
     parser.add_argument(
         "--output-routed-dir",
@@ -436,11 +454,111 @@ def compare_rule_values(left: Any, op: str, right: Any) -> bool:
 
 
 def pair_rule_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> bool:
+    if rule.get("mode") == "self_calibrated":
+        return self_calibrated_pair_accepts(pair, rule)
     if pair["candidate_label"] != rule["candidate_label"]:
         return False
     return all(
         compare_rule_values(pair["features"].get(cond["feature"]), cond["op"], cond["value"])
         for cond in rule.get("conditions", [])
+    )
+
+
+def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> bool:
+    if pair["candidate_label"] != rule["candidate_label"]:
+        return False
+    f = pair["features"]
+    hit_k = int(rule.get("hit_k", 4))
+    profile = str(rule.get("profile", "conservative"))
+    if profile == "all":
+        return False
+
+    candidate_page_count = float(f.get("candidate_page_count", 0.0))
+    positive_evidence_page_count = float(f.get("positive_evidence_page_count", 0.0))
+    promoted_count = float(f.get("candidate_promoted_from_below4_count", 0.0))
+    base_boundary_margin = float(f.get("base_score_margin_4_5", 0.0))
+    base_head_margin = float(f.get("base_score_margin_1_2", 0.0))
+    candidate_boundary_margin = float(f.get("candidate_score_margin_4_5", 0.0))
+    doc_overlap = float(f.get("candidate_top4_doc_in_base_top4_frac", 0.0))
+    top4_positive_evidence_count = float(f.get("candidate_top4_positive_evidence_count", 0.0))
+    top4_evidence_percentile = float(f.get("candidate_top4_max_evidence_percentile", 0.0))
+    top4_evidence_robust_z = float(f.get("candidate_top4_max_evidence_robust_z", 0.0))
+
+    top_doc_safe = bool(f.get("candidate_top1_doc_in_base_top4"))
+    doc_subset = bool(f.get("candidate_top4_doc_subset_base_top4"))
+    doc_safe = top_doc_safe and doc_subset
+    promotes_pages = promoted_count > 0
+    evidence_nontrivial = positive_evidence_page_count >= max(1.0, min(float(hit_k), promoted_count))
+    evidence_selective = 0 < positive_evidence_page_count < candidate_page_count
+    base_locally_uncertain = base_boundary_margin <= base_head_margin
+    top4_has_evidence = top4_positive_evidence_count > 0
+
+    if profile == "robust_z":
+        return bool(
+            doc_safe
+            and promotes_pages
+            and evidence_selective
+            and top4_has_evidence
+            and top4_evidence_robust_z >= 1.0
+        )
+
+    if profile == "percentile":
+        return bool(
+            doc_safe
+            and promotes_pages
+            and evidence_selective
+            and top4_has_evidence
+            and top4_evidence_percentile >= 0.75
+        )
+
+    if profile == "consensus":
+        return bool(
+            doc_safe
+            and promotes_pages
+            and evidence_nontrivial
+            and evidence_selective
+        )
+
+    if profile == "pareto":
+        return bool(
+            doc_safe
+            and promotes_pages
+            and evidence_selective
+            and top4_has_evidence
+            and float(f.get("candidate_top4_in_base_top4_frac", 0.0)) > 0
+            and candidate_boundary_margin >= 0
+        )
+
+    if profile == "qpp":
+        return bool(
+            top_doc_safe
+            and doc_overlap > 0
+            and promotes_pages
+            and evidence_nontrivial
+            and evidence_selective
+            and base_locally_uncertain
+            and candidate_boundary_margin >= base_boundary_margin
+        )
+
+    if profile == "conservative":
+        return bool(
+            doc_safe
+            and promotes_pages
+            and evidence_nontrivial
+            and evidence_selective
+            and base_locally_uncertain
+        )
+
+    # Balanced stays training-free but relaxes the same-doc requirement from all candidate
+    # top-docs to the candidate top document, while still requiring selective evidence.
+    evidence_coverage = positive_evidence_page_count >= float(hit_k)
+    return bool(
+        top_doc_safe
+        and doc_overlap > 0
+        and promotes_pages
+        and evidence_coverage
+        and evidence_selective
+        and base_locally_uncertain
     )
 
 
@@ -489,8 +607,54 @@ def router_label(rules: list[dict[str, Any]]) -> str:
         return BASE_LABEL
     parts = []
     for rule in rules:
-        parts.append(f"{rule['candidate_label']} IF {rule_label(rule)}")
+        parts.append(f"{rule['candidate_label']} IF {display_rule_label(rule)}")
     return " ELSE ".join(parts) + f" ELSE {BASE_LABEL}"
+
+
+def display_rule_label(rule: dict[str, Any]) -> str:
+    if rule.get("mode") == "self_calibrated":
+        profile = str(rule.get("profile", "conservative"))
+        if profile == "robust_z":
+            return (
+                "robust_z("
+                "same_base_docs AND promoted_pages AND selective_query_evidence "
+                "AND top4_evidence_robust_z >= 1)"
+            )
+        if profile == "percentile":
+            return (
+                "percentile("
+                "same_base_docs AND promoted_pages AND selective_query_evidence "
+                "AND top4_evidence_percentile >= 0.75)"
+            )
+        if profile == "consensus":
+            return (
+                "consensus("
+                "same_base_docs AND promoted_pages AND enough_query_evidence)"
+            )
+        if profile == "pareto":
+            return (
+                "pareto("
+                "same_base_docs AND promoted_pages AND keeps_some_base_top4_page "
+                "AND top4_has_query_evidence)"
+            )
+        if profile == "qpp":
+            return (
+                "qpp("
+                "base_top_doc_preserved AND base_boundary_margin <= base_head_margin "
+                "AND candidate_margin >= base_boundary_margin)"
+            )
+        if profile == "conservative":
+            return (
+                "self_calibrated_conservative("
+                "same_base_docs AND promoted_pages AND selective_query_evidence "
+                "AND base_boundary_margin <= base_head_margin)"
+            )
+        return (
+            "self_calibrated_balanced("
+            "base_top_doc_preserved AND promoted_pages AND selective_query_evidence "
+            "AND base_boundary_margin <= base_head_margin)"
+        )
+    return rule_label(rule)
 
 
 def evaluate_candidate_rule(
@@ -501,7 +665,7 @@ def evaluate_candidate_rule(
 ) -> dict[str, Any]:
     summary = evaluate_router(bundles, [rule], recall_ks, hit_k)
     summary["candidate_label"] = rule["candidate_label"]
-    summary["rule"] = rule_label(rule)
+    summary["rule"] = display_rule_label(rule)
     summary["conditions"] = rule.get("conditions", [])
     return summary
 
@@ -662,13 +826,32 @@ def load_router_json(path: Path) -> list[dict[str, Any]]:
     for rule in rules:
         if not isinstance(rule, dict):
             continue
-        out.append(
-            {
-                "candidate_label": clean_label(str(rule.get("candidate_label", ""))),
-                "conditions": list(rule.get("conditions", [])),
-            }
-        )
+        normalized = {
+            "candidate_label": clean_label(str(rule.get("candidate_label", ""))),
+            "conditions": list(rule.get("conditions", [])),
+        }
+        for key in ["mode", "profile", "hit_k"]:
+            if key in rule:
+                normalized[key] = rule[key]
+        out.append(normalized)
     return out
+
+
+def self_calibrated_rules(
+    candidate_labels: list[str],
+    hit_k: int,
+    profile: str,
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "candidate_label": candidate_label,
+            "conditions": [],
+            "mode": "self_calibrated",
+            "profile": profile,
+            "hit_k": int(hit_k),
+        }
+        for candidate_label in candidate_labels
+    ]
 
 
 def fmt(value: Any) -> str:
@@ -754,6 +937,26 @@ def write_routed_outputs(
         print(f"saved_routed_summary: {summary_path}")
 
 
+def profile_candidates(raw_profile: str) -> list[str]:
+    if raw_profile == "all":
+        return list(SELF_CALIBRATED_METHODS)
+    return [raw_profile]
+
+
+def summary_respects_loss_caps(
+    summary: dict[str, Any],
+    base_summary: dict[str, Any],
+    *,
+    max_doc_hit_loss: int,
+    max_page_hit_loss: int,
+) -> bool:
+    if summary["doc_hit_count"] < base_summary["doc_hit_count"] - max_doc_hit_loss:
+        return False
+    if max_page_hit_loss >= 0 and summary["lost"] > max_page_hit_loss:
+        return False
+    return True
+
+
 def main() -> None:
     args = parse_args()
     if int(args.hit_k) not in args.recall_ks:
@@ -786,19 +989,50 @@ def main() -> None:
         hit_k=int(args.hit_k),
     )
 
-    best_rules = learn_candidate_rules(
-        bundles=bundles,
-        recall_ks=args.recall_ks,
-        hit_k=int(args.hit_k),
-        min_accept=int(args.min_accept),
-        max_doc_hit_loss=int(args.max_doc_hit_loss),
-        max_page_hit_loss=int(args.max_page_hit_loss),
-        pair_source_rules=int(args.pair_source_rules),
-        max_rules=int(args.max_rules),
-    )
+    best_rules: list[dict[str, Any]] = []
+    self_calibrated_summaries: dict[str, dict[str, Any]] = {}
+    selected_self_calibrated_profile = ""
+    if args.router_mode == "learned" and not args.router_json:
+        best_rules = learn_candidate_rules(
+            bundles=bundles,
+            recall_ks=args.recall_ks,
+            hit_k=int(args.hit_k),
+            min_accept=int(args.min_accept),
+            max_doc_hit_loss=int(args.max_doc_hit_loss),
+            max_page_hit_loss=int(args.max_page_hit_loss),
+            pair_source_rules=int(args.pair_source_rules),
+            max_rules=int(args.max_rules),
+        )
     if args.router_json:
         selected_rules = load_router_json(Path(args.router_json))
         selected_summary = evaluate_router(bundles, selected_rules, args.recall_ks, int(args.hit_k))
+    elif args.router_mode == "self_calibrated":
+        for profile in profile_candidates(str(args.self_calibrated_profile)):
+            rules = self_calibrated_rules(
+                candidate_labels,
+                hit_k=int(args.hit_k),
+                profile=profile,
+            )
+            summary = evaluate_router(bundles, rules, args.recall_ks, int(args.hit_k))
+            summary["profile"] = profile
+            self_calibrated_summaries[profile] = summary
+
+        eligible_profiles = {
+            profile: summary
+            for profile, summary in self_calibrated_summaries.items()
+            if summary_respects_loss_caps(
+                summary,
+                base_summary,
+                max_doc_hit_loss=int(args.max_doc_hit_loss),
+                max_page_hit_loss=int(args.max_page_hit_loss),
+            )
+        }
+        ranking_pool = eligible_profiles or self_calibrated_summaries
+        selected_self_calibrated_profile, selected_summary = max(
+            ranking_pool.items(),
+            key=lambda item: rank_summary_key(item[1]),
+        )
+        selected_rules = list(selected_summary.get("rules", []))
     else:
         selected_summary = greedy_router(
             bundles=bundles,
@@ -815,6 +1049,8 @@ def main() -> None:
     overall_rows = [{"label": BASE_LABEL, **base_summary}]
     for label in candidate_labels:
         overall_rows.append({"label": f"candidate:{label}", **candidate_summaries[label]})
+    for profile, summary in self_calibrated_summaries.items():
+        overall_rows.append({"label": f"self:{profile}", **summary})
     overall_rows.extend(
         [
             {"label": "oracle", **oracle_summary},
@@ -822,35 +1058,66 @@ def main() -> None:
         ]
     )
 
-    rule_rows = [
-        {
-            "rank": idx,
-            "candidate": item["candidate_label"],
-            "rule": item["rule"],
-            "accept_count": item["accept_count"],
-            "page_hit_count": item["page_hit_count"],
-            "doc_hit_count": item["doc_hit_count"],
-            "recovered": item["recovered"],
-            "lost": item["lost"],
-            "net_recovered": item["net_recovered"],
-            f"page_recall@{int(args.hit_k)}": item.get(f"page_recall@{int(args.hit_k)}", 0.0),
-            f"doc_recall@{int(args.hit_k)}": item.get(f"doc_recall@{int(args.hit_k)}", 0.0),
-            **{
-                key: value
-                for key, value in item.items()
-                if key.endswith(".page_hit_count")
-                or key.endswith(".doc_hit_count")
-                or key.endswith(".accept_count")
-                or ".select." in key
-            },
-        }
-        for idx, item in enumerate(best_rules, start=1)
-    ]
+    if self_calibrated_summaries:
+        ranked_self_rows = sorted(
+            self_calibrated_summaries.values(),
+            key=rank_summary_key,
+            reverse=True,
+        )
+        rule_rows = [
+            {
+                "rank": idx,
+                "candidate": ",".join(candidate_labels),
+                "rule": display_rule_label(item["rules"][0]) if item.get("rules") else BASE_LABEL,
+                "accept_count": item["accept_count"],
+                "page_hit_count": item["page_hit_count"],
+                "doc_hit_count": item["doc_hit_count"],
+                "recovered": item["recovered"],
+                "lost": item["lost"],
+                "net_recovered": item["net_recovered"],
+                f"page_recall@{int(args.hit_k)}": item.get(f"page_recall@{int(args.hit_k)}", 0.0),
+                f"doc_recall@{int(args.hit_k)}": item.get(f"doc_recall@{int(args.hit_k)}", 0.0),
+                **{
+                    key: value
+                    for key, value in item.items()
+                    if key.endswith(".page_hit_count")
+                    or key.endswith(".doc_hit_count")
+                    or key.endswith(".accept_count")
+                    or ".select." in key
+                },
+            }
+            for idx, item in enumerate(ranked_self_rows, start=1)
+        ]
+    else:
+        rule_rows = [
+            {
+                "rank": idx,
+                "candidate": item["candidate_label"],
+                "rule": item["rule"],
+                "accept_count": item["accept_count"],
+                "page_hit_count": item["page_hit_count"],
+                "doc_hit_count": item["doc_hit_count"],
+                "recovered": item["recovered"],
+                "lost": item["lost"],
+                "net_recovered": item["net_recovered"],
+                f"page_recall@{int(args.hit_k)}": item.get(f"page_recall@{int(args.hit_k)}", 0.0),
+                f"doc_recall@{int(args.hit_k)}": item.get(f"doc_recall@{int(args.hit_k)}", 0.0),
+                **{
+                    key: value
+                    for key, value in item.items()
+                    if key.endswith(".page_hit_count")
+                    or key.endswith(".doc_hit_count")
+                    or key.endswith(".accept_count")
+                    or ".select." in key
+                },
+            }
+            for idx, item in enumerate(best_rules, start=1)
+        ]
     router_rows = [
         {
             "step": idx,
             "candidate": rule["candidate_label"],
-            "rule": rule_label(rule),
+            "rule": display_rule_label(rule),
         }
         for idx, rule in enumerate(selected_rules, start=1)
     ]
@@ -916,8 +1183,12 @@ def main() -> None:
         "recall_ks": args.recall_ks,
         "max_doc_hit_loss": int(args.max_doc_hit_loss),
         "max_page_hit_loss": int(args.max_page_hit_loss),
+        "router_mode": str(args.router_mode),
+        "self_calibrated_profile": str(args.self_calibrated_profile),
+        "selected_self_calibrated_profile": selected_self_calibrated_profile,
         "base": base_summary,
         "candidates": candidate_summaries,
+        "self_calibrated": self_calibrated_summaries,
         "oracle": oracle_summary,
         "selected_router": {
             "rules": selected_rules,
@@ -948,6 +1219,9 @@ def main() -> None:
             json.dumps(
                 {
                     "hit_k": int(args.hit_k),
+                    "router_mode": str(args.router_mode),
+                    "self_calibrated_profile": str(args.self_calibrated_profile),
+                    "selected_self_calibrated_profile": selected_self_calibrated_profile,
                     "rules": selected_rules,
                     "summary": selected_summary,
                 },
