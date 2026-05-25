@@ -579,9 +579,11 @@ This is an oracle audit, not a routing method. Use it to report dataset limitati
 new evidence source is worth testing next.
 
 The Markdown output is a limitation report. It includes document-retrieval gaps, rank-boundary
-localization, same-document page confusion, deep/missing right-document pages, exact gold-page rank
-histograms, rank-5 gold counts, query-cue slices, metadata hotspots, and example failures by
-limitation group. The CSV is the best artifact for custom pivot tables.
+localization, same-document page confusion, deep/missing right-document pages, retrievability
+ceilings, primary category-by-limitation matrices, exact gold-page rank histograms, rank-5 gold
+counts, limitation-by-page-rank and limitation-by-doc-rank matrices, query-cue slices, gold-label
+shape, top-k evidence tags, score-margin diagnostics, metadata hotspots by field, and example
+failures by limitation group. The CSV is the best artifact for custom pivot tables.
 
 Observed limitation report for frozen Graph-PPR outputs:
 

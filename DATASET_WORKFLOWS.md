@@ -574,9 +574,11 @@ as routing features. The main categories are `doc_miss_topk`, `doc_missing_from_
 
 The Markdown output is intended to be the limitation report: it collapses primary categories into
 document-retrieval gaps, rank-boundary localization, same-document page confusion, and deep/missing
-right-document pages. It also reports exact failed gold-page rank histograms, rank-5 gold counts,
-query-cue slices, metadata hotspots, and example failures by limitation group. Use the CSV for
-custom pivots.
+right-document pages. It also reports retrievability ceilings, primary category-by-limitation
+matrices, exact failed gold-page rank histograms, rank-5 gold counts, limitation-by-page-rank and
+limitation-by-doc-rank matrices, query-cue slices, gold-label shape, top-k evidence tags,
+score-margin diagnostics, metadata hotspots by field, and example failures by limitation group.
+Use the CSV for custom pivots.
 
 Observed limitation report for frozen Graph-PPR outputs:
 

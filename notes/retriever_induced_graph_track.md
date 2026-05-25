@@ -346,6 +346,11 @@ Implications:
 3. OpenDocVQA needs document/pack selection before page rescue. The boundary-looking page ranks hide a document-rank problem: most failures have the gold document outside the top 4 or missing from the retrieved pool.
 4. Exact MaxSim top4-vs-rank5 is still useful as a narrow non-OCR diagnostic, but the report limits its expected ceiling: it directly targets only rank-5/right-document cases, not deep document-retrieval gaps.
 
+The regenerated report now also prints the categorical views needed for the limitation write-up:
+retrievability ceiling, failure category by limitation group, limitation by page-rank bucket,
+limitation by document-rank bucket, query-cue slices, gold-label shape, top-k evidence tags,
+score-margin diagnostics, and metadata hotspots split by metadata field.
+
 Canonical subset command shape:
 
 ```bash

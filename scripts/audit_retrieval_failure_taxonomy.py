@@ -342,6 +342,31 @@ def nested_counter_to_dict(value: dict[str, Counter[str]], limit: int = 20) -> d
     return {key: top_counter(counter, limit) for key, counter in sorted(value.items())}
 
 
+def nested_field_counter_to_dict(
+    value: dict[str, dict[str, Counter[str]]],
+    *,
+    value_limit: int = 20,
+    counter_limit: int = 20,
+) -> dict[str, dict[str, dict[str, int]]]:
+    out: dict[str, dict[str, dict[str, int]]] = {}
+    for field, value_counters in sorted(value.items()):
+        rows = sorted(
+            value_counters.items(),
+            key=lambda item: (-sum(item[1].values()), item[0]),
+        )[:value_limit]
+        out[field] = {str(key): top_counter(counter, counter_limit) for key, counter in rows}
+    return out
+
+
+def numeric_stats(values: list[float | None]) -> dict[str, float | int | None]:
+    present = sorted(float(value) for value in values if value is not None)
+    if not present:
+        return {"n": 0, "mean": None, "median": None}
+    mid = len(present) // 2
+    median = present[mid] if len(present) % 2 else (present[mid - 1] + present[mid]) / 2.0
+    return {"n": len(present), "mean": sum(present) / len(present), "median": median}
+
+
 def audit_run(
     *,
     run_label: str,
@@ -485,18 +510,40 @@ def audit_run(
     right_doc_failures = [case for case in failures if case["doc_hit_at_k"]]
     by_cue_failure: dict[str, Counter[str]] = defaultdict(Counter)
     by_cue_limitation: dict[str, Counter[str]] = defaultdict(Counter)
+    by_limitation_cue: dict[str, Counter[str]] = defaultdict(Counter)
+    by_limitation_page_bucket: dict[str, Counter[str]] = defaultdict(Counter)
+    by_limitation_doc_bucket: dict[str, Counter[str]] = defaultdict(Counter)
+    by_limitation_category: dict[str, Counter[str]] = defaultdict(Counter)
+    by_limitation_tag: dict[str, Counter[str]] = defaultdict(Counter)
     by_metadata_failure: dict[str, Counter[str]] = defaultdict(Counter)
     by_metadata_limitation: dict[str, Counter[str]] = defaultdict(Counter)
+    by_metadata_field_limitation: dict[str, dict[str, Counter[str]]] = defaultdict(lambda: defaultdict(Counter))
     metadata_value_counts: dict[str, Counter[str]] = defaultdict(Counter)
+    score_margin_by_limitation: dict[str, list[float | None]] = defaultdict(list)
+    score_gold_by_limitation: dict[str, list[float | None]] = defaultdict(list)
     for case in failures:
+        group = str(case["limitation_group"])
+        by_limitation_page_bucket[group][str(case["page_rank_bucket"])] += 1
+        by_limitation_doc_bucket[group][str(case["doc_rank_bucket"])] += 1
+        by_limitation_category[group][str(case["category"])] += 1
+        score_margin_by_limitation[group].append(case["score_margin_4_5"])
+        score_gold_by_limitation[group].append(case["score_best_gold_page"])
+        for tag in case["tags"]:
+            by_limitation_tag[group][tag] += 1
         for cue in case["query_cues"]:
             by_cue_failure[cue][case["category"]] += 1
-            by_cue_limitation[cue][case["limitation_group"]] += 1
+            by_cue_limitation[cue][group] += 1
+            by_limitation_cue[group][cue] += 1
         for field, value in case["metadata_fields"].items():
             key = f"{field}={value}"
             by_metadata_failure[key][case["category"]] += 1
-            by_metadata_limitation[key][case["limitation_group"]] += 1
+            by_metadata_limitation[key][group] += 1
+            by_metadata_field_limitation[field][value][group] += 1
             metadata_value_counts[field][value] += 1
+    missing_gold_page_count = int(failure_rank_bucket_counts.get("missing", 0))
+    doc_gap_count = int(
+        failure_limitation_group_counts.get("document_retrieval_gap", 0)
+    )
     return {
         "run": run_label,
         "gold": str(gold_path),
@@ -523,8 +570,14 @@ def audit_run(
             cue: dict(sorted(counter.items())) for cue, counter in sorted(by_cue_failure.items())
         },
         "failure_limitation_by_query_cue": nested_counter_to_dict(by_cue_limitation),
+        "failure_query_cue_by_limitation": nested_counter_to_dict(by_limitation_cue),
+        "failure_page_rank_bucket_by_limitation": nested_counter_to_dict(by_limitation_page_bucket),
+        "failure_doc_rank_bucket_by_limitation": nested_counter_to_dict(by_limitation_doc_bucket),
+        "failure_category_by_limitation": nested_counter_to_dict(by_limitation_category),
+        "failure_tag_by_limitation": nested_counter_to_dict(by_limitation_tag),
         "failure_by_metadata_value": nested_counter_to_dict(by_metadata_failure),
         "failure_limitation_by_metadata_value": nested_counter_to_dict(by_metadata_limitation),
+        "failure_limitation_by_metadata_field": nested_field_counter_to_dict(by_metadata_field_limitation),
         "failure_metadata_value_counts": {
             field: top_counter(counter) for field, counter in sorted(metadata_value_counts.items())
         },
@@ -534,6 +587,14 @@ def audit_run(
         "right_doc_failure_adjacent_or_same_doc_count": sum(
             1 for case in right_doc_failures if case["same_doc_topk"] or case["adjacent_topk"]
         ),
+        "document_retrieval_gap_failure_count": doc_gap_count,
+        "gold_page_missing_from_pool_failure_count": missing_gold_page_count,
+        "failure_score_margin_4_5_by_limitation": {
+            group: numeric_stats(values) for group, values in sorted(score_margin_by_limitation.items())
+        },
+        "failure_gold_page_score_by_limitation": {
+            group: numeric_stats(values) for group, values in sorted(score_gold_by_limitation.items())
+        },
         "page_recall_at_k": {str(k): mean(values) for k, values in sorted(page_recall.items())},
         "doc_recall_at_k": {str(k): mean(values) for k, values in sorted(doc_recall.items())},
         "top_failures": sorted(
@@ -584,6 +645,22 @@ def limitation_next_step(group: str) -> str:
         "solved_page_hit": "keep base ranking",
         "other": "inspect examples manually",
     }.get(group, "")
+
+
+def matrix_rows(
+    mapping: dict[str, dict[str, int]],
+    columns: list[str],
+) -> list[list[Any]]:
+    rows: list[list[Any]] = []
+    for row_key, counts in sorted(mapping.items(), key=lambda item: (-sum(item[1].values()), item[0])):
+        rows.append([row_key, sum(counts.values()), *[counts.get(column, 0) for column in columns]])
+    return rows
+
+
+def fmt_stat(value: float | int | None) -> str:
+    if value is None:
+        return ""
+    return f"{float(value):.4f}"
 
 
 def render_md(payload: dict[str, Any], topn: int) -> str:
@@ -641,6 +718,40 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
                 ]
             )
         lines.extend(table(["limitation", "failures", "failure_frac", "interpretation", "next_test"], group_rows))
+        lines.extend(["", "### Retrievability Ceiling", ""])
+        ceiling_rows = [
+            [
+                "already_page_hit",
+                run["page_hit_at_k_count"],
+                pct(run["page_hit_at_k_count"], run["n"]),
+                "base already succeeds; risky rerankers can only hurt these cases",
+            ],
+            [
+                "right_doc_page_miss",
+                run["right_doc_failure_count"],
+                pct(run["right_doc_failure_count"], failure_n),
+                "page-local evidence can potentially help",
+            ],
+            [
+                "right_doc_rank5_gold",
+                run["right_doc_failure_rank5_gold_count"],
+                pct(run["right_doc_failure_rank5_gold_count"], failure_n),
+                "direct target for exact top4-vs-rank5 verifier",
+            ],
+            [
+                "document_retrieval_gap",
+                run["document_retrieval_gap_failure_count"],
+                pct(run["document_retrieval_gap_failure_count"], failure_n),
+                "requires document/support discovery before page localization",
+            ],
+            [
+                "gold_page_missing_from_pool",
+                run["gold_page_missing_from_pool_failure_count"],
+                pct(run["gold_page_missing_from_pool_failure_count"], failure_n),
+                "cannot be recovered without a larger or different page pool",
+            ],
+        ]
+        lines.extend(table(["ceiling_bucket", "cases", "fraction", "meaning"], ceiling_rows))
         lines.extend(["", "### Primary Categories", ""])
         cat_rows = [
             [category, count]
@@ -650,6 +761,22 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
             )
         ]
         lines.extend(table(["failure_category", "count"], cat_rows))
+        lines.extend(["", "Failure category by limitation group:", ""])
+        category_columns = [
+            "doc_miss_topk",
+            "doc_missing_from_pool",
+            "right_doc_boundary_page",
+            "right_doc_adjacent_page",
+            "right_doc_same_doc_sibling",
+            "right_doc_late_page",
+            "right_doc_gold_page_missing_from_pool",
+        ]
+        lines.extend(
+            table(
+                ["limitation", "failures", *category_columns],
+                matrix_rows(run["failure_category_by_limitation"], category_columns),
+            )
+        )
         lines.extend(["", "### Rank Position Diagnostics", ""])
         lines.append(
             f"Rank-5 gold failures: **{run['boundary_rank5_gold_count']} / {failure_n} "
@@ -687,11 +814,86 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
         ]
         lines.extend(["", "Failed gold-document rank buckets:", ""])
         lines.extend(table(["gold_doc_rank_bucket", "count"], doc_bucket_rows))
+        lines.extend(["", "Failure type by failed gold-page rank bucket:", ""])
+        page_bucket_columns = ["boundary_5_10", "rank_11_20", "rank_21_50", "rank_51_100", "rank_gt100", "missing"]
+        lines.extend(
+            table(
+                ["limitation", "failures", *page_bucket_columns],
+                matrix_rows(run["failure_page_rank_bucket_by_limitation"], page_bucket_columns),
+            )
+        )
+        lines.extend(["", "Failure type by failed gold-document rank bucket:", ""])
+        doc_bucket_columns = ["top4", "doc_5_10", "doc_11_20", "doc_21_50", "doc_51_100", "doc_gt100", "missing"]
+        lines.extend(
+            table(
+                ["limitation", "failures", *doc_bucket_columns],
+                matrix_rows(run["failure_doc_rank_bucket_by_limitation"], doc_bucket_columns),
+            )
+        )
         lines.extend(["", "### Failure By Query Cue", ""])
+        lines.append("Query cues are multi-label, so row counts can sum above the number of failures.")
+        lines.append("")
+        cue_columns = ["numeric", "visual_table", "page_locator", "comparison", "reasoning", "uncued"]
+        lines.extend(
+            table(
+                ["limitation", "failures", *cue_columns],
+                matrix_rows(run["failure_query_cue_by_limitation"], cue_columns),
+            )
+        )
+        lines.extend(["", "Failure limitation by cue:", ""])
         cue_rows = []
         for cue, counts in run["failure_limitation_by_query_cue"].items():
-            cue_rows.append([cue, json.dumps(counts, sort_keys=True)])
-        lines.extend(table(["query_cue", "limitation_groups"], cue_rows))
+            cue_rows.append([cue, sum(counts.values()), json.dumps(counts, sort_keys=True)])
+        cue_rows.sort(key=lambda row: (-int(row[1]), str(row[0])))
+        lines.extend(table(["query_cue", "cases", "limitation_groups"], cue_rows))
+        lines.extend(["", "### Gold Label Shape And Top-K Evidence Tags", ""])
+        tag_columns = [
+            "multi_gold_page",
+            "multi_gold_doc",
+            "doc_hit_topk",
+            "doc_late",
+            "doc_missing",
+            "same_doc_in_topk",
+            "adjacent_page_in_topk",
+        ]
+        lines.extend(
+            table(
+                ["limitation", "failures", *tag_columns],
+                matrix_rows(run["failure_tag_by_limitation"], tag_columns),
+            )
+        )
+        score_rows = []
+        for group, stats in run["failure_score_margin_4_5_by_limitation"].items():
+            gold_stats = run["failure_gold_page_score_by_limitation"].get(group, {})
+            score_rows.append(
+                [
+                    group,
+                    stats.get("n", 0),
+                    fmt_stat(stats.get("mean")),
+                    fmt_stat(stats.get("median")),
+                    fmt_stat(gold_stats.get("mean")),
+                    fmt_stat(gold_stats.get("median")),
+                ]
+            )
+        if score_rows:
+            lines.extend(["", "### Score/Confidence Diagnostics", ""])
+            lines.append(
+                "`rank4_minus_rank5` is only comparable within a run; small margins mark unstable top-k boundaries."
+            )
+            lines.append("")
+            lines.extend(
+                table(
+                    [
+                        "limitation",
+                        "scored_cases",
+                        "mean_rank4_minus_rank5",
+                        "median_rank4_minus_rank5",
+                        "mean_gold_page_score",
+                        "median_gold_page_score",
+                    ],
+                    score_rows,
+                )
+            )
         if run["failure_limitation_by_metadata_value"]:
             lines.extend(["", "### Metadata Hotspots", ""])
             metadata_rows = []
@@ -699,6 +901,17 @@ def render_md(payload: dict[str, Any], topn: int) -> str:
                 metadata_rows.append([key, sum(counts.values()), json.dumps(counts, sort_keys=True)])
             metadata_rows.sort(key=lambda row: (-int(row[1]), str(row[0])))
             lines.extend(table(["metadata_value", "failures", "limitation_groups"], metadata_rows[:25]))
+        if run["failure_limitation_by_metadata_field"]:
+            lines.extend(["", "### Metadata Hotspots By Field", ""])
+            for field, value_counts in run["failure_limitation_by_metadata_field"].items():
+                if not value_counts:
+                    continue
+                lines.extend(["", f"#### {field}", ""])
+                field_rows = []
+                for value, counts in value_counts.items():
+                    field_rows.append([value, sum(counts.values()), json.dumps(counts, sort_keys=True)])
+                field_rows.sort(key=lambda row: (-int(row[1]), str(row[0])))
+                lines.extend(table(["metadata_value", "failures", "limitation_groups"], field_rows[: min(10, topn)]))
         lines.extend(["", "### Example Failures By Limitation", ""])
         for group, _count in sorted(
             run["failure_limitation_group_counts"].items(),
