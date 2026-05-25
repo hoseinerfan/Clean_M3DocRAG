@@ -1047,10 +1047,11 @@ def evidence_distribution_stats(evidence_scores: dict[str, float]) -> dict[str, 
     }
 
 
-def candidate_evidence_case_features(
+def topk_evidence_case_features(
     evidence_scores: dict[str, float],
     ranked_pages: list[str],
     hit_k: int,
+    prefix: str,
 ) -> dict[str, float]:
     positive_scores = [float(score) for score in evidence_scores.values() if float(score) > 0]
     top_scores = [float(evidence_scores.get(uid, 0.0)) for uid in ranked_pages[:hit_k]]
@@ -1066,16 +1067,50 @@ def candidate_evidence_case_features(
     else:
         robust_z = 1.0 if positive_scores and max_score > median else 0.0
     return {
-        "candidate_top4_max_evidence_score": max_score,
-        "candidate_top4_mean_evidence_score": mean_score,
-        "candidate_top4_positive_evidence_count": len(top_positive),
-        "candidate_top4_max_evidence_percentile": percentile_rank(max_score, positive_scores),
-        "candidate_top4_mean_evidence_percentile": (
+        f"{prefix}_top4_max_evidence_score": max_score,
+        f"{prefix}_top4_mean_evidence_score": mean_score,
+        f"{prefix}_top4_positive_evidence_count": len(top_positive),
+        f"{prefix}_top4_max_evidence_percentile": percentile_rank(max_score, positive_scores),
+        f"{prefix}_top4_mean_evidence_percentile": (
             statistics.fmean([percentile_rank(score, positive_scores) for score in top_scores])
             if positive_scores
             else 0.0
         ),
-        "candidate_top4_max_evidence_robust_z": robust_z,
+        f"{prefix}_top4_max_evidence_robust_z": robust_z,
+    }
+
+
+def candidate_evidence_case_features(
+    evidence_scores: dict[str, float],
+    ranked_pages: list[str],
+    hit_k: int,
+) -> dict[str, float]:
+    return topk_evidence_case_features(
+        evidence_scores,
+        ranked_pages,
+        hit_k,
+        prefix="candidate",
+    )
+
+
+def evidence_gain_case_features(
+    *,
+    candidate_features: dict[str, float],
+    base_features: dict[str, float],
+) -> dict[str, float]:
+    return {
+        "candidate_top4_max_evidence_gain_vs_base": (
+            candidate_features.get("candidate_top4_max_evidence_score", 0.0)
+            - base_features.get("base_top4_max_evidence_score", 0.0)
+        ),
+        "candidate_top4_mean_evidence_gain_vs_base": (
+            candidate_features.get("candidate_top4_mean_evidence_score", 0.0)
+            - base_features.get("base_top4_mean_evidence_score", 0.0)
+        ),
+        "candidate_top4_positive_evidence_count_gain_vs_base": (
+            candidate_features.get("candidate_top4_positive_evidence_count", 0.0)
+            - base_features.get("base_top4_positive_evidence_count", 0.0)
+        ),
     }
 
 
@@ -1144,6 +1179,16 @@ def rerank_prediction(
             candidate_ranked_pages,
             int(args.hit_k),
         )
+        base_evidence_features = topk_evidence_case_features(
+            evidence_scores,
+            ranked_pages,
+            int(args.hit_k),
+            prefix="base",
+        )
+        evidence_gain_features = evidence_gain_case_features(
+            candidate_features=case_evidence_features,
+            base_features=base_evidence_features,
+        )
         if qid in gold_by_qid:
             gold_row = gold_by_qid[qid]
             gold_pages = gold_page_uids(gold_row)
@@ -1190,6 +1235,8 @@ def rerank_prediction(
                         ]
                     },
                     **case_evidence_features,
+                    **base_evidence_features,
+                    **evidence_gain_features,
                 }
             )
 

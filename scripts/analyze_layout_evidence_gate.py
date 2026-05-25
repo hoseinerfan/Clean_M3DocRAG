@@ -368,6 +368,15 @@ def build_features(
         "candidate_top4_max_evidence_percentile",
         "candidate_top4_mean_evidence_percentile",
         "candidate_top4_max_evidence_robust_z",
+        "base_top4_max_evidence_score",
+        "base_top4_mean_evidence_score",
+        "base_top4_positive_evidence_count",
+        "base_top4_max_evidence_percentile",
+        "base_top4_mean_evidence_percentile",
+        "base_top4_max_evidence_robust_z",
+        "candidate_top4_max_evidence_gain_vs_base",
+        "candidate_top4_mean_evidence_gain_vs_base",
+        "candidate_top4_positive_evidence_count_gain_vs_base",
     ]:
         if key in case_row:
             features[key] = safe_float(case_row.get(key))

@@ -31,6 +31,7 @@ from analyze_layout_evidence_gate import (
 BASE_LABEL = "base"
 SELF_CALIBRATED_METHODS = [
     "robust_z",
+    "robust_z_evidence_gain",
     "robust_z_qpp_veto",
     "percentile",
     "consensus",
@@ -491,6 +492,11 @@ def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> 
     top4_positive_evidence_count = float(f.get("candidate_top4_positive_evidence_count", 0.0))
     top4_evidence_percentile = float(f.get("candidate_top4_max_evidence_percentile", 0.0))
     top4_evidence_robust_z = float(f.get("candidate_top4_max_evidence_robust_z", 0.0))
+    max_evidence_gain = float(f.get("candidate_top4_max_evidence_gain_vs_base", 0.0))
+    mean_evidence_gain = float(f.get("candidate_top4_mean_evidence_gain_vs_base", 0.0))
+    positive_evidence_count_gain = float(
+        f.get("candidate_top4_positive_evidence_count_gain_vs_base", 0.0)
+    )
 
     top_doc_safe = bool(f.get("candidate_top1_doc_in_base_top4"))
     doc_subset = bool(f.get("candidate_top4_doc_subset_base_top4"))
@@ -510,6 +516,13 @@ def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> 
 
     if profile == "robust_z":
         return robust_z_accept
+
+    if profile == "robust_z_evidence_gain":
+        return bool(
+            robust_z_accept
+            and max_evidence_gain > 0
+            and (mean_evidence_gain >= 0 or positive_evidence_count_gain >= 0)
+        )
 
     if profile == "robust_z_qpp_veto":
         relative_boundary_ok = (
@@ -646,6 +659,12 @@ def display_rule_label(rule: dict[str, Any]) -> str:
                 "robust_z("
                 "same_base_docs AND promoted_pages AND selective_query_evidence "
                 "AND top4_evidence_robust_z >= 1)"
+            )
+        if profile == "robust_z_evidence_gain":
+            return (
+                "robust_z_evidence_gain("
+                "robust_z AND candidate_top4_max_evidence > base_top4_max_evidence "
+                "AND candidate_mean_or_count_evidence >= base)"
             )
         if profile == "robust_z_qpp_veto":
             return (
