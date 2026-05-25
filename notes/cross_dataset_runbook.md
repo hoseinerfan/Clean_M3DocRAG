@@ -507,6 +507,29 @@ This clusters observable features without gold labels. Labels are used only afte
 estimate held-out cluster utility and decide whether a cluster should route to the candidate or keep
 base.
 
+### Failure Taxonomy Audit
+
+After a full Graph-PPR result exists, categorize its remaining page-hit failures:
+
+```bash
+FAILURE_AUDIT_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/failure_taxonomy
+mkdir -p "$FAILURE_AUDIT_DIR"
+
+python scripts/audit_retrieval_failure_taxonomy.py \
+  --run vidore "$VIDORE_DATA/MMQA_dev.jsonl" "$VIDORE_OUT/vidore-v3_dev_graph_ppr_base.prediction.json" \
+  --run mmdocir "$MMDOCIR_DATA/MMQA_dev.jsonl" "$MMDOCIR_OUT/mmdocir_dev_graph_ppr_base.prediction.json" \
+  --run opendocvqa "$OPENDOC_DATA/MMQA_dev.jsonl" "$OPENDOC_OUT/opendocvqa_denseheavy125_medium_both.prediction.json" \
+  --hit-k 4 \
+  --boundary-k 10 \
+  --adjacent-window 2 \
+  --output-json "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy.json" \
+  --output-md "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy.md" \
+  --output-csv "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy_cases.csv"
+```
+
+This is an oracle audit, not a routing method. Use it to report dataset limitations and decide which
+new evidence source is worth testing next.
+
 ### MMLongBench DocQA
 
 ```bash
