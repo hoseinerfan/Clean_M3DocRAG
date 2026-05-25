@@ -588,6 +588,14 @@ Observed limitation report for frozen Graph-PPR outputs:
 | MMDocIR | 1658 | 1114 | 1353 | 544 | 305 / 544 = 56.1% | 74 / 544 = 13.6% | 147 / 544 = 27.0% | 18 / 544 = 3.3% |
 | OpenDocVQA | 41017 | 26173 | 26901 | 14844 | 14116 / 14844 = 95.1% | 119 / 14844 = 0.8% | 597 / 14844 = 4.0% | 12 / 14844 = 0.1% |
 
+Primary failure category split from the latest rich run:
+
+| Dataset | doc_miss_topk | doc_missing_from_pool | right_doc_boundary_page | right_doc_adjacent_page | right_doc_same_doc_sibling | right_doc_late_page | right_doc_gold_page_missing_from_pool |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| ViDoRe V3 | 1235 | 73 | 2228 | 335 | 1005 | 241 | 14 |
+| MMDocIR | 248 | 57 | 147 | 15 | 59 | 15 | 3 |
+| OpenDocVQA | 13552 | 564 | 597 | 5 | 114 | 11 | 1 |
+
 Rank and document-position diagnostics:
 
 | Dataset | rank-5 gold failures | right-doc failures | rank-5 gold within right-doc failures | dominant failed gold-doc bucket |
