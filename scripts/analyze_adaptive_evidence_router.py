@@ -120,6 +120,19 @@ def load_cases_optional(raw_path: str) -> dict[str, dict[str, Any]]:
     return load_case_json(Path(path_text))
 
 
+def require_existing_file(path: Path, role: str) -> None:
+    if path.is_file():
+        return
+    hint = ""
+    if str(path).startswith("/path/to/"):
+        hint = (
+            " This is still a placeholder path. Replace it with a real prediction file, "
+            "or remove that --candidate line. Use '-' only for CASE_JSON, not for the "
+            "candidate prediction JSON."
+        )
+    raise FileNotFoundError(f"Missing {role}: {path}.{hint}")
+
+
 def adaptive_query_features(question: str) -> dict[str, Any]:
     q = question.lower()
     return {
@@ -170,7 +183,11 @@ def load_inputs(
             raise ValueError("Run label cannot be empty.")
         if label in runs:
             raise ValueError(f"Duplicate run label: {label}")
-        runs[label] = (Path(gold), Path(baseline))
+        gold_path = Path(gold)
+        baseline_path = Path(baseline)
+        require_existing_file(gold_path, f"gold JSONL for run '{label}'")
+        require_existing_file(baseline_path, f"baseline prediction for run '{label}'")
+        runs[label] = (gold_path, baseline_path)
     if not runs:
         raise ValueError("Provide at least one --run.")
 
@@ -184,7 +201,17 @@ def load_inputs(
         if key in seen:
             raise ValueError(f"Duplicate candidate for run {run_label}: {candidate_label}")
         seen.add(key)
-        candidates[run_label].append((candidate_label, Path(prediction), case_json))
+        prediction_path = Path(prediction)
+        require_existing_file(
+            prediction_path,
+            f"candidate prediction for run '{run_label}' candidate '{candidate_label}'",
+        )
+        if str(case_json).strip() not in {"", "-"}:
+            require_existing_file(
+                Path(case_json),
+                f"case JSON for run '{run_label}' candidate '{candidate_label}'",
+            )
+        candidates[run_label].append((candidate_label, prediction_path, case_json))
     missing = sorted(label for label in runs if not candidates.get(label))
     if missing:
         raise ValueError(f"Every run needs at least one --candidate. Missing: {', '.join(missing)}")
