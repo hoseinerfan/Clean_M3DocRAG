@@ -22,6 +22,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--base-prediction", required=True)
     parser.add_argument("--candidate-prediction", required=True)
+    parser.add_argument(
+        "--support-prediction",
+        action="append",
+        default=[],
+        metavar="LABEL=PATH",
+        help=(
+            "Optional support prediction JSON. Repeat to add weak graph views. "
+            "Support views never provide output rows; they only vote for candidate promotions."
+        ),
+    )
     parser.add_argument("--gold", default="", help="Optional gold JSONL for reporting metrics.")
     parser.add_argument("--hit-k", type=int, default=4)
     parser.add_argument(
@@ -89,6 +99,36 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--support-page-rank-max",
+        type=int,
+        default=0,
+        help=(
+            "Count a support page vote when the promoted page appears within this support "
+            "page rank. Use 0 to disable page support votes."
+        ),
+    )
+    parser.add_argument(
+        "--support-doc-rank-max",
+        type=int,
+        default=0,
+        help=(
+            "Count a support doc vote when the promoted page's doc appears within this support "
+            "doc rank. Use 0 to disable doc support votes."
+        ),
+    )
+    parser.add_argument(
+        "--min-support-page-votes",
+        type=int,
+        default=0,
+        help="Minimum support views that must contain the promoted page within --support-page-rank-max.",
+    )
+    parser.add_argument(
+        "--min-support-doc-votes",
+        type=int,
+        default=0,
+        help="Minimum support views that must contain the promoted doc within --support-doc-rank-max.",
+    )
+    parser.add_argument(
         "--mode",
         choices=["swap_promoted", "use_candidate"],
         default="swap_promoted",
@@ -125,6 +165,22 @@ def parse_args() -> argparse.Namespace:
         help="Optional path to write per-qid diagnostics outside the summary JSON.",
     )
     return parser.parse_args()
+
+
+def parse_labeled_path(value: str) -> tuple[str, Path]:
+    raw = str(value).strip()
+    if not raw:
+        raise ValueError("Empty labeled path")
+    if "=" in raw:
+        label, path = raw.split("=", 1)
+        label = label.strip()
+        parsed = Path(path.strip())
+    else:
+        parsed = Path(raw)
+        label = parsed.stem
+    if not label:
+        label = parsed.stem
+    return label, parsed
 
 
 def load_prediction(path: Path) -> dict[str, dict[str, Any]]:
@@ -267,6 +323,42 @@ def score_margin(rows: list[Any], rank: int) -> float | None:
     if left is None or right is None:
         return None
     return float(left) - float(right)
+
+
+def support_votes_for_uid(
+    uid: str,
+    support_view_rows: list[tuple[str, dict[str, Any] | None]],
+    *,
+    page_rank_max: int,
+    doc_rank_max: int,
+) -> dict[str, Any]:
+    doc_id, _page_idx = parse_page_uid(uid)
+    page_vote_sources: list[str] = []
+    doc_vote_sources: list[str] = []
+    view_ranks: dict[str, dict[str, int | None]] = {}
+
+    for label, row in support_view_rows:
+        if row is None:
+            view_ranks[label] = {"page_rank": None, "doc_rank": None}
+            continue
+        rows = prediction_rows(row)
+        pages = ranked_page_uids(rows)
+        docs = ranked_doc_ids(rows)
+        page_rank = rank_map(pages).get(uid)
+        doc_rank = rank_map(docs).get(doc_id)
+        view_ranks[label] = {"page_rank": page_rank, "doc_rank": doc_rank}
+        if page_rank_max > 0 and page_rank is not None and page_rank <= page_rank_max:
+            page_vote_sources.append(label)
+        if doc_rank_max > 0 and doc_rank is not None and doc_rank <= doc_rank_max:
+            doc_vote_sources.append(label)
+
+    return {
+        "support_page_vote_count": len(page_vote_sources),
+        "support_doc_vote_count": len(doc_vote_sources),
+        "support_page_vote_sources": page_vote_sources,
+        "support_doc_vote_sources": doc_vote_sources,
+        "support_view_ranks": view_ranks,
+    }
 
 
 def gold_page_uids(row: dict[str, Any]) -> set[str]:
@@ -424,6 +516,7 @@ def reject_promotion_reason(
     base_page_rank_by_uid: dict[str, int],
     base_doc_rank_by_id: dict[str, int],
     candidate_rows: list[Any],
+    support_view_rows: list[tuple[str, dict[str, Any] | None]],
     args: argparse.Namespace,
 ) -> tuple[str | None, dict[str, Any]]:
     doc_id, _page_idx = parse_page_uid(uid)
@@ -438,6 +531,13 @@ def reject_promotion_reason(
         "base_doc_rank": doc_rank,
         "candidate_score_margin": margin,
     }
+    support_detail = support_votes_for_uid(
+        uid,
+        support_view_rows,
+        page_rank_max=int(args.support_page_rank_max),
+        doc_rank_max=int(args.support_doc_rank_max),
+    )
+    detail.update(support_detail)
 
     if base_rank is None:
         return "promoted_page_missing_from_base_pool", detail
@@ -455,6 +555,12 @@ def reject_promotion_reason(
             return "candidate_score_margin_missing", detail
         if margin < float(args.min_candidate_score_margin):
             return "candidate_score_margin_below_min", detail
+    if int(args.min_support_page_votes) > 0:
+        if int(detail["support_page_vote_count"]) < int(args.min_support_page_votes):
+            return "support_page_votes_below_min", detail
+    if int(args.min_support_doc_votes) > 0:
+        if int(detail["support_doc_vote_count"]) < int(args.min_support_doc_votes):
+            return "support_doc_votes_below_min", detail
     return None, detail
 
 
@@ -462,6 +568,7 @@ def select_promotions(
     *,
     base_row: dict[str, Any],
     candidate_row: dict[str, Any] | None,
+    support_view_rows: list[tuple[str, dict[str, Any] | None]],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     base_rows = prediction_rows(base_row)
@@ -495,6 +602,8 @@ def select_promotions(
         "topk_page_overlap": page_overlap,
         "topk_doc_overlap": doc_overlap,
         "base_boundary_score_margin": base_boundary_margin,
+        "support_view_count": len(support_view_rows),
+        "support_labels": [label for label, _row in support_view_rows],
     }
 
     if candidate_row is None:
@@ -537,6 +646,7 @@ def select_promotions(
             base_page_rank_by_uid=base_page_rank_by_uid,
             base_doc_rank_by_id=base_doc_rank_by_id,
             candidate_rows=candidate_rows,
+            support_view_rows=support_view_rows,
             args=args,
         )
         if reason is None:
@@ -633,6 +743,10 @@ def build_output_row(
         "promoted_doc_max_base_rank": int(args.promoted_doc_max_base_rank),
         "max_base_score_margin": args.max_base_score_margin,
         "min_candidate_score_margin": args.min_candidate_score_margin,
+        "support_page_rank_max": int(args.support_page_rank_max),
+        "support_doc_rank_max": int(args.support_doc_rank_max),
+        "min_support_page_votes": int(args.min_support_page_votes),
+        "min_support_doc_votes": int(args.min_support_doc_votes),
         "mode": str(args.mode),
         "insert_position": int(args.insert_position),
         "max_promotions": int(args.max_promotions),
@@ -699,6 +813,12 @@ def summarize_cases(
 ) -> dict[str, Any]:
     selection_counts = Counter(str(case["selected_source"]) for case in cases)
     reason_counts = Counter(str(case["selection_reason"]) for case in cases)
+    accepted_promotion_details = [
+        item
+        for case in cases
+        for item in case.get("accepted_promoted_pages", [])
+        if isinstance(item, dict)
+    ]
     rejected_promotion_counts: Counter[str] = Counter()
     for case in cases:
         for item in case.get("rejected_promoted_pages", []):
@@ -727,6 +847,18 @@ def summarize_cases(
         "mean_topk_doc_overlap": mean_or_none(
             [float(case["topk_doc_overlap"]) for case in cases]
         ),
+        "mean_accepted_support_page_vote_count": mean_or_none(
+            [
+                float(item.get("support_page_vote_count", 0))
+                for item in accepted_promotion_details
+            ]
+        ),
+        "mean_accepted_support_doc_vote_count": mean_or_none(
+            [
+                float(item.get("support_doc_vote_count", 0))
+                for item in accepted_promotion_details
+            ]
+        ),
         "config": {
             "hit_k": int(args.hit_k),
             "recall_k": [int(k) for k in args.recall_ks],
@@ -738,6 +870,10 @@ def summarize_cases(
             "promoted_doc_max_base_rank": int(args.promoted_doc_max_base_rank),
             "max_base_score_margin": args.max_base_score_margin,
             "min_candidate_score_margin": args.min_candidate_score_margin,
+            "support_page_rank_max": int(args.support_page_rank_max),
+            "support_doc_rank_max": int(args.support_doc_rank_max),
+            "min_support_page_votes": int(args.min_support_page_votes),
+            "min_support_doc_votes": int(args.min_support_doc_votes),
             "mode": str(args.mode),
             "insert_position": int(args.insert_position),
             "max_promotions": int(args.max_promotions),
@@ -746,6 +882,7 @@ def summarize_cases(
         },
         "base_prediction": str(args.base_prediction),
         "candidate_prediction": str(args.candidate_prediction),
+        "support_predictions": list(args.support_prediction),
         "gold": str(args.gold) if args.gold else "",
     }
 
@@ -860,6 +997,10 @@ def main() -> None:
     args = parse_args()
     base = load_prediction(Path(args.base_prediction))
     candidate = load_prediction(Path(args.candidate_prediction))
+    support_inputs = [parse_labeled_path(value) for value in args.support_prediction]
+    support_predictions = [
+        (label, load_prediction(path)) for label, path in support_inputs
+    ]
     gold_by_qid = (
         {str(row.get("qid", "")).strip(): row for row in read_jsonl(Path(args.gold))}
         if args.gold
@@ -872,7 +1013,15 @@ def main() -> None:
     for qid in sorted(base):
         base_row = base[qid]
         candidate_row = candidate.get(qid)
-        decision = select_promotions(base_row=base_row, candidate_row=candidate_row, args=args)
+        support_view_rows = [
+            (label, prediction.get(qid)) for label, prediction in support_predictions
+        ]
+        decision = select_promotions(
+            base_row=base_row,
+            candidate_row=candidate_row,
+            support_view_rows=support_view_rows,
+            args=args,
+        )
         output_row = build_output_row(
             qid=qid,
             base_row=base_row,
