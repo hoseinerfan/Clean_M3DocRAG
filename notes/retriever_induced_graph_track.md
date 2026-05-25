@@ -316,8 +316,8 @@ Current interpretation:
 
 1. More graph/rank routing alone does not separate valid boundary pages from same-document distractors.
 2. Direct query-page content evidence is the first independent signal that improves MMDocIR without destroying ViDoRe.
-3. `pairwise_content_posterior` is the current main boundary method; `pairwise_counterfactual_content_posterior` is a conservative ablation.
-4. Whole-dataset testing should start with OpenDocVQA, using `--doc-pages-jsonl` and no support file if no independent graph-view support prediction exists.
+3. `pairwise_content_posterior` is the current main hard-subset boundary method; `pairwise_counterfactual_content_posterior` is a conservative ablation.
+4. Do not apply `pairwise_content_posterior` unconditionally to full datasets. The full OpenDocVQA no-support run shows it is unsafe when the base already has many correct top-4 pages.
 
 Canonical subset command shape:
 
@@ -337,3 +337,15 @@ python scripts/rerank_boundary_gaussian_graph.py \
 
 When no independent support prediction exists, omit the `--support ...` line rather than passing the
 base prediction as support.
+
+Full OpenDocVQA no-support result:
+
+| run | qids | accepted | base page hit@4 | candidate page hit@4 | recovered | lost | net | page recall@4 | doc recall@4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `opendocvqa_boundary_pairwise_content_posterior_nosupport` | 41017 | 10209 | 26173 | 22592 | 146 | 3727 | -3581 | 0.5027 | 0.5683 |
+
+Interpretation: this is a negative full-dev result. The method was learned from a hard subset where
+base top-4 page hit was absent or weak, so losses were structurally limited. On full OpenDocVQA, base
+page hit@4 is already high; unconditional boundary swaps destroy many correct base top-4 pages. Treat
+content posterior as a diagnostic/rescue component until there is a non-oracle selector for when the
+base top-4 page set is likely wrong.

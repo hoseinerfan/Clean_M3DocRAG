@@ -121,7 +121,7 @@ Interpretation:
 | SciEGQA-Bench | yes | yes | PDF text | yes | none |
 | ViDoRe V3 | yes | yes | manifest/PDF text | yes | none |
 | ViDoSeek | yes | yes | PDF text | yes | none |
-| OpenDocVQA | yes | yes | OCR-backed page text | yes | run/evaluate `pairwise_content_posterior` boundary test on full dev |
+| OpenDocVQA | yes | yes | OCR-backed page text | yes | keep Graph-PPR as full-dev result; unconditional `pairwise_content_posterior` was negative |
 | MMLongBench DocQA | yes | no | `page_text_list` in manifest | no | wait for embeddings, then run dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |
 | DUDE | scaffolded | no | DUDE OCR in manifest | no | prepare val split, then embed, dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |
 

@@ -50,7 +50,7 @@ This corresponds to the row we call `denseheavy125_medium_both`. ViDoSeek has a 
 | SciEGQA | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
 | ViDoRe V3 | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
 | ViDoSeek | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
-| OpenDocVQA | Full OCR-backed Graph-PPR completed: page R@4 `58.63%`, page R@20 `76.62%`, doc R@4 `60.35%`, doc R@20 `79.22%`. | Run/evaluate full-dev `pairwise_content_posterior`; omit support if no independent graph-view support prediction exists. |
+| OpenDocVQA | Full OCR-backed Graph-PPR completed. Full-dev no-support `pairwise_content_posterior` was negative: page hit@4 `26173 -> 22592`, net `-3581`. | Keep Graph-PPR as the full-dev result; use content posterior only as a hard-subset diagnostic/rescue component. |
 | MMLongBench DocQA | Prepared: 708 docs, 30,917 pages, 14,466 QAs, 19 missing gold pages; embedding job was submitted. | Check embedding completion, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
 | DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. | Embed pages, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
 
@@ -436,20 +436,24 @@ page_hit@4 26173
 doc_hit@4 26901
 ```
 
-Next full-dev boundary test:
+Negative full-dev boundary test:
 
-```bash
-python scripts/rerank_boundary_gaussian_graph.py \
-  --gold "$OPENDOC_GOLD" \
-  --base-prediction "$OPENDOC_BASE" \
-  --doc-pages-jsonl "$OPENDOC_DOC_PAGES" \
-  --decision-test pairwise_content_posterior \
-  --hit-k 4 \
-  --boundary-top-pages 10 \
-  --output-prediction-json "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.prediction.json" \
-  --output-summary-json "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.summary.json" \
-  --output-case-json "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.cases.json"
+```text
+opendocvqa_boundary_pairwise_content_posterior_nosupport
+n 41017
+accepted 10209
+base_page_hit_at_4_count 26173
+page_hit_at_4_count 22592
+recovered 146
+lost 3727
+net_recovered -3581
+page_recall@4 0.5027
+doc_recall@4 0.5683
 ```
+
+Conclusion: do not use unconditional boundary reranking on full OpenDocVQA. Keep the OCR-backed
+Graph-PPR prediction as the full-dataset result until a non-oracle selector can identify likely
+right-document/wrong-page cases before applying boundary rescue.
 
 ### MMLongBench DocQA
 
