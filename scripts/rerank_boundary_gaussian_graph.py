@@ -69,11 +69,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--decision-test",
-        choices=("relative_z", "paired_gaussian"),
+        choices=("relative_z", "paired_gaussian", "posterior_rerank"),
         default="relative_z",
         help=(
             "Swap decision. relative_z keeps the original graph-z boundary test. "
-            "paired_gaussian uses a one-sided Gaussian test over standardized paired evidence."
+            "paired_gaussian uses a one-sided Gaussian test over standardized paired evidence. "
+            "posterior_rerank sorts the local top pages by the graph posterior directly."
         ),
     )
     parser.add_argument(
@@ -257,6 +258,21 @@ def best_paired_swap(
     return best_top, best_boundary, best_z, best_components
 
 
+def reorder_local_by_posterior(
+    *,
+    base_pages: list[str],
+    local_pages: list[str],
+    graph_scores: dict[str, float],
+    base_rank: dict[str, int],
+) -> list[str]:
+    local_set = set(local_pages)
+    reordered_local = sorted(
+        local_pages,
+        key=lambda uid: (-graph_scores.get(uid, 0.0), base_rank.get(uid, 10**9)),
+    )
+    return reordered_local + [uid for uid in base_pages if uid not in local_set]
+
+
 def local_graph_scores(
     *,
     local_pages: list[str],
@@ -357,7 +373,7 @@ def rerank_one(
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
     boundary_pages = base_pages[int(args.hit_k) : boundary_top]
-    if args.same_top_docs_only:
+    if args.same_top_docs_only and args.decision_test != "posterior_rerank":
         top_docs = {page_doc(uid) for uid in top_pages}
         boundary_pages = [uid for uid in boundary_pages if page_doc(uid) in top_docs]
     if not boundary_pages:
@@ -384,7 +400,17 @@ def rerank_one(
     paired_z_threshold: float | None = None
     paired_components: dict[str, float] = {}
 
-    if args.decision_test == "paired_gaussian":
+    if args.decision_test == "posterior_rerank":
+        weakest_top = min(top_pages, key=lambda uid: z_scores.get(uid, -10**9))
+        best_boundary = max(boundary_pages, key=lambda uid: z_scores.get(uid, -10**9))
+        reordered_pages = reorder_local_by_posterior(
+            base_pages=base_pages,
+            local_pages=local_pages,
+            graph_scores=graph_scores,
+            base_rank=base_rank,
+        )
+        accepted = reordered_pages != base_pages
+    elif args.decision_test == "paired_gaussian":
         confidence = float(args.paired_confidence)
         if not 0.5 < confidence < 1.0:
             raise ValueError("--paired-confidence must be between 0.5 and 1.0")
@@ -402,7 +428,9 @@ def rerank_one(
 
     weakest_top_z = z_scores.get(weakest_top, 0.0)
     best_boundary_z = z_scores.get(best_boundary, 0.0)
-    if args.decision_test == "paired_gaussian":
+    if args.decision_test == "posterior_rerank":
+        pass
+    elif args.decision_test == "paired_gaussian":
         accepted = bool(
             best_boundary_z >= float(args.min_boundary_z)
             and paired_z is not None
@@ -428,10 +456,20 @@ def rerank_one(
         "best_boundary_z": best_boundary_z,
         "z_margin": best_boundary_z - weakest_top_z,
         "local_page_count": len(local_pages),
+        "posterior_rerank_changed_count": (
+            sum(1 for left, right in zip(local_pages, reordered_pages[: len(local_pages)]) if left != right)
+            if args.decision_test == "posterior_rerank"
+            else None
+        ),
+        "posterior_top_pages": (
+            reordered_pages[: min(10, len(local_pages))]
+            if args.decision_test == "posterior_rerank"
+            else []
+        ),
         "boundary_page_count": len(boundary_pages),
         "graph_edge_count": graph_diag["edge_count"],
         "decision_test": str(args.decision_test),
-        "selection_mode": "paired_gaussian" if args.decision_test == "paired_gaussian" else "relative_z",
+        "selection_mode": str(args.decision_test),
         "paired_evidence": [str(source) for source in args.paired_evidence],
         "paired_z": paired_z,
         "paired_p": paired_p,
@@ -444,13 +482,14 @@ def rerank_one(
     if not accepted:
         return base_row, case
 
-    reordered_pages = list(base_pages)
-    top_idx = reordered_pages.index(weakest_top)
-    boundary_idx = reordered_pages.index(best_boundary)
-    reordered_pages[top_idx], reordered_pages[boundary_idx] = (
-        reordered_pages[boundary_idx],
-        reordered_pages[top_idx],
-    )
+    if args.decision_test != "posterior_rerank":
+        reordered_pages = list(base_pages)
+        top_idx = reordered_pages.index(weakest_top)
+        boundary_idx = reordered_pages.index(best_boundary)
+        reordered_pages[top_idx], reordered_pages[boundary_idx] = (
+            reordered_pages[boundary_idx],
+            reordered_pages[top_idx],
+        )
 
     item_map = prediction_item_by_uid(base_row)
     output_items = [item_map[uid] for uid in reordered_pages if uid in item_map]
