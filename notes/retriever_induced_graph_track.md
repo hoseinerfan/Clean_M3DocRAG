@@ -255,16 +255,18 @@ python scripts/analyze_adaptive_evidence_router.py \
   --output-routed-dir "$ROUTER_DIR/routed_predictions_self_calibrated_all"
 ```
 
-This mode does not learn dataset thresholds. It compares five fixed, self-normalized evidence tests:
+This mode does not learn dataset thresholds. It compares fixed, self-normalized evidence tests:
 
 1. `robust_z`: candidate top-4 evidence must be high relative to the query's own evidence-score median and MAD.
-2. `robust_z_graph_consensus`: `robust_z` plus non-OCR support; at least one OCR-promoted top-4 page must appear in the top-20 of an optional support ranking provided with `--support`.
-3. `robust_z_evidence_gain`: `robust_z` plus a base-vs-candidate evidence dominance test; the candidate top-4 must have stronger query-local OCR evidence than the base top-4.
-4. `robust_z_qpp_veto`: `robust_z` plus a fixed margin veto requiring the base to be locally uncertain and the candidate top-4 boundary not to collapse relative to either the base boundary or the candidate head margin.
-5. `percentile`: candidate top-4 evidence must land in the query's own upper evidence percentile.
-6. `consensus`: the candidate must preserve base top documents while OCR evidence supports the promoted pages.
-7. `pareto`: the candidate must add OCR evidence while keeping base document agreement and at least some base top-4 page support.
-8. `qpp`: the base ranking must look locally uncertain and the candidate must be at least as committed at the top-4 boundary.
+2. `robust_z_graph_hit_consensus`: `robust_z` plus non-OCR support; at least one OCR-promoted top-4 page must appear in the support ranking's top-4.
+3. `robust_z_graph_top10_consensus`: same as above, but the support ranking can confirm the promoted page by top-10.
+4. `robust_z_graph_consensus`: same as above, but the support ranking can confirm the promoted page by top-20.
+5. `robust_z_evidence_gain`: `robust_z` plus a base-vs-candidate evidence dominance test; the candidate top-4 must have stronger query-local OCR evidence than the base top-4.
+6. `robust_z_qpp_veto`: `robust_z` plus a fixed margin veto requiring the base to be locally uncertain and the candidate top-4 boundary not to collapse relative to either the base boundary or the candidate head margin.
+7. `percentile`: candidate top-4 evidence must land in the query's own upper evidence percentile.
+8. `consensus`: the candidate must preserve base top documents while OCR evidence supports the promoted pages.
+9. `pareto`: the candidate must add OCR evidence while keeping base document agreement and at least some base top-4 page support.
+10. `qpp`: the base ranking must look locally uncertain and the candidate must be at least as committed at the top-4 boundary.
 
 For `robust_z` and `percentile`, regenerate the OCR evidence graph case JSON after this code change;
 OCR extraction itself does not need to be rerun.
