@@ -40,6 +40,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hit-k", type=int, default=4)
     parser.add_argument("--boundary-rank", type=int, default=5)
     parser.add_argument("--recall-k", dest="recall_ks", type=int, nargs="+", default=DEFAULT_RECALL_KS)
+    parser.add_argument(
+        "--qid-jsonl",
+        default="",
+        help=(
+            "Optional qid filter. Accepts JSONL rows with a qid field, a JSON list/object, "
+            "or plain one-qid-per-line text."
+        ),
+    )
+    parser.add_argument("--qid-field", default="qid")
     parser.add_argument("--max-qids", type=int, default=0)
     parser.add_argument("--sample-qids", type=int, default=0)
     parser.add_argument("--sample-seed", type=int, default=13)
@@ -136,6 +145,50 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def load_qid_filter(path: Path, qid_field: str) -> set[str]:
+    text = path.read_text(encoding="utf-8").strip()
+    if not text:
+        return set()
+    qids: set[str] = set()
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, dict):
+                value = item.get(qid_field, item.get("qid"))
+            else:
+                value = item
+            if value is not None and str(value).strip():
+                qids.add(str(value).strip())
+        return qids
+    if isinstance(payload, dict):
+        if qid_field in payload or "qid" in payload:
+            value = payload.get(qid_field, payload.get("qid"))
+            if value is not None and str(value).strip():
+                qids.add(str(value).strip())
+            return qids
+        return {str(key).strip() for key in payload if str(key).strip()}
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            item = line
+        if isinstance(item, dict):
+            value = item.get(qid_field, item.get("qid"))
+        else:
+            value = item
+        if value is not None and str(value).strip():
+            qids.add(str(value).strip())
+    return qids
 
 
 def load_prediction(path: Path) -> dict[str, dict[str, Any]]:
@@ -699,6 +752,9 @@ def evaluate(
 
 def iter_qids(gold: dict[str, Any], base: dict[str, Any], args: argparse.Namespace) -> list[str]:
     qids = sorted(set(gold) & set(base))
+    if str(args.qid_jsonl).strip():
+        qid_filter = load_qid_filter(Path(args.qid_jsonl), str(args.qid_field))
+        qids = [qid for qid in qids if qid in qid_filter]
     if int(args.num_shards) > 1:
         if int(args.shard_index) < 0 or int(args.shard_index) >= int(args.num_shards):
             raise ValueError("--shard-index must be in [0, num_shards).")
@@ -801,6 +857,9 @@ def main() -> None:
             "vlm_model_type": str(args.vlm_model_type) or None,
             "vlm_bits": int(args.vlm_bits),
             "dry_run": bool(args.dry_run),
+            "qid_jsonl": str(args.qid_jsonl) if str(args.qid_jsonl).strip() else "",
+            "qid_field": str(args.qid_field),
+            "filtered_qid_count": len(qids),
             "num_shards": int(args.num_shards),
             "shard_index": int(args.shard_index),
             "max_qids": int(args.max_qids),
