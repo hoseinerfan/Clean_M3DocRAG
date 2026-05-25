@@ -185,3 +185,48 @@ The script searches single-threshold and two-condition conjunction rules using o
 5. Query cues such as numeric/page/visual wording.
 
 The default rule filter enforces `--max-doc-hit-loss 0`, so the selected gate must preserve base document-hit count while improving page localization when possible. This supports a thesis claim of risk-calibrated selective OCR evidence rather than globally applying an unstable reranker.
+
+### Adaptive Evidence Router
+
+The stronger follow-up is a multi-candidate router, not an OCR-only gate. In this setup, `base`
+means the best graph page-preserving prediction available for the dataset, preferably the
+cross-dataset `denseheavy125_medium_both` graph page-preserve run. Candidate methods can include
+query-anchor evidence, OCR-region evidence, structural metadata, hyperlink graphs, or any other
+finished prediction JSON.
+
+Main script:
+
+```bash
+python scripts/analyze_adaptive_evidence_router.py \
+  --run mmdocir "$MMDOCIR_GOLD" "$MMDOCIR_BASE" \
+  --candidate mmdocir query_anchor "$MMDOCIR_QUERY_ANCHOR" - \
+  --candidate mmdocir ocr_docanchored "$MMDOCIR_OCR_DOCANCHORED" "$MMDOCIR_OCR_DOCANCHORED_CASES" \
+  --run vidore "$VIDORE_GOLD" "$VIDORE_BASE" \
+  --candidate vidore ocr_docanchored "$VIDORE_OCR_DOCANCHORED" "$VIDORE_OCR_DOCANCHORED_CASES" \
+  --hit-k 4 \
+  --min-accept 5 \
+  --max-doc-hit-loss 0 \
+  --max-router-rules 3 \
+  --output-md "$ROUTER_DIR/adaptive_evidence_router.md" \
+  --output-json "$ROUTER_DIR/adaptive_evidence_router.json" \
+  --output-csv "$ROUTER_DIR/adaptive_evidence_router_features.csv" \
+  --output-router-json "$ROUTER_DIR/adaptive_evidence_router_rule.json" \
+  --output-routed-dir "$ROUTER_DIR/routed_predictions"
+```
+
+Use `-` as the case JSON for candidates that do not emit layout/evidence cases, such as
+query-anchor graph runs. The router still has observable features from the base/candidate
+rankings: page/doc overlap, rank displacement, score margins, and multilingual query cues for
+quantity, visual/table, and page-locator questions.
+
+The learned policy is an ordered list of interpretable candidate-specific rules:
+
+```text
+choose query_anchor if <query/rank/evidence condition>
+else choose ocr_docanchored if <query/rank/evidence condition>
+else keep base
+```
+
+Selection is greedy under `--max-doc-hit-loss 0`. This keeps the thesis claim conservative:
+adaptive evidence modules may repair right-document/wrong-page failures, but the router must not
+trade away document localization relative to the graph page-preserving base.
