@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -78,6 +79,36 @@ def parse_args() -> argparse.Namespace:
         choices=("ignore", "nonnegative"),
         default="nonnegative",
         help="With nonnegative, a signature is eligible only if expected doc-hit delta is >= 0.",
+    )
+    parser.add_argument(
+        "--reliability-mode",
+        choices=("mean", "hoeffding_lcb"),
+        default="hoeffding_lcb",
+        help=(
+            "How to score page-hit utility. hoeffding_lcb uses a one-sided lower confidence "
+            "bound for bounded utility in [-1, 1]; mean reproduces the raw empirical router."
+        ),
+    )
+    parser.add_argument(
+        "--doc-reliability-mode",
+        choices=("mean", "hoeffding_lcb"),
+        default="mean",
+        help=(
+            "How to score doc-hit utility for --doc-policy nonnegative. The default keeps the "
+            "previous empirical nonnegative-doc policy; set hoeffding_lcb for a stricter bound."
+        ),
+    )
+    parser.add_argument(
+        "--confidence",
+        type=float,
+        default=0.90,
+        help="One-sided confidence level used by hoeffding_lcb.",
+    )
+    parser.add_argument(
+        "--min-signature-n",
+        type=int,
+        default=1,
+        help="Minimum training examples required for a matched signature or candidate prior.",
     )
     parser.add_argument(
         "--allow-candidate-prior",
@@ -295,6 +326,63 @@ class SignatureStats:
         }
 
 
+def bounded_lcb(
+    mean_value: float,
+    n: int,
+    *,
+    confidence: float,
+    lower: float = -1.0,
+    upper: float = 1.0,
+) -> float:
+    if n <= 0:
+        return float("-inf")
+    clipped_confidence = min(max(float(confidence), 1e-9), 1.0 - 1e-9)
+    delta = 1.0 - clipped_confidence
+    radius = (upper - lower) * math.sqrt(math.log(1.0 / delta) / (2.0 * float(n)))
+    return max(lower, mean_value - radius)
+
+
+def utility_score(
+    mean_value: float,
+    n: int,
+    *,
+    mode: str,
+    confidence: float,
+) -> float:
+    if mode == "mean":
+        return mean_value
+    if mode == "hoeffding_lcb":
+        return bounded_lcb(mean_value, n, confidence=confidence)
+    raise ValueError(f"Unknown reliability mode: {mode}")
+
+
+def stats_summary(
+    stats: SignatureStats,
+    *,
+    reliability_mode: str,
+    doc_reliability_mode: str,
+    confidence: float,
+) -> dict[str, Any]:
+    out = stats.to_dict()
+    out.update(
+        {
+            "page_delta_score": utility_score(
+                stats.page_mean,
+                stats.n,
+                mode=reliability_mode,
+                confidence=confidence,
+            ),
+            "doc_delta_score": utility_score(
+                stats.doc_mean,
+                stats.n,
+                mode=doc_reliability_mode,
+                confidence=confidence,
+            ),
+        }
+    )
+    return out
+
+
 def load_all(args: argparse.Namespace) -> tuple[
     dict[str, dict[str, dict[str, Any]]],
     dict[str, dict[str, dict[str, Any]]],
@@ -424,12 +512,34 @@ def lookup_stats(
     return "unseen", "", None
 
 
-def eligible(stats: SignatureStats | None, doc_policy: str) -> bool:
+def eligible(
+    stats: SignatureStats | None,
+    *,
+    doc_policy: str,
+    reliability_mode: str,
+    doc_reliability_mode: str,
+    confidence: float,
+    min_signature_n: int,
+) -> bool:
     if stats is None:
         return False
-    if stats.page_mean <= 0.0:
+    if stats.n < min_signature_n:
         return False
-    if doc_policy == "nonnegative" and stats.doc_mean < 0.0:
+    page_score = utility_score(
+        stats.page_mean,
+        stats.n,
+        mode=reliability_mode,
+        confidence=confidence,
+    )
+    if page_score <= 0.0:
+        return False
+    doc_score = utility_score(
+        stats.doc_mean,
+        stats.n,
+        mode=doc_reliability_mode,
+        confidence=confidence,
+    )
+    if doc_policy == "nonnegative" and doc_score < 0.0:
         return False
     return True
 
@@ -489,22 +599,40 @@ def evaluate_routed(
 def positive_signature_rows(
     by_level: dict[str, dict[str, dict[str, SignatureStats]]],
     top_n: int,
+    *,
+    reliability_mode: str,
+    doc_reliability_mode: str,
+    confidence: float,
+    min_signature_n: int,
+    doc_policy: str,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for level in SIGNATURE_LEVELS:
         for candidate_label, stats_by_signature in by_level.get(level, {}).items():
             for signature, stats in stats_by_signature.items():
-                if stats.page_mean <= 0:
+                if not eligible(
+                    stats,
+                    doc_policy=doc_policy,
+                    reliability_mode=reliability_mode,
+                    doc_reliability_mode=doc_reliability_mode,
+                    confidence=confidence,
+                    min_signature_n=min_signature_n,
+                ):
                     continue
                 rows.append(
                     {
                         "level": level,
                         "candidate": candidate_label,
                         "signature": signature,
-                        **stats.to_dict(),
+                        **stats_summary(
+                            stats,
+                            reliability_mode=reliability_mode,
+                            doc_reliability_mode=doc_reliability_mode,
+                            confidence=confidence,
+                        ),
                     }
                 )
-    rows.sort(key=lambda row: (row["page_delta_mean"], row["n"]), reverse=True)
+    rows.sort(key=lambda row: (row["page_delta_score"], row["page_delta_mean"], row["n"]), reverse=True)
     return rows[:top_n]
 
 
@@ -535,9 +663,22 @@ def run_router(
         by_level, candidate_prior = build_signature_stats(train_examples)
         policy_reports[fold_label] = {
             "train_n": len(train_examples),
-            "positive_signatures": positive_signature_rows(by_level, int(args.top_signatures)),
+            "positive_signatures": positive_signature_rows(
+                by_level,
+                int(args.top_signatures),
+                reliability_mode=str(args.reliability_mode),
+                doc_reliability_mode=str(args.doc_reliability_mode),
+                confidence=float(args.confidence),
+                min_signature_n=int(args.min_signature_n),
+                doc_policy=str(args.doc_policy),
+            ),
             "candidate_priors": {
-                candidate: stats.to_dict()
+                candidate: stats_summary(
+                    stats,
+                    reliability_mode=str(args.reliability_mode),
+                    doc_reliability_mode=str(args.doc_reliability_mode),
+                    confidence=float(args.confidence),
+                )
                 for candidate, stats in sorted(candidate_prior.items())
             },
         }
@@ -567,11 +708,24 @@ def run_router(
                         candidate_prior,
                         bool(args.allow_candidate_prior),
                     )
-                    if not eligible(stats, str(args.doc_policy)):
+                    if not eligible(
+                        stats,
+                        doc_policy=str(args.doc_policy),
+                        reliability_mode=str(args.reliability_mode),
+                        doc_reliability_mode=str(args.doc_reliability_mode),
+                        confidence=float(args.confidence),
+                        min_signature_n=int(args.min_signature_n),
+                    ):
                         continue
                     assert stats is not None
-                    if stats.page_mean > best_score:
-                        best_score = stats.page_mean
+                    page_score = utility_score(
+                        stats.page_mean,
+                        stats.n,
+                        mode=str(args.reliability_mode),
+                        confidence=float(args.confidence),
+                    )
+                    if page_score > best_score:
+                        best_score = page_score
                         best_label = candidate_label
                         best_level = level
                 matched_level_counts[best_level] += 1
@@ -632,14 +786,35 @@ def render_md(report: dict[str, Any]) -> str:
             "support predictions. CASE_JSON inputs are ignored to avoid oracle/evaluation leakage."
         ),
         "",
-        f"Decision: choose the candidate with positive expected page-hit@{hit_k} utility "
+        f"Decision: choose the candidate with positive page-hit@{hit_k} utility score "
         "under the most specific observed signature; otherwise keep base.",
         "",
     ]
+    reliability_mode = str(report.get("reliability_mode", "mean"))
+    doc_reliability_mode = str(report.get("doc_reliability_mode", "mean"))
+    confidence = float(report.get("confidence", 0.90))
+    min_signature_n = int(report.get("min_signature_n", 1))
+    if reliability_mode == "hoeffding_lcb" or doc_reliability_mode == "hoeffding_lcb":
+        lines.extend(
+            [
+                (
+                    "Reliability: utility scores use one-sided Hoeffding lower confidence bounds "
+                    f"where configured, confidence={confidence:.3f}, min_signature_n={min_signature_n}."
+                ),
+                "",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                f"Reliability: raw empirical means, min_signature_n={min_signature_n}.",
+                "",
+            ]
+        )
     if report.get("doc_policy") == "nonnegative":
         lines.extend(
             [
-                "Doc policy: candidate signatures must also have nonnegative expected doc-hit utility.",
+                "Doc policy: candidate signatures must also have nonnegative doc-hit utility score.",
                 "",
             ]
         )
@@ -670,8 +845,8 @@ def render_md(report: dict[str, Any]) -> str:
         lines.append("")
         priors = policy.get("candidate_priors", {})
         if priors:
-            lines.append("| candidate | n | page_delta_mean | doc_delta_mean |")
-            lines.append("| --- | --- | --- | --- |")
+            lines.append("| candidate | n | page_mean | page_score | doc_mean | doc_score |")
+            lines.append("| --- | --- | --- | --- | --- | --- |")
             for candidate, stats in sorted(priors.items()):
                 lines.append(
                     "| "
@@ -680,7 +855,9 @@ def render_md(report: dict[str, Any]) -> str:
                             candidate,
                             str(stats["n"]),
                             f"{float(stats['page_delta_mean']):.4f}",
+                            f"{float(stats['page_delta_score']):.4f}",
                             f"{float(stats['doc_delta_mean']):.4f}",
+                            f"{float(stats['doc_delta_score']):.4f}",
                         ]
                     )
                     + " |"
@@ -688,8 +865,8 @@ def render_md(report: dict[str, Any]) -> str:
             lines.append("")
         rows = policy.get("positive_signatures", [])
         if rows:
-            lines.append("| level | candidate | n | page_delta_mean | doc_delta_mean | signature |")
-            lines.append("| --- | --- | --- | --- | --- | --- |")
+            lines.append("| level | candidate | n | page_mean | page_score | doc_mean | doc_score | signature |")
+            lines.append("| --- | --- | --- | --- | --- | --- | --- | --- |")
             for row in rows:
                 lines.append(
                     "| "
@@ -699,7 +876,9 @@ def render_md(report: dict[str, Any]) -> str:
                             str(row["candidate"]),
                             str(row["n"]),
                             f"{float(row['page_delta_mean']):.4f}",
+                            f"{float(row['page_delta_score']):.4f}",
                             f"{float(row['doc_delta_mean']):.4f}",
+                            f"{float(row['doc_delta_score']):.4f}",
                             str(row["signature"]).replace("|", "<br>"),
                         ]
                     )
@@ -726,6 +905,10 @@ def main() -> None:
         "cv_mode": args.cv_mode,
         "signature_levels": list(SIGNATURE_LEVELS),
         "doc_policy": args.doc_policy,
+        "reliability_mode": args.reliability_mode,
+        "doc_reliability_mode": args.doc_reliability_mode,
+        "confidence": float(args.confidence),
+        "min_signature_n": int(args.min_signature_n),
         "allow_candidate_prior": bool(args.allow_candidate_prior),
         "folds": report["folds"],
         "policies": report["policies"],
