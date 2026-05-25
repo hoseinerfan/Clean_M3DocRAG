@@ -378,6 +378,24 @@ FINAL_TOP_PAGES=1000 \
 PER_DOC_PAGE_LIMIT=0
 ```
 
+Optional heading/breadcrumb graph anchors:
+
+```bash
+HEADING_BREADCRUMB_MODE=query_gated \
+HEADING_BREADCRUMB_FIELD="markdown" \
+HEADING_BREADCRUMB_EDGE_WEIGHT=0.15 \
+HEADING_BREADCRUMB_RESTART_WEIGHT=0.10 \
+HEADING_BREADCRUMB_MAX_PAGE_MATCHES=50 \
+HEADING_BREADCRUMB_MAX_DOC_MATCHES=20 \
+HEADING_BREADCRUMB_WEIGHT_MODE=local_idf
+```
+
+This adds Markdown heading nodes such as `Financial Statements > Notes > Revenue Recognition`
+and connects candidate pages sharing the same normalized breadcrumb. Start with `query_gated` when
+the query names a section, table, note, topic, or manual subsection. Use `query_gated_shared` as a
+stronger ablation when same-document page confusion is high, because it also lets non-query-matched
+heading nodes propagate page mass within candidate sections.
+
 Run the best-config doc-shortlist check on the smaller datasets first.
 
 SciEGQA-Bench:
@@ -608,11 +626,12 @@ Operational findings:
 
 1. ViDoRe is mostly a page-local failure problem after the right document is already present. With
    `--boundary-k 20`, rank-boundary localization is the largest bucket, followed by same-document
-   page confusion; local evidence, exact MaxSim boundary checks, and content/OCR/layout verifiers are
-   plausible next tests.
+   page confusion; local evidence, heading/breadcrumb anchors, exact MaxSim boundary checks, and
+   content/OCR/layout verifiers are plausible next tests.
 2. MMDocIR is mixed, but document discovery is now the largest limitation. Boundary rescue can only
    attack the 239 right-document failures; the 305 document-retrieval-gap failures need stronger
-   document/support recall.
+   document/support recall. Heading/breadcrumb anchors are still a good cheap test for financial
+   reports and academic papers because section names can bridge pages inside a retrieved document.
 3. OpenDocVQA is not primarily a boundary/localization problem under this packed-document setup.
    More than 95% of page failures are document-retrieval gaps, so unconditional page-local reranking
    should not be expected to help and already produced a negative full-dev result.

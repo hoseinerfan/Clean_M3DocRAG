@@ -127,6 +127,15 @@ class QueryAnchorEvidencePolicy:
 
 
 @dataclass
+class HeadingBreadcrumbPolicy:
+    heading_page_weights: dict[str, dict[str, float]]
+    heading_node_weights: dict[str, float]
+    heading_labels: dict[str, str]
+    query_seed_nodes: set[str]
+    metadata: dict[str, object]
+
+
+@dataclass
 class ConstraintCompetitionPolicy:
     doc_to_page_multipliers: dict[str, float]
     metadata: dict[str, object]
@@ -171,6 +180,7 @@ class DocPageCatalog:
     page_counts: dict[str, int]
     page_number_indices: dict[str, dict[int, set[int]]]
     page_texts: dict[str, str]
+    page_breadcrumbs: dict[str, list[str]]
 
 
 def parse_args() -> argparse.Namespace:
@@ -682,6 +692,66 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.0,
         help="Require this minimum table-likeness score for constraint-bundle pages. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--heading-breadcrumb-mode",
+        choices=["none", "query_gated", "shared", "query_gated_shared"],
+        default="none",
+        help=(
+            "Add heading/breadcrumb graph nodes from markdown headings. query_gated only "
+            "adds headings whose leaf or breadcrumb overlaps the query; shared adds all "
+            "non-broad heading nodes as page-page structural links; query_gated_shared "
+            "uses shared links plus restart mass on query-matched headings."
+        ),
+    )
+    parser.add_argument(
+        "--heading-breadcrumb-field",
+        nargs="*",
+        default=["markdown"],
+        help="doc_pages JSONL fields parsed for Markdown heading breadcrumbs.",
+    )
+    parser.add_argument("--heading-breadcrumb-edge-weight", type=float, default=0.10)
+    parser.add_argument("--heading-breadcrumb-restart-weight", type=float, default=0.10)
+    parser.add_argument(
+        "--heading-breadcrumb-max-headings-per-page",
+        type=int,
+        default=8,
+        help="Maximum heading/breadcrumb labels retained per page.",
+    )
+    parser.add_argument("--heading-breadcrumb-min-tokens", type=int, default=1)
+    parser.add_argument("--heading-breadcrumb-min-token-len", type=int, default=3)
+    parser.add_argument(
+        "--heading-breadcrumb-query-min-overlap",
+        type=float,
+        default=0.60,
+        help=(
+            "Minimum fraction of heading tokens that must appear in the query for "
+            "query-gated heading seeds. Leaf phrase matches always pass."
+        ),
+    )
+    parser.add_argument(
+        "--heading-breadcrumb-max-page-matches",
+        type=int,
+        default=80,
+        help="Drop heading nodes matching more than this many candidate pages. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--heading-breadcrumb-max-doc-matches",
+        type=int,
+        default=20,
+        help="Drop heading nodes spanning more than this many candidate docs. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--heading-breadcrumb-weight-mode",
+        choices=["uniform", "local_idf"],
+        default="local_idf",
+        help="local_idf downweights heading nodes that match many candidate pages.",
+    )
+    parser.add_argument(
+        "--heading-breadcrumb-min-node-weight",
+        type=float,
+        default=0.10,
+        help="Floor for local_idf heading-breadcrumb node weights.",
     )
     parser.add_argument(
         "--constraint-competition-mode",
@@ -1408,16 +1478,158 @@ def normalize_manifest_text(value: object) -> str:
     return re.sub(r"\s+", " ", str(value)).strip()
 
 
+HEADING_BREADCRUMB_STOPWORDS = {
+    "a",
+    "about",
+    "above",
+    "after",
+    "all",
+    "also",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "can",
+    "chapter",
+    "contents",
+    "does",
+    "for",
+    "from",
+    "guide",
+    "how",
+    "in",
+    "into",
+    "is",
+    "it",
+    "may",
+    "of",
+    "on",
+    "or",
+    "overview",
+    "page",
+    "part",
+    "section",
+    "see",
+    "summary",
+    "table",
+    "that",
+    "the",
+    "this",
+    "to",
+    "using",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+}
+MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
+
+
+def manifest_text_block(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.replace("\x0c", "\n").replace("\u0000", " ")
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, list):
+        return "\n".join(part for part in (manifest_text_block(item) for item in value) if part)
+    if isinstance(value, dict):
+        return "\n".join(
+            part for part in (manifest_text_block(item) for item in value.values()) if part
+        )
+    return str(value)
+
+
+def clean_markdown_heading_label(value: str) -> str:
+    text = value.strip()
+    text = re.sub(r"\s+#+\s*$", "", text)
+    text = re.sub(r"\{#[^}]+\}\s*$", "", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("`", " ").replace("*", " ").replace("_", " ")
+    text = re.sub(r"\s+", " ", text).strip(" -:\t")
+    return text
+
+
+def heading_breadcrumb_tokens(label: str, *, min_token_len: int) -> list[str]:
+    tokens: list[str] = []
+    for raw_token in re.findall(r"[\w]+", label.lower(), flags=re.UNICODE):
+        token = raw_token.strip("_")
+        if len(token) > 4 and token.endswith("ies"):
+            token = token[:-3] + "y"
+        elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+            token = token[:-1]
+        if not token or token in HEADING_BREADCRUMB_STOPWORDS:
+            continue
+        if token.isdigit() or len(token) >= min_token_len:
+            tokens.append(token)
+    return tokens
+
+
+def extract_markdown_breadcrumbs_from_text(
+    text: str,
+    *,
+    max_headings_per_page: int,
+    min_tokens: int,
+    min_token_len: int,
+) -> list[str]:
+    if not text or max_headings_per_page <= 0:
+        return []
+    breadcrumbs: list[str] = []
+    seen: set[str] = set()
+    heading_stack: list[str] = []
+
+    for line in text.splitlines():
+        match = MARKDOWN_HEADING_RE.match(line)
+        if not match:
+            continue
+        level = len(match.group(1))
+        label = clean_markdown_heading_label(match.group(2))
+        if not label:
+            continue
+        heading_stack = heading_stack[: max(0, level - 1)]
+        heading_stack.append(label)
+        candidates = [label]
+        breadcrumb = " > ".join(heading_stack)
+        if breadcrumb != label:
+            candidates.append(breadcrumb)
+        for candidate in candidates:
+            tokens = heading_breadcrumb_tokens(candidate, min_token_len=min_token_len)
+            if len(set(tokens)) < min_tokens:
+                continue
+            key = " ".join(tokens)
+            if key in seen:
+                continue
+            seen.add(key)
+            breadcrumbs.append(candidate)
+            if len(breadcrumbs) >= max_headings_per_page:
+                return breadcrumbs
+    return breadcrumbs
+
+
 def load_doc_page_catalog(
     path: Path,
     *,
     text_fields: Iterable[str] = (),
     load_page_texts: bool = False,
+    heading_fields: Iterable[str] = (),
+    load_page_breadcrumbs: bool = False,
+    heading_max_per_page: int = 8,
+    heading_min_tokens: int = 1,
+    heading_min_token_len: int = 3,
 ) -> DocPageCatalog:
     counts: dict[str, int] = {}
     page_number_indices: dict[str, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))
     page_texts: dict[str, str] = {}
+    page_breadcrumbs: dict[str, list[str]] = {}
     text_field_names = [str(field).strip() for field in text_fields if str(field).strip()]
+    heading_field_names = [str(field).strip() for field in heading_fields if str(field).strip()]
     if not path.exists():
         raise FileNotFoundError(f"doc_pages JSONL does not exist: {path}")
     with path.open("r", encoding="utf-8") as handle:
@@ -1433,6 +1645,7 @@ def load_doc_page_catalog(
             page_idx = maybe_int(raw_page_idx)
             if page_idx is None:
                 continue
+            uid = page_uid(doc_id, page_idx)
             counts[doc_id] = max(counts.get(doc_id, 0), page_idx + 1)
             for field_name in ("page_number", "source_page_number"):
                 page_number = maybe_int(row.get(field_name))
@@ -1447,11 +1660,41 @@ def load_doc_page_catalog(
                         parts.append(text)
                         seen_parts.add(text)
                 if parts:
-                    page_texts[page_uid(doc_id, page_idx)] = " ".join(parts).lower()
+                    page_texts[uid] = " ".join(parts).lower()
+            if load_page_breadcrumbs:
+                breadcrumbs: list[str] = []
+                seen_breadcrumb_keys: set[str] = set()
+                for field_name in heading_field_names:
+                    raw_text = manifest_text_block(row.get(field_name))
+                    if not raw_text:
+                        continue
+                    for breadcrumb in extract_markdown_breadcrumbs_from_text(
+                        raw_text,
+                        max_headings_per_page=max(0, int(heading_max_per_page)),
+                        min_tokens=max(1, int(heading_min_tokens)),
+                        min_token_len=max(1, int(heading_min_token_len)),
+                    ):
+                        key = " ".join(
+                            heading_breadcrumb_tokens(
+                                breadcrumb,
+                                min_token_len=max(1, int(heading_min_token_len)),
+                            )
+                        )
+                        if not key or key in seen_breadcrumb_keys:
+                            continue
+                        seen_breadcrumb_keys.add(key)
+                        breadcrumbs.append(breadcrumb)
+                        if len(breadcrumbs) >= max(0, int(heading_max_per_page)):
+                            break
+                    if len(breadcrumbs) >= max(0, int(heading_max_per_page)):
+                        break
+                if breadcrumbs:
+                    page_breadcrumbs[uid] = breadcrumbs
     return DocPageCatalog(
         page_counts=counts,
         page_number_indices={doc_id: dict(values) for doc_id, values in page_number_indices.items()},
         page_texts=page_texts,
+        page_breadcrumbs=page_breadcrumbs,
     )
 
 
@@ -4984,6 +5227,232 @@ def add_query_anchor_evidence_restart(
     return added
 
 
+def heading_breadcrumb_leaf(label: str) -> str:
+    return label.split(">")[-1].strip()
+
+
+def normalize_heading_breadcrumb_key(label: str, *, min_token_len: int) -> str:
+    return " ".join(heading_breadcrumb_tokens(label, min_token_len=min_token_len))
+
+
+def heading_breadcrumb_node_id(signature: str) -> str:
+    digest = hashlib.sha1(signature.lower().encode("utf-8")).hexdigest()[:12]
+    return f"heading_breadcrumb::{digest}"
+
+
+def heading_breadcrumb_specificity_weight(
+    *, match_count: int, candidate_count: int, args: argparse.Namespace
+) -> float:
+    if str(args.heading_breadcrumb_weight_mode) != "local_idf":
+        return 1.0
+    if match_count <= 0 or candidate_count <= 1:
+        return 1.0
+    try:
+        raw = math.log((float(candidate_count) + 1.0) / (float(match_count) + 1.0)) / math.log(
+            float(candidate_count) + 1.0
+        )
+    except (ValueError, ZeroDivisionError):
+        raw = 1.0
+    return clamp(raw, float(args.heading_breadcrumb_min_node_weight), 1.0)
+
+
+def heading_breadcrumb_matches_question(
+    question: str,
+    heading_label: str,
+    *,
+    args: argparse.Namespace,
+) -> bool:
+    min_token_len = max(1, int(args.heading_breadcrumb_min_token_len))
+    heading_tokens = heading_breadcrumb_tokens(heading_label, min_token_len=min_token_len)
+    query_tokens = heading_breadcrumb_tokens(question, min_token_len=min_token_len)
+    if not heading_tokens or not query_tokens:
+        return False
+
+    query_norm = " ".join(query_tokens)
+    heading_norm = " ".join(heading_tokens)
+    leaf_tokens = heading_breadcrumb_tokens(
+        heading_breadcrumb_leaf(heading_label),
+        min_token_len=min_token_len,
+    )
+    leaf_norm = " ".join(leaf_tokens)
+    if len(heading_tokens) > 1 and heading_norm and heading_norm in query_norm:
+        return True
+    if len(leaf_tokens) > 1 and leaf_norm and leaf_norm in query_norm:
+        return True
+
+    heading_token_set = set(heading_tokens)
+    query_token_set = set(query_tokens)
+    if len(heading_token_set) == 1:
+        return bool(heading_token_set & query_token_set)
+    overlap = len(heading_token_set & query_token_set) / max(1, len(heading_token_set))
+    return overlap >= clamp(float(args.heading_breadcrumb_query_min_overlap), 0.0, 1.0)
+
+
+def build_heading_breadcrumb_policy(
+    *,
+    question: str,
+    records: dict[str, PageRecord],
+    page_breadcrumbs: dict[str, list[str]],
+    args: argparse.Namespace,
+) -> HeadingBreadcrumbPolicy:
+    mode = str(args.heading_breadcrumb_mode)
+    heading_page_weights: dict[str, dict[str, float]] = {}
+    heading_node_weights: dict[str, float] = {}
+    heading_labels: dict[str, str] = {}
+    query_seed_nodes: set[str] = set()
+    raw_heading_page_weights: dict[str, dict[str, float]] = defaultdict(dict)
+    raw_heading_labels: dict[str, str] = {}
+    raw_heading_docs: dict[str, set[str]] = defaultdict(set)
+    dropped_broad_heading_count = 0
+
+    min_token_len = max(1, int(args.heading_breadcrumb_min_token_len))
+    max_headings_per_page = max(0, int(args.heading_breadcrumb_max_headings_per_page))
+    if mode != "none" and page_breadcrumbs and max_headings_per_page > 0:
+        for uid, record in records.items():
+            labels = page_breadcrumbs.get(uid, [])
+            if not labels:
+                continue
+            seen_page_signatures: set[str] = set()
+            for label in labels[:max_headings_per_page]:
+                signature = normalize_heading_breadcrumb_key(label, min_token_len=min_token_len)
+                if not signature or signature in seen_page_signatures:
+                    continue
+                seen_page_signatures.add(signature)
+                node_id = heading_breadcrumb_node_id(signature)
+                raw_heading_page_weights[node_id][uid] = 1.0
+                raw_heading_docs[node_id].add(record.doc_id)
+                raw_heading_labels.setdefault(node_id, label)
+
+        max_page_matches = max(0, int(args.heading_breadcrumb_max_page_matches))
+        max_doc_matches = max(0, int(args.heading_breadcrumb_max_doc_matches))
+        for node_id, page_weights in raw_heading_page_weights.items():
+            doc_count = len(raw_heading_docs.get(node_id, set()))
+            if max_page_matches > 0 and len(page_weights) > max_page_matches:
+                dropped_broad_heading_count += 1
+                continue
+            if max_doc_matches > 0 and doc_count > max_doc_matches:
+                dropped_broad_heading_count += 1
+                continue
+            label = raw_heading_labels.get(node_id, node_id)
+            if mode in {"query_gated", "query_gated_shared"} and (
+                heading_breadcrumb_matches_question(
+                    question,
+                    label,
+                    args=args,
+                )
+            ):
+                query_seed_nodes.add(node_id)
+            if mode == "query_gated" and node_id not in query_seed_nodes:
+                continue
+            heading_page_weights[node_id] = dict(page_weights)
+            heading_labels[node_id] = label
+            heading_node_weights[node_id] = heading_breadcrumb_specificity_weight(
+                match_count=len(page_weights),
+                candidate_count=len(records),
+                args=args,
+            )
+
+    page_with_breadcrumb_count = sum(1 for uid in records if page_breadcrumbs.get(uid))
+    page_match_count = sum(len(pages) for pages in heading_page_weights.values())
+    metadata: dict[str, object] = {
+        "heading_breadcrumb_mode": mode,
+        "heading_breadcrumb_field": list(args.heading_breadcrumb_field),
+        "heading_breadcrumb_edge_weight": float(args.heading_breadcrumb_edge_weight),
+        "heading_breadcrumb_restart_weight": float(args.heading_breadcrumb_restart_weight),
+        "heading_breadcrumb_max_headings_per_page": int(
+            args.heading_breadcrumb_max_headings_per_page
+        ),
+        "heading_breadcrumb_min_tokens": int(args.heading_breadcrumb_min_tokens),
+        "heading_breadcrumb_min_token_len": int(args.heading_breadcrumb_min_token_len),
+        "heading_breadcrumb_query_min_overlap": float(
+            args.heading_breadcrumb_query_min_overlap
+        ),
+        "heading_breadcrumb_max_page_matches": int(args.heading_breadcrumb_max_page_matches),
+        "heading_breadcrumb_max_doc_matches": int(args.heading_breadcrumb_max_doc_matches),
+        "heading_breadcrumb_weight_mode": str(args.heading_breadcrumb_weight_mode),
+        "heading_breadcrumb_min_node_weight": float(args.heading_breadcrumb_min_node_weight),
+        "heading_breadcrumb_page_breadcrumb_available": bool(page_breadcrumbs),
+        "heading_breadcrumb_candidate_page_with_breadcrumb_count": page_with_breadcrumb_count,
+        "heading_breadcrumb_raw_node_count": len(raw_heading_page_weights),
+        "heading_breadcrumb_node_count": len(heading_page_weights),
+        "heading_breadcrumb_query_seed_node_count": len(query_seed_nodes),
+        "heading_breadcrumb_dropped_broad_heading_count": dropped_broad_heading_count,
+        "heading_breadcrumb_page_match_count": page_match_count,
+        "mean_heading_breadcrumb_node_weight": (
+            statistics.fmean(heading_node_weights.values()) if heading_node_weights else None
+        ),
+        "heading_breadcrumb_labels": [
+            heading_labels[node_id] for node_id in sorted(heading_labels)
+        ][:50],
+        "heading_breadcrumb_query_seed_labels": [
+            heading_labels[node_id]
+            for node_id in sorted(query_seed_nodes)
+            if node_id in heading_labels
+        ][:50],
+    }
+    return HeadingBreadcrumbPolicy(
+        heading_page_weights=heading_page_weights,
+        heading_node_weights=heading_node_weights,
+        heading_labels=heading_labels,
+        query_seed_nodes=query_seed_nodes,
+        metadata=metadata,
+    )
+
+
+def add_heading_breadcrumb_edges(
+    *,
+    graph: dict[str, dict[str, float]],
+    policy: HeadingBreadcrumbPolicy,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    if str(args.heading_breadcrumb_mode) == "none":
+        return {
+            "heading_breadcrumb_edge_count_directed": 0,
+            "heading_breadcrumb_seed_node_count": 0,
+        }
+    edge_count = 0
+    seeded_node_count = 0
+    for heading_node, pages in policy.heading_page_weights.items():
+        if not pages:
+            continue
+        seeded_node_count += 1
+        node_weight = policy.heading_node_weights.get(heading_node, 1.0)
+        for uid, page_weight in pages.items():
+            edge_weight = (
+                float(args.heading_breadcrumb_edge_weight)
+                * float(node_weight)
+                * float(page_weight)
+            )
+            if edge_weight > 0:
+                add_undirected_edge(graph, heading_node, uid, edge_weight)
+                edge_count += 2
+    return {
+        "heading_breadcrumb_edge_count_directed": edge_count,
+        "heading_breadcrumb_seed_node_count": seeded_node_count,
+    }
+
+
+def add_heading_breadcrumb_restart(
+    *,
+    seed: dict[str, float],
+    policy: HeadingBreadcrumbPolicy,
+    args: argparse.Namespace,
+) -> int:
+    if str(args.heading_breadcrumb_mode) == "none":
+        return 0
+    restart_weight = float(args.heading_breadcrumb_restart_weight)
+    if restart_weight <= 0:
+        return 0
+    added = 0
+    for heading_node in sorted(policy.query_seed_nodes):
+        if heading_node not in policy.heading_page_weights:
+            continue
+        node_weight = policy.heading_node_weights.get(heading_node, 1.0)
+        seed[heading_node] = seed.get(heading_node, 0.0) + restart_weight * node_weight
+        added += 1
+    return added
+
+
 def page_record_best_rank(record: PageRecord) -> int | None:
     ranks = [
         rank
@@ -5607,6 +6076,13 @@ def build_qid_graph_ranking(
         doc_anchor_weights=query_anchor_doc_weights,
         args=args,
     )
+    page_breadcrumbs = doc_page_catalog.page_breadcrumbs if doc_page_catalog is not None else {}
+    heading_breadcrumb_policy = build_heading_breadcrumb_policy(
+        question=question,
+        records=records,
+        page_breadcrumbs=page_breadcrumbs,
+        args=args,
+    )
     constraint_competition_policy = build_constraint_competition_policy(
         question=question,
         records=records,
@@ -5659,6 +6135,11 @@ def build_qid_graph_ranking(
     query_anchor_evidence_metadata = add_query_anchor_evidence_edges(
         graph=graph,
         policy=query_anchor_policy,
+        args=args,
+    )
+    heading_breadcrumb_metadata = add_heading_breadcrumb_edges(
+        graph=graph,
+        policy=heading_breadcrumb_policy,
         args=args,
     )
     pdf_hyperlink_metadata = add_pdf_hyperlink_edges(
@@ -5727,6 +6208,11 @@ def build_qid_graph_ranking(
     query_anchor_seed_node_count = add_query_anchor_evidence_restart(
         seed=restart_vector.seed,
         policy=query_anchor_policy,
+        args=args,
+    )
+    heading_breadcrumb_seed_node_count = add_heading_breadcrumb_restart(
+        seed=restart_vector.seed,
+        policy=heading_breadcrumb_policy,
         args=args,
     )
     ppr = run_ppr(
@@ -5825,11 +6311,14 @@ def build_qid_graph_ranking(
         **position_evidence_metadata,
         **query_anchor_policy.metadata,
         **query_anchor_evidence_metadata,
+        **heading_breadcrumb_policy.metadata,
+        **heading_breadcrumb_metadata,
         **constraint_competition_policy.metadata,
         **pdf_hyperlink_metadata,
         **external_page_graph_metadata,
         "position_evidence_restart_seed_node_count": position_seed_node_count,
         "query_anchor_restart_seed_node_count": query_anchor_seed_node_count,
+        "heading_breadcrumb_restart_seed_node_count": heading_breadcrumb_seed_node_count,
         "adaptive_adjacent_edge_count": len(adjacent_edge_multipliers),
         "mean_adaptive_adjacent_edge_multiplier": (
             statistics.fmean(adjacent_edge_multipliers) if adjacent_edge_multipliers else None
@@ -5918,6 +6407,11 @@ def main() -> None:
                 or str(args.constraint_competition_mode)
                 in {"query_local_softmax", "query_local_selector"}
             ),
+            heading_fields=args.heading_breadcrumb_field,
+            load_page_breadcrumbs=str(args.heading_breadcrumb_mode) != "none",
+            heading_max_per_page=int(args.heading_breadcrumb_max_headings_per_page),
+            heading_min_tokens=int(args.heading_breadcrumb_min_tokens),
+            heading_min_token_len=int(args.heading_breadcrumb_min_token_len),
         )
 
     fused_payload: dict[str, dict] = {}
@@ -6139,6 +6633,32 @@ def main() -> None:
                 "query_anchor_constraint_table_min_score": float(
                     args.query_anchor_constraint_table_min_score
                 ),
+                "heading_breadcrumb_mode": args.heading_breadcrumb_mode,
+                "heading_breadcrumb_field": list(args.heading_breadcrumb_field),
+                "heading_breadcrumb_edge_weight": float(args.heading_breadcrumb_edge_weight),
+                "heading_breadcrumb_restart_weight": float(
+                    args.heading_breadcrumb_restart_weight
+                ),
+                "heading_breadcrumb_max_headings_per_page": int(
+                    args.heading_breadcrumb_max_headings_per_page
+                ),
+                "heading_breadcrumb_min_tokens": int(args.heading_breadcrumb_min_tokens),
+                "heading_breadcrumb_min_token_len": int(
+                    args.heading_breadcrumb_min_token_len
+                ),
+                "heading_breadcrumb_query_min_overlap": float(
+                    args.heading_breadcrumb_query_min_overlap
+                ),
+                "heading_breadcrumb_max_page_matches": int(
+                    args.heading_breadcrumb_max_page_matches
+                ),
+                "heading_breadcrumb_max_doc_matches": int(
+                    args.heading_breadcrumb_max_doc_matches
+                ),
+                "heading_breadcrumb_weight_mode": args.heading_breadcrumb_weight_mode,
+                "heading_breadcrumb_min_node_weight": float(
+                    args.heading_breadcrumb_min_node_weight
+                ),
                 "constraint_competition_mode": args.constraint_competition_mode,
                 "constraint_competition_strength": float(args.constraint_competition_strength),
                 "query_local_evidence_doc_top_k": int(args.query_local_evidence_doc_top_k),
@@ -6308,6 +6828,9 @@ def main() -> None:
         "doc_page_text_page_count": (
             len(doc_page_catalog.page_texts) if doc_page_catalog is not None else 0
         ),
+        "doc_page_breadcrumb_page_count": (
+            len(doc_page_catalog.page_breadcrumbs) if doc_page_catalog is not None else 0
+        ),
         "position_evidence_mode": args.position_evidence_mode,
         "position_evidence_scope": args.position_evidence_scope,
         "position_evidence_doc_top_k": int(args.position_evidence_doc_top_k),
@@ -6355,6 +6878,22 @@ def main() -> None:
         "query_anchor_constraint_table_min_score": float(
             args.query_anchor_constraint_table_min_score
         ),
+        "heading_breadcrumb_mode": args.heading_breadcrumb_mode,
+        "heading_breadcrumb_field": list(args.heading_breadcrumb_field),
+        "heading_breadcrumb_edge_weight": float(args.heading_breadcrumb_edge_weight),
+        "heading_breadcrumb_restart_weight": float(args.heading_breadcrumb_restart_weight),
+        "heading_breadcrumb_max_headings_per_page": int(
+            args.heading_breadcrumb_max_headings_per_page
+        ),
+        "heading_breadcrumb_min_tokens": int(args.heading_breadcrumb_min_tokens),
+        "heading_breadcrumb_min_token_len": int(args.heading_breadcrumb_min_token_len),
+        "heading_breadcrumb_query_min_overlap": float(
+            args.heading_breadcrumb_query_min_overlap
+        ),
+        "heading_breadcrumb_max_page_matches": int(args.heading_breadcrumb_max_page_matches),
+        "heading_breadcrumb_max_doc_matches": int(args.heading_breadcrumb_max_doc_matches),
+        "heading_breadcrumb_weight_mode": args.heading_breadcrumb_weight_mode,
+        "heading_breadcrumb_min_node_weight": float(args.heading_breadcrumb_min_node_weight),
         "constraint_competition_mode": args.constraint_competition_mode,
         "constraint_competition_strength": float(args.constraint_competition_strength),
         "query_local_evidence_doc_top_k": int(args.query_local_evidence_doc_top_k),
@@ -6814,6 +7353,89 @@ def main() -> None:
         "mean_query_anchor_restart_seed_node_count": (
             statistics.fmean(
                 float(row["graph"].get("query_anchor_restart_seed_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "heading_breadcrumb_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("heading_breadcrumb_node_count", 0)) > 0
+        ),
+        "heading_breadcrumb_query_seed_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("heading_breadcrumb_query_seed_node_count", 0)) > 0
+        ),
+        "mean_heading_breadcrumb_candidate_page_with_breadcrumb_count": (
+            statistics.fmean(
+                float(
+                    row["graph"].get(
+                        "heading_breadcrumb_candidate_page_with_breadcrumb_count",
+                        0.0,
+                    )
+                )
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_heading_breadcrumb_node_count": (
+            statistics.fmean(
+                float(row["graph"].get("heading_breadcrumb_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_heading_breadcrumb_query_seed_node_count": (
+            statistics.fmean(
+                float(row["graph"].get("heading_breadcrumb_query_seed_node_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_heading_breadcrumb_page_match_count": (
+            statistics.fmean(
+                float(row["graph"].get("heading_breadcrumb_page_match_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_heading_breadcrumb_edge_count_directed": (
+            statistics.fmean(
+                float(row["graph"].get("heading_breadcrumb_edge_count_directed", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_heading_breadcrumb_node_weight": (
+            statistics.fmean(
+                float(row["graph"].get("mean_heading_breadcrumb_node_weight", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_heading_breadcrumb_node_weight") is not None
+            )
+            if any(
+                row["graph"].get("mean_heading_breadcrumb_node_weight") is not None
+                for row in per_qid
+            )
+            else None
+        ),
+        "mean_heading_breadcrumb_dropped_broad_heading_count": (
+            statistics.fmean(
+                float(row["graph"].get("heading_breadcrumb_dropped_broad_heading_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_heading_breadcrumb_restart_seed_node_count": (
+            statistics.fmean(
+                float(row["graph"].get("heading_breadcrumb_restart_seed_node_count", 0.0))
                 for row in per_qid
             )
             if per_qid

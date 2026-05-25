@@ -21,6 +21,7 @@ All MMDocIR numbers below are page hit@4 unless otherwise noted.
 | Coherence-gated same-doc edges | 1115 / 1658 | +1 | Small gain; low-risk structural graph feature |
 | Evidence community nodes | 1111-1114 / 1658 | -3 to 0 | Not useful yet |
 | Query-position graph nodes | 1114 / 1658 | 0 | Conceptually useful but empirically neutral so far |
+| Heading/breadcrumb anchor nodes | pending | pending | Graph-native section bridge for query-named headings; implemented, needs ablation |
 | Structural metadata reranker, conservative parser | 1118 / 1658 | +4, lost=0 | Best targeted gain, but rule-based/heuristic |
 | Query anchor evidence nodes, uniform w0.20 r0.05 | 1117 / 1658 | +3, lost=0 | Best graph-native novelty result so far |
 | Query anchor r0.10 + tight structural metadata | 1123 / 1658 | +9, lost=0 | Best current MMDocIR result, but includes heuristic structural layer |
@@ -73,10 +74,11 @@ The structural metadata reranker is useful but heuristic. It should be presented
 The graph-native methods are the main novelty path. They should be prioritized when looking for advisor-facing contributions:
 
 1. Query anchor evidence nodes.
-2. Page-type/modality nodes.
-3. Section-role nodes.
-4. Visual tag nodes from VLM/captioning.
-5. Reliability-weighted propagation and source weighting.
+2. Heading/breadcrumb anchor nodes.
+3. Page-type/modality nodes.
+4. Section-role nodes.
+5. Visual tag nodes from VLM/captioning.
+6. Reliability-weighted propagation and source weighting.
 
 ## Next Experiments
 

@@ -354,6 +354,43 @@ Implications:
 3. OpenDocVQA needs document/pack selection before page rescue. The boundary-looking page ranks hide a document-rank problem: most failures have the gold document outside the top 4 or missing from the retrieved pool.
 4. Exact MaxSim top4-vs-rank5 is still useful as a narrow non-OCR diagnostic, but the report limits its expected ceiling: it directly targets only rank-5/right-document cases, not deep document-retrieval gaps.
 
+### Heading/Breadcrumb Anchor Nodes
+
+Implemented in `scripts/graph_rerank_page_retrieval_predictions.py` and exposed through
+`scripts/run_external_graph_ppr_pipeline.sh`.
+
+Method:
+
+1. Parse Markdown heading stacks from converted `doc_pages_*.jsonl` fields, defaulting to `markdown`.
+2. Create normalized heading nodes for leaf headings and breadcrumbs such as
+   `Financial Statements > Notes > Revenue Recognition`.
+3. Drop broad heading nodes that match too many candidate pages or documents.
+4. Add undirected heading-page edges so pages sharing a section can propagate mass.
+5. In `query_gated` and `query_gated_shared` modes, add restart mass only to headings whose leaf or
+   breadcrumb overlaps the query.
+
+Recommended first ablation:
+
+```bash
+HEADING_BREADCRUMB_MODE=query_gated \
+HEADING_BREADCRUMB_FIELD="markdown" \
+HEADING_BREADCRUMB_EDGE_WEIGHT=0.15 \
+HEADING_BREADCRUMB_RESTART_WEIGHT=0.10 \
+HEADING_BREADCRUMB_MAX_PAGE_MATCHES=50 \
+HEADING_BREADCRUMB_MAX_DOC_MATCHES=20 \
+HEADING_BREADCRUMB_WEIGHT_MODE=local_idf \
+bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+Interpretation by limitation bucket:
+
+1. ViDoRe: likely useful for right-document boundary and same-document sibling failures when section
+   names or report headings survive in markdown.
+2. MMDocIR: useful as a cheap section bridge for financial reports and academic papers, but cannot
+   solve the 305 document-retrieval-gap failures alone.
+3. OpenDocVQA: lower priority unless OCR/markdown includes meaningful headings; the dominant
+   bottleneck is document/pack selection, not local page localization.
+
 The regenerated report now also prints the categorical views needed for the limitation write-up:
 retrievability ceiling, failure category by limitation group, limitation by page-rank bucket,
 limitation by document-rank bucket, query-cue slices, gold-label shape, top-k evidence tags,
