@@ -79,6 +79,7 @@ def parse_args() -> argparse.Namespace:
             "pairwise_posterior",
             "pairwise_posterior_preserve",
             "pairwise_posterior_adaptive_preserve",
+            "pairwise_counterfactual_posterior",
         ),
         default="relative_z",
         help=(
@@ -93,7 +94,9 @@ def parse_args() -> argparse.Namespace:
             "pairwise_posterior_preserve adds an extra base-rank preservation prior to "
             "the current top-k page before deciding the replacement. "
             "pairwise_posterior_adaptive_preserve scales that preservation prior by "
-            "the base evidence concentration relative to graph/support concentration."
+            "the base evidence concentration relative to graph/support concentration. "
+            "pairwise_counterfactual_posterior averages pairwise posterior scores over "
+            "base/graph/support evidence-source counterfactuals."
         ),
     )
     parser.add_argument(
@@ -465,6 +468,8 @@ def pairwise_posterior_scores(
     graph_scores: dict[str, float],
     support_ranks: dict[str, dict[str, int]],
     args: argparse.Namespace,
+    graph_evidence_scale: float = 1.0,
+    support_evidence_scale: float = 1.0,
 ) -> tuple[dict[str, float], dict[str, Any]]:
     base_prior = normalize({
         uid: 1.0 / float(base_rank.get(uid, 10**9))
@@ -495,8 +500,8 @@ def pairwise_posterior_scores(
 
     scores = {
         uid: math.log(max(base_prior.get(uid, 0.0), 1e-300))
-        + graph_beta * graph_z.get(uid, 0.0)
-        + support_beta * support_z.get(uid, 0.0)
+        + float(graph_evidence_scale) * graph_beta * graph_z.get(uid, 0.0)
+        + float(support_evidence_scale) * support_beta * support_z.get(uid, 0.0)
         for uid in local_pages
     }
     diagnostics = {
@@ -513,11 +518,60 @@ def pairwise_posterior_scores(
         },
         "graph_beta": graph_beta,
         "support_beta": support_beta if support_ranks else None,
+        "graph_evidence_scale": float(graph_evidence_scale),
+        "support_evidence_scale": float(support_evidence_scale) if support_ranks else None,
         "base_prior": base_prior,
         "graph_posterior": graph_posterior,
         "support_posterior": support_posterior if support_ranks else {},
     }
     return scores, diagnostics
+
+
+def pairwise_counterfactual_posterior_scores(
+    *,
+    local_pages: list[str],
+    base_rank: dict[str, int],
+    graph_scores: dict[str, float],
+    support_ranks: dict[str, dict[str, int]],
+    args: argparse.Namespace,
+) -> tuple[dict[str, float], dict[str, Any], dict[str, dict[str, float]]]:
+    models: list[tuple[str, float, float]] = [
+        ("base", 0.0, 0.0),
+        ("graph", 1.0, 0.0),
+    ]
+    if support_ranks:
+        models.extend([
+            ("support", 0.0, 1.0),
+            ("graph_support", 1.0, 1.0),
+        ])
+
+    score_maps: dict[str, dict[str, float]] = {}
+    diagnostics_by_model: dict[str, dict[str, Any]] = {}
+    for label, graph_scale, support_scale in models:
+        scores, diagnostics = pairwise_posterior_scores(
+            local_pages=local_pages,
+            base_rank=base_rank,
+            graph_scores=graph_scores,
+            support_ranks=support_ranks,
+            args=args,
+            graph_evidence_scale=graph_scale,
+            support_evidence_scale=support_scale,
+        )
+        score_maps[label] = scores
+        diagnostics_by_model[label] = diagnostics
+
+    model_count = float(len(score_maps))
+    averaged_scores = {
+        uid: sum(scores.get(uid, -math.inf) for scores in score_maps.values()) / model_count
+        for uid in local_pages
+    }
+    full_diag = diagnostics_by_model.get("graph_support") or diagnostics_by_model.get("graph") or {}
+    diagnostics = dict(full_diag)
+    diagnostics.update({
+        "counterfactual_models": list(score_maps),
+        "counterfactual_model_count": len(score_maps),
+    })
+    return averaged_scores, diagnostics, score_maps
 
 
 def pairwise_preservation_prior(
@@ -713,9 +767,11 @@ def rerank_one(
         "pairwise_posterior",
         "pairwise_posterior_preserve",
         "pairwise_posterior_adaptive_preserve",
+        "pairwise_counterfactual_posterior",
     }
     pairwise_preserve_mode = args.decision_test == "pairwise_posterior_preserve"
     pairwise_adaptive_preserve_mode = args.decision_test == "pairwise_posterior_adaptive_preserve"
+    pairwise_counterfactual_mode = args.decision_test == "pairwise_counterfactual_posterior"
     boundary_top = max(int(args.boundary_top_pages), int(args.hit_k) + 1)
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
@@ -756,6 +812,12 @@ def rerank_one(
     pairwise_probability: float | None = None
     weakest_top_pairwise_score: float | None = None
     best_boundary_pairwise_score: float | None = None
+    counterfactual_score_maps: dict[str, dict[str, float]] = {}
+    counterfactual_positive_frac: float | None = None
+    counterfactual_same_swap_frac: float | None = None
+    counterfactual_margin_mean: float | None = None
+    counterfactual_margin_min: float | None = None
+    counterfactual_margin_std: float | None = None
 
     if args.decision_test in posterior_modes:
         if args.decision_test == "posterior_mixture":
@@ -796,13 +858,22 @@ def rerank_one(
         )
         accepted = reordered_pages != base_pages
     elif pairwise_posterior_mode:
-        posterior_scores, posterior_diag = pairwise_posterior_scores(
-            local_pages=local_pages,
-            base_rank=base_rank,
-            graph_scores=graph_scores,
-            support_ranks=support_ranks,
-            args=args,
-        )
+        if pairwise_counterfactual_mode:
+            posterior_scores, posterior_diag, counterfactual_score_maps = pairwise_counterfactual_posterior_scores(
+                local_pages=local_pages,
+                base_rank=base_rank,
+                graph_scores=graph_scores,
+                support_ranks=support_ranks,
+                args=args,
+            )
+        else:
+            posterior_scores, posterior_diag = pairwise_posterior_scores(
+                local_pages=local_pages,
+                base_rank=base_rank,
+                graph_scores=graph_scores,
+                support_ranks=support_ranks,
+                args=args,
+            )
         if pairwise_adaptive_preserve_mode:
             pairwise_preservation_prior_scale = adaptive_preservation_scale(posterior_diag)
         elif pairwise_preserve_mode:
@@ -825,6 +896,29 @@ def rerank_one(
             base_rank=base_rank,
             preservation_prior_scale=pairwise_preservation_prior_scale,
         )
+        if counterfactual_score_maps:
+            counterfactual_margins = [
+                scores.get(best_boundary, -math.inf) - scores.get(weakest_top, -math.inf)
+                for scores in counterfactual_score_maps.values()
+            ]
+            finite_margins = [value for value in counterfactual_margins if math.isfinite(value)]
+            if finite_margins:
+                counterfactual_margin_mean = sum(finite_margins) / float(len(finite_margins))
+                counterfactual_margin_min = min(finite_margins)
+                counterfactual_positive_frac = sum(1 for value in finite_margins if value > 0.0) / float(len(finite_margins))
+                variance = sum((value - counterfactual_margin_mean) ** 2 for value in finite_margins) / float(len(finite_margins))
+                counterfactual_margin_std = math.sqrt(max(0.0, variance))
+            same_swap_count = 0
+            for scores in counterfactual_score_maps.values():
+                model_top, model_boundary, *_ = best_pairwise_posterior_swap(
+                    top_pages=top_pages,
+                    boundary_pages=boundary_pages,
+                    posterior_scores=scores,
+                    base_rank=base_rank,
+                    preservation_prior_scale=0.0,
+                )
+                same_swap_count += int(model_top == weakest_top and model_boundary == best_boundary)
+            counterfactual_same_swap_frac = same_swap_count / float(len(counterfactual_score_maps))
         pairwise_probability = stable_sigmoid(pairwise_score_margin)
         accepted = bool(pairwise_score_margin > 0.0)
     elif args.decision_test == "paired_gaussian":
@@ -900,6 +994,13 @@ def rerank_one(
         "pairwise_probability": pairwise_probability,
         "weakest_top_pairwise_score": weakest_top_pairwise_score,
         "best_boundary_pairwise_score": best_boundary_pairwise_score,
+        "counterfactual_models": posterior_diag.get("counterfactual_models", []),
+        "counterfactual_model_count": posterior_diag.get("counterfactual_model_count"),
+        "counterfactual_positive_frac": counterfactual_positive_frac,
+        "counterfactual_same_swap_frac": counterfactual_same_swap_frac,
+        "counterfactual_margin_mean": counterfactual_margin_mean,
+        "counterfactual_margin_min": counterfactual_margin_min,
+        "counterfactual_margin_std": counterfactual_margin_std,
         "boundary_page_count": len(boundary_pages),
         "graph_edge_count": graph_diag["edge_count"],
         "decision_test": str(args.decision_test),
