@@ -29,6 +29,17 @@ from analyze_layout_evidence_gate import (
 
 
 BASE_LABEL = "base"
+NON_OBSERVABLE_CASE_PATTERNS = (
+    "gold",
+    "oracle",
+    "hit",
+    "recall",
+    "recovered",
+    "lost",
+    "movement",
+    "label",
+    "target",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,6 +139,11 @@ def overlap_frac(left: list[str], right: list[str], k: int) -> float:
     return len(set(left[:k]) & set(right[:k])) / float(k)
 
 
+def observable_case_feature(key: str) -> bool:
+    lowered = key.lower()
+    return not any(pattern in lowered for pattern in NON_OBSERVABLE_CASE_PATTERNS)
+
+
 def candidate_features(
     *,
     gold_row: dict[str, Any],
@@ -173,6 +189,8 @@ def candidate_features(
     )
 
     for key, value in case_row.items():
+        if not observable_case_feature(key):
+            continue
         if isinstance(value, bool):
             features[f"case_{key}"] = bool_float(value)
         elif isinstance(value, (int, float)) and math.isfinite(float(value)):
@@ -577,6 +595,14 @@ def run_router(
 def render_md(report: dict[str, Any]) -> str:
     lines = ["# Query Subtype Router", ""]
     hit_k = int(report.get("hit_k", 4))
+    excluded = report.get("excluded_case_feature_patterns", [])
+    if excluded:
+        lines.append(
+            "Non-observable case fields are excluded before learning: "
+            + ", ".join(f"`{value}`" for value in excluded)
+            + "."
+        )
+        lines.append("")
     lines.append("## Final Cross-Validated Summary")
     lines.append("")
     headers = ["run", "n", f"base_hit@{hit_k}", f"routed_hit@{hit_k}", "recovered", "lost", "net", "selections"]
@@ -629,6 +655,7 @@ def main() -> None:
         "cv_mode": args.cv_mode,
         "max_depth": int(args.max_depth),
         "min_leaf": int(args.min_leaf),
+        "excluded_case_feature_patterns": list(NON_OBSERVABLE_CASE_PATTERNS),
     }
     if args.output_json:
         path = Path(args.output_json)
