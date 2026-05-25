@@ -21,7 +21,7 @@ All MMDocIR numbers below are page hit@4 unless otherwise noted.
 | Coherence-gated same-doc edges | 1115 / 1658 | +1 | Small gain; low-risk structural graph feature |
 | Evidence community nodes | 1111-1114 / 1658 | -3 to 0 | Not useful yet |
 | Query-position graph nodes | 1114 / 1658 | 0 | Conceptually useful but empirically neutral so far |
-| Heading/breadcrumb anchor nodes | pending | pending | Graph-native section bridge for query-named headings; implemented, needs ablation |
+| Heading/breadcrumb anchor nodes | pending | pending | Graph-native section bridge for query-named headings; implemented with Markdown and OCR/VLM fallback, needs ablation |
 | Structural metadata reranker, conservative parser | 1118 / 1658 | +4, lost=0 | Best targeted gain, but rule-based/heuristic |
 | Query anchor evidence nodes, uniform w0.20 r0.05 | 1117 / 1658 | +3, lost=0 | Best graph-native novelty result so far |
 | Query anchor r0.10 + tight structural metadata | 1123 / 1658 | +9, lost=0 | Best current MMDocIR result, but includes heuristic structural layer |
