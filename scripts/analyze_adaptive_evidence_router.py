@@ -29,7 +29,14 @@ from analyze_layout_evidence_gate import (
 
 
 BASE_LABEL = "base"
-SELF_CALIBRATED_METHODS = ["robust_z", "percentile", "consensus", "pareto", "qpp"]
+SELF_CALIBRATED_METHODS = [
+    "robust_z",
+    "robust_z_qpp_veto",
+    "percentile",
+    "consensus",
+    "pareto",
+    "qpp",
+]
 SELF_CALIBRATED_PROFILES = SELF_CALIBRATED_METHODS + ["conservative", "balanced"]
 
 
@@ -478,6 +485,7 @@ def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> 
     promoted_count = float(f.get("candidate_promoted_from_below4_count", 0.0))
     base_boundary_margin = float(f.get("base_score_margin_4_5", 0.0))
     base_head_margin = float(f.get("base_score_margin_1_2", 0.0))
+    candidate_head_margin = float(f.get("candidate_score_margin_1_2", 0.0))
     candidate_boundary_margin = float(f.get("candidate_score_margin_4_5", 0.0))
     doc_overlap = float(f.get("candidate_top4_doc_in_base_top4_frac", 0.0))
     top4_positive_evidence_count = float(f.get("candidate_top4_positive_evidence_count", 0.0))
@@ -492,14 +500,33 @@ def self_calibrated_pair_accepts(pair: dict[str, Any], rule: dict[str, Any]) -> 
     evidence_selective = 0 < positive_evidence_page_count < candidate_page_count
     base_locally_uncertain = base_boundary_margin <= base_head_margin
     top4_has_evidence = top4_positive_evidence_count > 0
+    robust_z_accept = bool(
+        doc_safe
+        and promotes_pages
+        and evidence_selective
+        and top4_has_evidence
+        and top4_evidence_robust_z >= 1.0
+    )
 
     if profile == "robust_z":
+        return robust_z_accept
+
+    if profile == "robust_z_qpp_veto":
+        relative_boundary_ok = (
+            candidate_boundary_margin >= 0.5 * base_boundary_margin
+            if base_boundary_margin > 0
+            else candidate_boundary_margin >= 0
+        )
+        candidate_self_commitment_ok = (
+            candidate_boundary_margin >= 0.25 * candidate_head_margin
+            if candidate_head_margin > 0
+            else candidate_boundary_margin >= 0
+        )
         return bool(
-            doc_safe
-            and promotes_pages
-            and evidence_selective
-            and top4_has_evidence
-            and top4_evidence_robust_z >= 1.0
+            robust_z_accept
+            and base_locally_uncertain
+            and relative_boundary_ok
+            and candidate_self_commitment_ok
         )
 
     if profile == "percentile":
@@ -619,6 +646,13 @@ def display_rule_label(rule: dict[str, Any]) -> str:
                 "robust_z("
                 "same_base_docs AND promoted_pages AND selective_query_evidence "
                 "AND top4_evidence_robust_z >= 1)"
+            )
+        if profile == "robust_z_qpp_veto":
+            return (
+                "robust_z_qpp_veto("
+                "robust_z AND base_boundary_margin <= base_head_margin "
+                "AND candidate_boundary >= 0.5 * base_boundary "
+                "AND candidate_boundary >= 0.25 * candidate_head_margin)"
             )
         if profile == "percentile":
             return (

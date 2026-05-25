@@ -258,10 +258,11 @@ python scripts/analyze_adaptive_evidence_router.py \
 This mode does not learn dataset thresholds. It compares five fixed, self-normalized evidence tests:
 
 1. `robust_z`: candidate top-4 evidence must be high relative to the query's own evidence-score median and MAD.
-2. `percentile`: candidate top-4 evidence must land in the query's own upper evidence percentile.
-3. `consensus`: the candidate must preserve base top documents while OCR evidence supports the promoted pages.
-4. `pareto`: the candidate must add OCR evidence while keeping base document agreement and at least some base top-4 page support.
-5. `qpp`: the base ranking must look locally uncertain and the candidate must be at least as committed at the top-4 boundary.
+2. `robust_z_qpp_veto`: `robust_z` plus a fixed margin veto requiring the base to be locally uncertain and the candidate top-4 boundary not to collapse relative to either the base boundary or the candidate head margin.
+3. `percentile`: candidate top-4 evidence must land in the query's own upper evidence percentile.
+4. `consensus`: the candidate must preserve base top documents while OCR evidence supports the promoted pages.
+5. `pareto`: the candidate must add OCR evidence while keeping base document agreement and at least some base top-4 page support.
+6. `qpp`: the base ranking must look locally uncertain and the candidate must be at least as committed at the top-4 boundary.
 
 For `robust_z` and `percentile`, regenerate the OCR evidence graph case JSON after this code change;
 OCR extraction itself does not need to be rerun.
