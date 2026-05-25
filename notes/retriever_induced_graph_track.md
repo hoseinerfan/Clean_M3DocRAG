@@ -206,6 +206,7 @@ python scripts/analyze_adaptive_evidence_router.py \
   --hit-k 4 \
   --min-accept 5 \
   --max-doc-hit-loss 0 \
+  --max-page-hit-loss 7 \
   --max-router-rules 3 \
   --output-md "$ROUTER_DIR/adaptive_evidence_router.md" \
   --output-json "$ROUTER_DIR/adaptive_evidence_router.json" \
@@ -230,3 +231,7 @@ else keep base
 Selection is greedy under `--max-doc-hit-loss 0`. This keeps the thesis claim conservative:
 adaptive evidence modules may repair right-document/wrong-page failures, but the router must not
 trade away document localization relative to the graph page-preserving base.
+
+For stricter risk control, add `--max-page-hit-loss 0` to require a no-page-loss router, or set a
+small budget such as `--max-page-hit-loss 7` when the goal is to improve net page hits while
+limiting regressions.

@@ -68,6 +68,15 @@ def parse_args() -> argparse.Namespace:
         default=0,
         help="Discard rules/routers whose doc-hit count is worse than base by more than this.",
     )
+    parser.add_argument(
+        "--max-page-hit-loss",
+        type=int,
+        default=-1,
+        help=(
+            "Optional cap on page-hit losses versus base. Use 0 for a no-page-loss router; "
+            "negative disables this constraint."
+        ),
+    )
     parser.add_argument("--pair-source-rules", type=int, default=80)
     parser.add_argument(
         "--max-rules",
@@ -519,6 +528,7 @@ def learn_candidate_rules(
     hit_k: int,
     min_accept: int,
     max_doc_hit_loss: int,
+    max_page_hit_loss: int,
     pair_source_rules: int,
     max_rules: int,
 ) -> list[dict[str, Any]]:
@@ -548,6 +558,7 @@ def learn_candidate_rules(
             for item in single_evals
             if item["accept_count"] >= min_accept
             and item["doc_hit_count"] >= base_summary["doc_hit_count"] - max_doc_hit_loss
+            and (max_page_hit_loss < 0 or item["lost"] <= max_page_hit_loss)
         ]
         label_candidates = list(filtered_singles)
         filtered_singles.sort(key=rank_summary_key, reverse=True)
@@ -567,6 +578,8 @@ def learn_candidate_rules(
                 if item["accept_count"] < min_accept:
                     continue
                 if item["doc_hit_count"] < base_summary["doc_hit_count"] - max_doc_hit_loss:
+                    continue
+                if max_page_hit_loss >= 0 and item["lost"] > max_page_hit_loss:
                     continue
                 label_candidates.append(item)
 
@@ -595,6 +608,7 @@ def greedy_router(
     recall_ks: list[int],
     hit_k: int,
     max_doc_hit_loss: int,
+    max_page_hit_loss: int,
     max_router_rules: int,
     router_source_rules: int,
 ) -> dict[str, Any]:
@@ -615,6 +629,8 @@ def greedy_router(
             trial_rules = selected_rules + [rule]
             trial_summary = evaluate_router(bundles, trial_rules, recall_ks, hit_k)
             if trial_summary["doc_hit_count"] < base_summary["doc_hit_count"] - max_doc_hit_loss:
+                continue
+            if max_page_hit_loss >= 0 and trial_summary["lost"] > max_page_hit_loss:
                 continue
             if best_summary is None or rank_summary_key(trial_summary) > rank_summary_key(best_summary):
                 best_rule = rule
@@ -776,6 +792,7 @@ def main() -> None:
         hit_k=int(args.hit_k),
         min_accept=int(args.min_accept),
         max_doc_hit_loss=int(args.max_doc_hit_loss),
+        max_page_hit_loss=int(args.max_page_hit_loss),
         pair_source_rules=int(args.pair_source_rules),
         max_rules=int(args.max_rules),
     )
@@ -789,6 +806,7 @@ def main() -> None:
             recall_ks=args.recall_ks,
             hit_k=int(args.hit_k),
             max_doc_hit_loss=int(args.max_doc_hit_loss),
+            max_page_hit_loss=int(args.max_page_hit_loss),
             max_router_rules=int(args.max_router_rules),
             router_source_rules=int(args.router_source_rules),
         )
@@ -896,6 +914,8 @@ def main() -> None:
         "candidate_pair_count": len(pair_rows),
         "hit_k": int(args.hit_k),
         "recall_ks": args.recall_ks,
+        "max_doc_hit_loss": int(args.max_doc_hit_loss),
+        "max_page_hit_loss": int(args.max_page_hit_loss),
         "base": base_summary,
         "candidates": candidate_summaries,
         "oracle": oracle_summary,
