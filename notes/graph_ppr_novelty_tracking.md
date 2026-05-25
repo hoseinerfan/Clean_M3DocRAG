@@ -27,6 +27,7 @@ All MMDocIR numbers below are page hit@4 unless otherwise noted.
 | Query anchor r0.10 + tight structural metadata | 1123 / 1658 | +9, lost=0 | Best current MMDocIR result, but includes heuristic structural layer |
 | Financial verifier v2, broad table/text evidence | 1120 / 1658 | +6, lost=0 vs denseheavy baseline in case compare | Useful diagnostic; evidence often too broad |
 | Financial verifier strict doc-prior | 1118 / 1658 | +4, but lost=2 | Reduced broad positives, but too strict for headline use |
+| SPLADE/BM25 page-page kNN graph | SPLADE implemented; BM25 implemented, pending run | pending BM25 | Retriever-induced semantic/lexical graph views with mutual-kNN noise control |
 | LayoutLMv3 fallback-text kNN graph | 1104-1114 / 1658 | -10 to 0 | Negative ablation until real OCR/layout boxes are available |
 
 M3DocVQA/MMQA document retrieval numbers:
@@ -74,11 +75,12 @@ The structural metadata reranker is useful but heuristic. It should be presented
 The graph-native methods are the main novelty path. They should be prioritized when looking for advisor-facing contributions:
 
 1. Query anchor evidence nodes.
-2. Heading/breadcrumb anchor nodes.
-3. Page-type/modality nodes.
-4. Section-role nodes.
-5. Visual tag nodes from VLM/captioning.
-6. Reliability-weighted propagation and source weighting.
+2. SPLADE/BM25 retriever-induced page-page graph views.
+3. Heading/breadcrumb anchor nodes.
+4. Page-type/modality nodes.
+5. Section-role nodes.
+6. Visual tag nodes from VLM/captioning.
+7. Reliability-weighted propagation and source weighting.
 
 ## Next Experiments
 

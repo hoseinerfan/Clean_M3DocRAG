@@ -398,6 +398,29 @@ heading nodes propagate page mass within candidate sections.
 
 Run the best-config doc-shortlist check on the smaller datasets first.
 
+Retriever-induced page-page graph edges:
+
+```bash
+DATA_NAME=<dataset> \
+DATA_ROOT="$LOCAL_DATA_DIR/<dataset-root>" \
+DENSE_PRED=/path/to/plain_top224_ret1000_prediction.json \
+SPARSE_PRED=/path/to/splade_ret1000.prediction.json \
+SPLADE_INDEX_PT=/path/to/splade_page_index.pt \
+BM25_PAGE_TEXT_JSONL="$DATA_ROOT/doc_pages_dev.jsonl" \
+BM25_KNN_TEXT_FIELD=markdown \
+OUT_DIR=/path/to/graph_ppr_output \
+BM25_KNN_ENABLE=1 \
+BM25_KNN_MUTUAL_ONLY=1 \
+bash scripts/run_retriever_induced_graph_track.sh
+```
+
+This runs base Graph-PPR, SPLADE page-page kNN Graph-PPR, BM25 page-page mutual-kNN Graph-PPR, and
+an unweighted RRF over the graph views. BM25 kNN can also be built standalone with
+`scripts/build_bm25_page_knn_graph.py`; it emits the same `--external-page-graph-jsonl` schema as
+the SPLADE kNN builder. For the original Markdown-only setup, use `BM25_KNN_TEXT_FIELD=markdown`;
+datasets without a real `markdown` field need that field generated upstream before this BM25 view is
+meaningful.
+
 SciEGQA-Bench:
 
 ```bash

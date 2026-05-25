@@ -11,7 +11,8 @@ Page-preserving graph PPR can still fail page localization because document/page
 1. Dense/SPLADE page retrieval seeds.
 2. Base page-preserving graph PPR.
 3. SPLADE-induced page kNN graph PPR.
-4. Unweighted page-level RRF over graph-view rankings.
+4. BM25-induced page kNN graph PPR over page text or Markdown.
+5. Unweighted page-level RRF over graph-view rankings.
 
 ## Pruned From Main Method
 
@@ -22,7 +23,9 @@ Page-preserving graph PPR can still fail page localization because document/page
 
 ## Why This Is Non-Heuristic
 
-The method does not use gold labels, learned thresholds, or dataset-specific case rules. The SPLADE-kNN edges are generated from lexical retriever representations, PPR is a fixed graph propagation algorithm, and RRF is a standard rank aggregation method.
+The method does not use gold labels, learned thresholds, or dataset-specific case rules. The
+SPLADE-kNN and BM25-kNN edges are generated from retriever/text representations, PPR is a fixed
+graph propagation algorithm, and RRF is a standard rank aggregation method.
 
 ## Main Script
 
@@ -45,12 +48,25 @@ BASE_PRED="$DENSE_PRED"
 export DATA_NAME DATA_ROOT DENSE_PRED SPARSE_PRED SPLADE_INDEX_PT OUT_DIR SUBSET_GOLD SUBSET_LABEL BASE_PRED
 ```
 
+BM25 is opt-in. Point it at the exact text source you want indexed. For the original
+Markdown-only idea, use a converted page manifest with a real `markdown` field:
+
+```bash
+BM25_KNN_ENABLE=1
+BM25_PAGE_TEXT_JSONL="$DATA_ROOT/doc_pages_dev.jsonl"
+BM25_KNN_TEXT_FIELD=markdown
+```
+
+If a dataset has no `markdown` field, this graph view is not applicable until a real Markdown page
+field is generated upstream.
+
 Outputs:
 
 1. `${DATA_NAME}_${SUBSET_LABEL}_graph_ppr_base.prediction.json`
 2. `${DATA_NAME}_${SUBSET_LABEL}_graph_ppr_splade_knn.prediction.json`
-3. `${DATA_NAME}_${SUBSET_LABEL}_graph_view_rrf.prediction.json`
-4. Matching summaries and top-4 case-comparison JSON files.
+3. `${DATA_NAME}_${SUBSET_LABEL}_graph_ppr_bm25_mknn.prediction.json` when `BM25_KNN_ENABLE=1`
+4. `${DATA_NAME}_${SUBSET_LABEL}_graph_view_<views>_rrf.prediction.json`
+5. Matching summaries and top-4 case-comparison JSON files.
 
 ## Reporting Table
 
@@ -59,18 +75,19 @@ For each dataset/subset, report:
 1. Plain dense baseline.
 2. Base graph PPR.
 3. SPLADE-kNN graph PPR.
-4. Graph-view RRF.
+4. BM25-kNN graph PPR.
+5. Graph-view RRF.
 
 Metrics:
 
 1. Page R@1, R@2, R@4, R@10, R@20.
 2. Doc R@4.
 3. Recovered/lost/worsened top-4 pages versus dense baseline.
-4. SPLADE-kNN edge count and source/target page counts.
+4. SPLADE/BM25 kNN edge count and source/target page counts.
 
 ## Interpretation
 
-If SPLADE-kNN graph PPR improves top-4 page localization, the thesis claim is that semantic page-page edges address a limitation of page-preserving graph PPR. If SPLADE-kNN improves only R@1/R@2, report it as rank sharpening. If SPLADE-kNN is noisy, the unweighted RRF result is the robust final method.
+If SPLADE-kNN or BM25-kNN graph PPR improves top-4 page localization, the thesis claim is that semantic or lexical page-page edges address a limitation of page-preserving graph PPR. If a kNN graph improves only R@1/R@2, report it as rank sharpening. If an individual kNN view is noisy, the unweighted RRF result is the robust final method.
 
 ## Mutual-kNN Variant
 
@@ -81,6 +98,36 @@ SPLADE_KNN_MUTUAL_ONLY=1 bash scripts/run_retriever_induced_graph_track.sh
 ```
 
 This keeps only reciprocal SPLADE neighbors: page A connects to page B only when each appears in the other's top-k list. Mutual-kNN is a standard graph construction, not a learned or gold-tuned threshold. Use it as the first noise-control ablation when the directed SPLADE-kNN graph recovers hard cases but also worsens some same-document sibling pages.
+
+BM25 uses mutual-kNN by default when enabled because lexical page-page matches are noisier:
+
+```bash
+BM25_KNN_ENABLE=1 \
+BM25_KNN_MUTUAL_ONLY=1 \
+BM25_KNN_TOP_K=8 \
+BM25_KNN_SOURCE_TOPK_TERMS=64 \
+bash scripts/run_retriever_induced_graph_track.sh
+```
+
+The standalone edge builder is:
+
+```bash
+python scripts/build_bm25_page_knn_graph.py \
+  --page-text-jsonl "$BM25_PAGE_TEXT_JSONL" \
+  --source-prediction-json "$DENSE_PRED" \
+  --source-prediction-json "$SPARSE_PRED" \
+  --qid-filter-jsonl "$SUBSET_GOLD" \
+  --source-top-pages 1000 \
+  --top-k 8 \
+  --source-topk-terms 64 \
+  --mutual-only \
+  --output-jsonl "$OUT_DIR/bm25_mknn.edges.jsonl" \
+  --output-summary-json "$OUT_DIR/bm25_mknn.summary.json"
+```
+
+The builder writes `bm25_page_knn` edges with per-source max-normalized scores by default, so
+`EXTERNAL_PAGE_GRAPH_WEIGHT_MODE=score` uses edge weights on a similar 0-1 scale to SPLADE cosine
+edges.
 
 ## Layout/Evidence Graph Pivot
 
