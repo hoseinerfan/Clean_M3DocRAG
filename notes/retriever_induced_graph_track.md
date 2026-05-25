@@ -320,6 +320,32 @@ Current interpretation:
 3. `pairwise_content_posterior` is the current main hard-subset boundary method; `pairwise_counterfactual_content_posterior` is a conservative ablation.
 4. Do not apply `pairwise_content_posterior` unconditionally to full datasets. The full OpenDocVQA no-support run shows it is unsafe when the base already has many correct top-4 pages.
 
+Full Graph-PPR limitation report:
+
+The audit below is oracle analysis only. It explains remaining failures of the frozen
+`denseheavy125_medium_both` Graph-PPR output and must not be used as a routing feature.
+
+| Dataset | qids | page hit@4 | doc hit@4 | page failures | document retrieval gap | same-document page confusion | rank-boundary localization | right-doc deep/missing page |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ViDoRe V3 | 14514 | 9383 | 13206 | 5131 | 1308 / 5131 = 25.5% | 1921 / 5131 = 37.4% | 1534 / 5131 = 29.9% | 368 / 5131 = 7.2% |
+| MMDocIR | 1658 | 1114 | 1353 | 544 | 305 / 544 = 56.1% | 118 / 544 = 21.7% | 98 / 544 = 18.0% | 23 / 544 = 4.2% |
+| OpenDocVQA | 41017 | 26173 | 26901 | 14844 | 14116 / 14844 = 95.1% | 212 / 14844 = 1.4% | 482 / 14844 = 3.2% | 34 / 14844 = 0.2% |
+
+Rank-5 and document-rank diagnostics:
+
+| Dataset | rank-5 gold failures | right-doc failures | rank-5 gold within right-doc failures | dominant failed gold-doc bucket |
+| --- | ---: | ---: | ---: | --- |
+| ViDoRe V3 | 470 / 5131 = 9.2% | 3823 | 449 / 3823 = 11.7% | `top4` = 3823 |
+| MMDocIR | 16 / 544 = 2.9% | 239 | 15 / 239 = 6.3% | `top4` = 239 |
+| OpenDocVQA | 1184 / 14844 = 8.0% | 728 | 207 / 728 = 28.4% | `doc_5_10` = 5220 |
+
+Implications:
+
+1. ViDoRe is the strongest target for local page evidence: most failures already have the right document in the top 4, and finance/table-heavy subsets show many same-document and boundary mistakes.
+2. MMDocIR needs both levels. Boundary/content evidence can recover some cases, but the largest failure group is document discovery.
+3. OpenDocVQA needs document/pack selection before page rescue. The boundary-looking page ranks hide a document-rank problem: most failures have the gold document outside the top 4 or missing from the retrieved pool.
+4. Exact MaxSim top4-vs-rank5 is still useful as a narrow non-OCR diagnostic, but the report limits its expected ceiling: it directly targets only rank-5/right-document cases, not deep document-retrieval gaps.
+
 Canonical subset command shape:
 
 ```bash

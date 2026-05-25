@@ -569,9 +569,10 @@ python scripts/audit_retrieval_failure_taxonomy.py \
   --hit-k 4 \
   --boundary-k 10 \
   --adjacent-window 2 \
-  --output-json "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy.json" \
-  --output-md "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy.md" \
-  --output-csv "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy_cases.csv"
+  --topn 50 \
+  --output-json "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report.json" \
+  --output-md "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report.md" \
+  --output-csv "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report_cases.csv"
 ```
 
 This is an oracle audit, not a routing method. Use it to report dataset limitations and decide which
@@ -581,6 +582,29 @@ The Markdown output is a limitation report. It includes document-retrieval gaps,
 localization, same-document page confusion, deep/missing right-document pages, exact gold-page rank
 histograms, rank-5 gold counts, query-cue slices, metadata hotspots, and example failures by
 limitation group. The CSV is the best artifact for custom pivot tables.
+
+Observed limitation report for frozen Graph-PPR outputs:
+
+| Dataset | qids | page hit@4 | doc hit@4 | page failures | document retrieval gap | same-document page confusion | rank-boundary localization | right-doc deep/missing page |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ViDoRe V3 | 14514 | 9383 | 13206 | 5131 | 1308 / 5131 = 25.5% | 1921 / 5131 = 37.4% | 1534 / 5131 = 29.9% | 368 / 5131 = 7.2% |
+| MMDocIR | 1658 | 1114 | 1353 | 544 | 305 / 544 = 56.1% | 118 / 544 = 21.7% | 98 / 544 = 18.0% | 23 / 544 = 4.2% |
+| OpenDocVQA | 41017 | 26173 | 26901 | 14844 | 14116 / 14844 = 95.1% | 212 / 14844 = 1.4% | 482 / 14844 = 3.2% | 34 / 14844 = 0.2% |
+
+Rank and document-position diagnostics:
+
+| Dataset | rank-5 gold failures | right-doc failures | rank-5 gold within right-doc failures | dominant failed gold-doc bucket |
+| --- | ---: | ---: | ---: | --- |
+| ViDoRe V3 | 470 / 5131 = 9.2% | 3823 | 449 / 3823 = 11.7% | `top4` = 3823 |
+| MMDocIR | 16 / 544 = 2.9% | 239 | 15 / 239 = 6.3% | `top4` = 239 |
+| OpenDocVQA | 1184 / 14844 = 8.0% | 728 | 207 / 728 = 28.4% | `doc_5_10` = 5220 |
+
+Findings:
+
+1. ViDoRe is mostly a page-local failure problem after the right document is already present. Same-document confusion and top-k boundary misses dominate, so exact MaxSim boundary checks, page content evidence, OCR/layout regions, and adjacent-page traps are plausible targets.
+2. MMDocIR is mixed, but document discovery is the largest limitation. Page-local rescue can only attack the 239 right-document failures; 305 failures need stronger document/support recall.
+3. OpenDocVQA is not primarily a page-local boundary problem under the current packed-document setup. More than 95% of page failures are document-retrieval gaps, explaining why the full-dev no-support content posterior run lost many existing hits.
+4. Rank-5 gold is useful but not enough. On OpenDocVQA, many rank-5 gold pages are also document-rank-5 cases, so a top4-vs-rank5 page verifier cannot solve the dominant failure mode without better document/pack selection.
 
 ### MMLongBench DocQA
 

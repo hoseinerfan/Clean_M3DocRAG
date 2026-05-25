@@ -561,9 +561,10 @@ python scripts/audit_retrieval_failure_taxonomy.py \
   --hit-k 4 \
   --boundary-k 10 \
   --adjacent-window 2 \
-  --output-json "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy.json" \
-  --output-md "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy.md" \
-  --output-csv "$FAILURE_AUDIT_DIR/graph_page_preserve_failure_taxonomy_cases.csv"
+  --topn 50 \
+  --output-json "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report.json" \
+  --output-md "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report.md" \
+  --output-csv "$FAILURE_AUDIT_DIR/graph_page_preserve_limitation_report_cases.csv"
 ```
 
 This audit uses gold labels to explain failures, so it is for analysis only. Do not use its categories
@@ -576,6 +577,41 @@ document-retrieval gaps, rank-boundary localization, same-document page confusio
 right-document pages. It also reports exact failed gold-page rank histograms, rank-5 gold counts,
 query-cue slices, metadata hotspots, and example failures by limitation group. Use the CSV for
 custom pivots.
+
+Observed limitation report for frozen Graph-PPR outputs:
+
+| Dataset | qids | page hit@4 | doc hit@4 | page failures | document retrieval gap | same-document page confusion | rank-boundary localization | right-doc deep/missing page |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ViDoRe V3 | 14514 | 9383 | 13206 | 5131 | 1308 / 5131 = 25.5% | 1921 / 5131 = 37.4% | 1534 / 5131 = 29.9% | 368 / 5131 = 7.2% |
+| MMDocIR | 1658 | 1114 | 1353 | 544 | 305 / 544 = 56.1% | 118 / 544 = 21.7% | 98 / 544 = 18.0% | 23 / 544 = 4.2% |
+| OpenDocVQA | 41017 | 26173 | 26901 | 14844 | 14116 / 14844 = 95.1% | 212 / 14844 = 1.4% | 482 / 14844 = 3.2% | 34 / 14844 = 0.2% |
+
+Rank and document-position diagnostics:
+
+| Dataset | rank-5 gold failures | right-doc failures | rank-5 gold within right-doc failures | dominant failed gold-doc bucket |
+|---|---:|---:|---:|---|
+| ViDoRe V3 | 470 / 5131 = 9.2% | 3823 | 449 / 3823 = 11.7% | `top4` = 3823 |
+| MMDocIR | 16 / 544 = 2.9% | 239 | 15 / 239 = 6.3% | `top4` = 239 |
+| OpenDocVQA | 1184 / 14844 = 8.0% | 728 | 207 / 728 = 28.4% | `doc_5_10` = 5220 |
+
+Operational findings:
+
+1. ViDoRe is mostly a page-local failure problem after the right document is already present. The
+   largest buckets are same-document page confusion and rank-boundary localization, so local
+   evidence, exact MaxSim boundary checks, and content/OCR/layout verifiers are plausible next tests.
+2. MMDocIR is mixed, but document discovery is now the largest limitation. Boundary rescue can only
+   attack the 239 right-document failures; the 305 document-retrieval-gap failures need stronger
+   document/support recall.
+3. OpenDocVQA is not primarily a boundary/localization problem under this packed-document setup.
+   More than 95% of page failures are document-retrieval gaps, so unconditional page-local reranking
+   should not be expected to help and already produced a negative full-dev result.
+4. Rank-5 gold is useful but limited: 470 ViDoRe failures, 16 MMDocIR failures, and 1184 OpenDocVQA
+   failures have gold exactly at rank 5. On OpenDocVQA most of those are still document-rank-5 cases,
+   not right-document top-4 cases, so top4-vs-rank5 page swaps alone cannot solve the dominant issue.
+5. Dataset-specific hotspots point to different fixes: ViDoRe finance/table repositories are dominated
+   by same-document and boundary errors, MMDocIR financial reports and academic papers mix document
+   gaps with page-local errors, and OpenDocVQA needs document discovery/pack selection before page
+   localization.
 
 Exact MaxSim boundary verifier for Graph-PPR:
 
