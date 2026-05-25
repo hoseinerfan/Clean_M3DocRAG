@@ -548,7 +548,7 @@ Short label: `denseheavy125_medium_both`.
 
 Use `denseheavy125_medium_both` as the current frozen single page-labeled config. ViDoSeek's best individual row is `denseheavy150_m3best_pagepreserve`, but the `1.25/0.75 + medium_both` setting is the best common setting across SciEGQA, MMDocIR, ViDoRe V3, and OpenDocVQA and remains close on ViDoSeek. Do not claim universal superiority at every metric; report page@1 separately and keep `plain_top224` as the required baseline.
 
-Failure taxonomy audit for the frozen graph outputs:
+Limitation report / failure taxonomy audit for the frozen graph outputs:
 
 ```bash
 FAILURE_AUDIT_DIR=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/failure_taxonomy
@@ -570,6 +570,12 @@ This audit uses gold labels to explain failures, so it is for analysis only. Do 
 as routing features. The main categories are `doc_miss_topk`, `doc_missing_from_pool`,
 `right_doc_boundary_page`, `right_doc_adjacent_page`, `right_doc_same_doc_sibling`,
 `right_doc_late_page`, and `right_doc_gold_page_missing_from_pool`.
+
+The Markdown output is intended to be the limitation report: it collapses primary categories into
+document-retrieval gaps, rank-boundary localization, same-document page confusion, and deep/missing
+right-document pages. It also reports exact failed gold-page rank histograms, rank-5 gold counts,
+query-cue slices, metadata hotspots, and example failures by limitation group. Use the CSV for
+custom pivots.
 
 Exact MaxSim boundary verifier for Graph-PPR:
 

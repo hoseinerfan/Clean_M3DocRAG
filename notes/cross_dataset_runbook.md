@@ -554,7 +554,7 @@ python scripts/rerank_graph_boundary_exact_maxsim.py \
 For a cheap smoke test before a full run, add `--max-qids 100`. If the full run loses many existing
 top-4 hits, keep it as an audit result and do not replace Graph-PPR.
 
-### Failure Taxonomy Audit
+### Limitation Report / Failure Taxonomy Audit
 
 After a full Graph-PPR result exists, categorize its remaining page-hit failures:
 
@@ -576,6 +576,11 @@ python scripts/audit_retrieval_failure_taxonomy.py \
 
 This is an oracle audit, not a routing method. Use it to report dataset limitations and decide which
 new evidence source is worth testing next.
+
+The Markdown output is a limitation report. It includes document-retrieval gaps, rank-boundary
+localization, same-document page confusion, deep/missing right-document pages, exact gold-page rank
+histograms, rank-5 gold counts, query-cue slices, metadata hotspots, and example failures by
+limitation group. The CSV is the best artifact for custom pivot tables.
 
 ### MMLongBench DocQA
 
