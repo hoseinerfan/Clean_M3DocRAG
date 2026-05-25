@@ -155,3 +155,33 @@ bash scripts/run_layout_evidence_graph_track.sh
 ```
 
 With `LAYOUT_DISABLE_FALLBACK_REGIONS=1`, pages without explicit OCR/layout regions do not receive fallback text-block nodes. This makes `mean_explicit_region_pages` and `mean_fallback_region_pages` a direct sanity check for whether the result is a true OCR-region graph.
+
+### Risk-Calibrated Evidence Gate
+
+OCR-region graph reranking is intentionally treated as a selective operation, not an unconditional replacement for the base graph. Use `scripts/analyze_layout_evidence_gate.py` to learn a simple interpretable gate from finished base/candidate predictions and the per-query case JSON emitted by `run_layout_evidence_graph_track.sh`.
+
+Example cross-dataset command:
+
+```bash
+python scripts/analyze_layout_evidence_gate.py \
+  --run vidore "$VIDORE_GOLD" "$VIDORE_BASE" "$VIDORE_OCR_DOCANCHORED" "$VIDORE_OCR_DOCANCHORED_CASES" \
+  --run mmdocir "$MMDOCIR_GOLD" "$MMDOCIR_BASE" "$MMDOCIR_OCR_DOCANCHORED" "$MMDOCIR_OCR_DOCANCHORED_CASES" \
+  --hit-k 4 \
+  --min-accept 5 \
+  --max-doc-hit-loss 0 \
+  --output-md "$OUT_DIR/layout_evidence_gate_analysis.md" \
+  --output-json "$OUT_DIR/layout_evidence_gate_analysis.json" \
+  --output-csv "$OUT_DIR/layout_evidence_gate_features.csv" \
+  --output-rule-json "$OUT_DIR/layout_evidence_gate_rule.json" \
+  --output-gated-dir "$OUT_DIR/gated_predictions"
+```
+
+The script searches single-threshold and two-condition conjunction rules using only query-time observable features:
+
+1. Document preservation: candidate top-doc overlap with the base top documents.
+2. Evidence density: positive evidence pages and positive OCR/query-region counts.
+3. Rank displacement: how many candidate top pages were promoted from below the base top-k.
+4. Score margins from the produced rankings.
+5. Query cues such as numeric/page/visual wording.
+
+The default rule filter enforces `--max-doc-hit-loss 0`, so the selected gate must preserve base document-hit count while improving page localization when possible. This supports a thesis claim of risk-calibrated selective OCR evidence rather than globally applying an unstable reranker.

@@ -1092,6 +1092,9 @@ def rerank_prediction(
                     "movement": movement,
                     "candidate_page_count": q_stats.get("candidate_page_count", 0),
                     "region_count": q_stats.get("region_count", 0),
+                    "pages_with_regions": q_stats.get("pages_with_regions", 0),
+                    "explicit_region_pages": q_stats.get("explicit_region_pages", 0),
+                    "fallback_region_pages": q_stats.get("fallback_region_pages", 0),
                     "positive_query_region_count": q_stats.get("positive_query_region_count", 0),
                     "positive_evidence_page_count": q_stats.get("positive_evidence_page_count", 0),
                 }
