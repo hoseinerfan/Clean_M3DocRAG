@@ -78,6 +78,7 @@ def parse_args() -> argparse.Namespace:
             "posterior_temperature",
             "pairwise_posterior",
             "pairwise_posterior_preserve",
+            "pairwise_posterior_adaptive_preserve",
         ),
         default="relative_z",
         help=(
@@ -90,7 +91,9 @@ def parse_args() -> argparse.Namespace:
             "pairwise_posterior uses a local posterior score but applies only one "
             "boundary-vs-top replacement if the boundary page has higher posterior odds. "
             "pairwise_posterior_preserve adds an extra base-rank preservation prior to "
-            "the current top-k page before deciding the replacement."
+            "the current top-k page before deciding the replacement. "
+            "pairwise_posterior_adaptive_preserve scales that preservation prior by "
+            "the base evidence concentration relative to graph/support concentration."
         ),
     )
     parser.add_argument(
@@ -530,19 +533,30 @@ def pairwise_preservation_prior(
     return math.log(boundary_rank / top_rank)
 
 
+def adaptive_preservation_scale(posterior_diag: dict[str, Any]) -> float:
+    base_concentration = max(0.0, float(posterior_diag.get("base_concentration") or 0.0))
+    graph_concentration = max(0.0, float(posterior_diag.get("graph_concentration") or 0.0))
+    support_concentration = max(0.0, float(posterior_diag.get("support_concentration") or 0.0))
+    total_concentration = base_concentration + graph_concentration + support_concentration
+    if total_concentration <= 1e-12:
+        return 0.0
+    return base_concentration / total_concentration
+
+
 def best_pairwise_posterior_swap(
     *,
     top_pages: list[str],
     boundary_pages: list[str],
     posterior_scores: dict[str, float],
     base_rank: dict[str, int],
-    preserve_top_prior: bool,
-) -> tuple[str, str, float, float, float, float, float]:
+    preservation_prior_scale: float,
+) -> tuple[str, str, float, float, float, float, float, float]:
     best_top = top_pages[0]
     best_boundary = boundary_pages[0]
     best_margin = -math.inf
     best_raw_margin = -math.inf
     best_prior = 0.0
+    best_unscaled_prior = 0.0
     best_top_score = posterior_scores.get(best_top, -math.inf)
     best_boundary_score = posterior_scores.get(best_boundary, -math.inf)
     for top_page in top_pages:
@@ -550,15 +564,12 @@ def best_pairwise_posterior_swap(
         for boundary_page in boundary_pages:
             boundary_score = posterior_scores.get(boundary_page, -math.inf)
             raw_margin = boundary_score - top_score
-            preservation_prior = (
-                pairwise_preservation_prior(
-                    top_page=top_page,
-                    boundary_page=boundary_page,
-                    base_rank=base_rank,
-                )
-                if preserve_top_prior
-                else 0.0
+            unscaled_preservation_prior = pairwise_preservation_prior(
+                top_page=top_page,
+                boundary_page=boundary_page,
+                base_rank=base_rank,
             )
+            preservation_prior = float(preservation_prior_scale) * unscaled_preservation_prior
             adjusted_margin = raw_margin - preservation_prior
             if adjusted_margin > best_margin:
                 best_top = top_page
@@ -566,6 +577,7 @@ def best_pairwise_posterior_swap(
                 best_margin = adjusted_margin
                 best_raw_margin = raw_margin
                 best_prior = preservation_prior
+                best_unscaled_prior = unscaled_preservation_prior
                 best_top_score = top_score
                 best_boundary_score = boundary_score
     return (
@@ -574,6 +586,7 @@ def best_pairwise_posterior_swap(
         best_margin,
         best_raw_margin,
         best_prior,
+        best_unscaled_prior,
         best_top_score,
         best_boundary_score,
     )
@@ -699,8 +712,10 @@ def rerank_one(
     pairwise_posterior_mode = args.decision_test in {
         "pairwise_posterior",
         "pairwise_posterior_preserve",
+        "pairwise_posterior_adaptive_preserve",
     }
     pairwise_preserve_mode = args.decision_test == "pairwise_posterior_preserve"
+    pairwise_adaptive_preserve_mode = args.decision_test == "pairwise_posterior_adaptive_preserve"
     boundary_top = max(int(args.boundary_top_pages), int(args.hit_k) + 1)
     local_pages = base_pages[:boundary_top]
     top_pages = base_pages[: int(args.hit_k)]
@@ -736,6 +751,8 @@ def rerank_one(
     pairwise_score_margin: float | None = None
     pairwise_raw_score_margin: float | None = None
     pairwise_preservation_prior_value: float | None = None
+    pairwise_preservation_prior_unscaled: float | None = None
+    pairwise_preservation_prior_scale: float | None = None
     pairwise_probability: float | None = None
     weakest_top_pairwise_score: float | None = None
     best_boundary_pairwise_score: float | None = None
@@ -786,12 +803,19 @@ def rerank_one(
             support_ranks=support_ranks,
             args=args,
         )
+        if pairwise_adaptive_preserve_mode:
+            pairwise_preservation_prior_scale = adaptive_preservation_scale(posterior_diag)
+        elif pairwise_preserve_mode:
+            pairwise_preservation_prior_scale = 1.0
+        else:
+            pairwise_preservation_prior_scale = 0.0
         (
             weakest_top,
             best_boundary,
             pairwise_score_margin,
             pairwise_raw_score_margin,
             pairwise_preservation_prior_value,
+            pairwise_preservation_prior_unscaled,
             weakest_top_pairwise_score,
             best_boundary_pairwise_score,
         ) = best_pairwise_posterior_swap(
@@ -799,7 +823,7 @@ def rerank_one(
             boundary_pages=boundary_pages,
             posterior_scores=posterior_scores,
             base_rank=base_rank,
-            preserve_top_prior=pairwise_preserve_mode,
+            preservation_prior_scale=pairwise_preservation_prior_scale,
         )
         pairwise_probability = stable_sigmoid(pairwise_score_margin)
         accepted = bool(pairwise_score_margin > 0.0)
@@ -871,6 +895,8 @@ def rerank_one(
         "pairwise_score_margin": pairwise_score_margin,
         "pairwise_raw_score_margin": pairwise_raw_score_margin,
         "pairwise_preservation_prior": pairwise_preservation_prior_value,
+        "pairwise_preservation_prior_unscaled": pairwise_preservation_prior_unscaled,
+        "pairwise_preservation_prior_scale": pairwise_preservation_prior_scale,
         "pairwise_probability": pairwise_probability,
         "weakest_top_pairwise_score": weakest_top_pairwise_score,
         "best_boundary_pairwise_score": best_boundary_pairwise_score,
