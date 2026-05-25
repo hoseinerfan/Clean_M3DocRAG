@@ -376,3 +376,37 @@ python scripts/learn_query_subtype_router.py \
 This is the required test before claiming a full-dataset conditioned boundary method. If the held-out
 OpenDocVQA row is still negative, keep Graph-PPR as the full-dataset method and report content posterior
 only as a hard-subset rescue component.
+
+### Cluster-Conditioned Router
+
+`scripts/learn_cluster_conditioned_router.py` implements the unsupervised query-clustering direction.
+It clusters each candidate's observable query/rank/content features with deterministic weighted k-means,
+selects the cluster count by a spherical-Gaussian BIC score on the training fold, and estimates page/doc
+utility per cluster. A held-out query is routed to a candidate only when its assigned cluster has positive
+page-hit utility and nonnegative doc-hit utility.
+
+This is the complete cross-dataset test shape:
+
+```bash
+python scripts/learn_cluster_conditioned_router.py \
+  --run vidore "$VIDORE_GOLD" "$VIDORE_BASE" \
+  --candidate vidore content "$BOUNDARY_DIR/vidore_boundary_pairwise_content_posterior.prediction.json" "$BOUNDARY_DIR/vidore_boundary_pairwise_content_posterior.cases.json" \
+  --run mmdocir "$MMDOCIR_GOLD" "$MMDOCIR_BASE" \
+  --candidate mmdocir content "$BOUNDARY_DIR/mmdocir_boundary_pairwise_content_posterior.prediction.json" "$BOUNDARY_DIR/mmdocir_boundary_pairwise_content_posterior.cases.json" \
+  --run opendocvqa "$OPENDOC_GOLD" "$OPENDOC_BASE" \
+  --candidate opendocvqa content "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.prediction.json" "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.cases.json" \
+  --hit-k 4 \
+  --cv-mode leave_run_out \
+  --run-weighting equal_run \
+  --cluster-count 0 \
+  --min-clusters 1 \
+  --max-clusters 0 \
+  --min-cluster-n 5 \
+  --doc-policy nonnegative \
+  --output-json "$ROUTER_DIR/cluster_conditioned_content_loro_equalrun.json" \
+  --output-md "$ROUTER_DIR/cluster_conditioned_content_loro_equalrun.md" \
+  --output-routed-dir "$ROUTER_DIR/routed_cluster_conditioned_content_loro_equalrun"
+```
+
+Use the same command with `pairwise_posterior` artifacts instead of `pairwise_content_posterior`
+artifacts for a strictly non-content/non-OCR backup test.

@@ -480,6 +480,33 @@ This is the current non-one-dataset check. The router learns observable query/ca
 the other runs and tests on the held-out run. `--run-weighting equal_run` prevents OpenDocVQA's 41k
 queries from overpowering ViDoRe/MMDocIR during selector learning.
 
+Unsupervised cluster-conditioned version:
+
+```bash
+python scripts/learn_cluster_conditioned_router.py \
+  --run vidore "$VIDORE_GOLD" "$VIDORE_BASE" \
+  --candidate vidore content "$BOUNDARY_DIR/vidore_boundary_pairwise_content_posterior.prediction.json" "$BOUNDARY_DIR/vidore_boundary_pairwise_content_posterior.cases.json" \
+  --run mmdocir "$MMDOCIR_GOLD" "$MMDOCIR_BASE" \
+  --candidate mmdocir content "$BOUNDARY_DIR/mmdocir_boundary_pairwise_content_posterior.prediction.json" "$BOUNDARY_DIR/mmdocir_boundary_pairwise_content_posterior.cases.json" \
+  --run opendocvqa "$OPENDOC_GOLD" "$OPENDOC_BASE" \
+  --candidate opendocvqa content "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.prediction.json" "$BOUNDARY_DIR/opendocvqa_boundary_pairwise_content_posterior_nosupport.cases.json" \
+  --hit-k 4 \
+  --cv-mode leave_run_out \
+  --run-weighting equal_run \
+  --cluster-count 0 \
+  --min-clusters 1 \
+  --max-clusters 0 \
+  --min-cluster-n 5 \
+  --doc-policy nonnegative \
+  --output-json "$ROUTER_DIR/cluster_conditioned_content_loro_equalrun.json" \
+  --output-md "$ROUTER_DIR/cluster_conditioned_content_loro_equalrun.md" \
+  --output-routed-dir "$ROUTER_DIR/routed_cluster_conditioned_content_loro_equalrun"
+```
+
+This clusters observable features without gold labels. Labels are used only after clustering to
+estimate held-out cluster utility and decide whether a cluster should route to the candidate or keep
+base.
+
 ### MMLongBench DocQA
 
 ```bash
