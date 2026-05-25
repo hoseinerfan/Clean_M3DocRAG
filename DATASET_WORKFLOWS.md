@@ -685,6 +685,18 @@ with `weakest_doc` to avoid document swaps. If acceptance is too low, relax to
 `--boundary-doc-policy topk_doc --min-boundary-doc-topk-count 1`; if losses remain, add
 `--max-base-margin-ratio-4-5 0.02` to require an uncertain base rank-4/rank-5 boundary.
 
+Observed MMDocIR 300-query subset results:
+
+| policy | sample | accepted | base page hit@4 | candidate page hit@4 | recovered | lost | net | page recall@4 | doc recall@4 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| `weakest_doc`, `min_exact_margin=0.25` | 300 | 43 | 186 | 184 | 0 | 2 | -2 | 0.5884 | 0.7900 |
+| `topk_doc`, `min_exact_margin=0.25` | 300 | 57 | 186 | 183 | 0 | 3 | -3 | 0.5834 | 0.7900 |
+
+Do not scale either observed gated setting as-is. Relaxing from `weakest_doc` to `topk_doc`
+accepted more swaps but only increased losses, so exact rank-5 MaxSim is not acting as a reliable
+MMDocIR page-evidence verifier under these gates. Treat this path as diagnostic unless a stricter
+margin/uncertainty subset produces nonzero recoveries and positive net recovery.
+
 ## Dataset Summary
 
 | Dataset | Env script | Work root | Data folder | Embedding name | Output subdir | Current/expected scale |

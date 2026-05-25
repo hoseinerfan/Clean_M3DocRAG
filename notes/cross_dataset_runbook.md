@@ -580,6 +580,17 @@ exact MaxSim and both pages are in the same document. If too few swaps are accep
 `--boundary-doc-policy topk_doc --min-boundary-doc-topk-count 1`; if losses remain, add
 `--max-base-margin-ratio-4-5 0.02` to restrict swaps to uncertain Graph-PPR boundaries.
 
+Observed MMDocIR 300-query subset results:
+
+| policy | sample | accepted | base page hit@4 | candidate page hit@4 | recovered | lost | net | page recall@4 | doc recall@4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `weakest_doc`, `min_exact_margin=0.25` | 300 | 43 | 186 | 184 | 0 | 2 | -2 | 0.5884 | 0.7900 |
+| `topk_doc`, `min_exact_margin=0.25` | 300 | 57 | 186 | 183 | 0 | 3 | -3 | 0.5834 | 0.7900 |
+
+Do not scale either observed gated setting as-is. Relaxing the document policy accepted more swaps
+but only increased losses, so this exact rank-5 MaxSim gate is diagnostic rather than a candidate
+full-dev reranker unless a stricter uncertainty subset shows positive net recovery.
+
 ### Limitation Report / Failure Taxonomy Audit
 
 After a full Graph-PPR result exists, categorize its remaining page-hit failures:

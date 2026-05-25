@@ -412,6 +412,17 @@ python scripts/rerank_graph_boundary_exact_maxsim.py \
   --output-case-json "$MAXSIM_BOUNDARY_DIR/mmdocir_exact_maxsim_boundary_gated_weakestdoc_m025_sample300.cases.json"
 ```
 
+Observed MMDocIR 300-query subset results:
+
+| policy | sample | accepted | base page hit@4 | candidate page hit@4 | recovered | lost | net | page recall@4 | doc recall@4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| `weakest_doc`, `min_exact_margin=0.25` | 300 | 43 | 186 | 184 | 0 | 2 | -2 | 0.5884 | 0.7900 |
+| `topk_doc`, `min_exact_margin=0.25` | 300 | 57 | 186 | 183 | 0 | 3 | -3 | 0.5834 | 0.7900 |
+
+Do not scale either observed gated setting as-is. The relaxed document policy accepted more swaps
+but only increased losses, so exact rank-5 MaxSim is not currently a reliable MMDocIR page-evidence
+verifier.
+
 Full OpenDocVQA no-support result:
 
 | run | qids | accepted | base page hit@4 | candidate page hit@4 | recovered | lost | net | page recall@4 | doc recall@4 |
