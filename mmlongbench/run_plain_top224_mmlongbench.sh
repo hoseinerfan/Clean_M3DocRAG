@@ -14,11 +14,11 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python}"
 fi
 
-DATA_ROOT="${DATA_ROOT:-$LOCAL_DATA_DIR/mmlongbench-docqa}"
-EMBEDDING_NAME="${EMBEDDING_NAME:-colpali-v1.2_mmlongbench-docqa_dev}"
-BASELINE_PRED="${BASELINE_PRED:-$LOCAL_OUTPUT_DIR/mmlongbench-docqa/baseline_ret1000.json}"
-OUT_DIR="${OUT_DIR:-$LOCAL_OUTPUT_DIR/mmlongbench-docqa}"
-TOP_PAGES="${TOP_PAGES:-1000}"
+DATA_ROOT="${MMLONGBENCH_DATA_ROOT:-$LOCAL_DATA_DIR/mmlongbench-docqa}"
+EMBEDDING_NAME="${MMLONGBENCH_EMBEDDING_NAME:-colpali-v1.2_mmlongbench-docqa_dev}"
+BASELINE_PRED="${MMLONGBENCH_BASELINE_PRED:-$LOCAL_OUTPUT_DIR/mmlongbench-docqa/baseline_ret1000.json}"
+OUT_DIR="${MMLONGBENCH_OUT_DIR:-$LOCAL_OUTPUT_DIR/mmlongbench-docqa}"
+TOP_PAGES="${MMLONGBENCH_TOP_PAGES:-1000}"
 
 mkdir -p "$OUT_DIR"
 
