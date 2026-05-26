@@ -233,6 +233,62 @@ def parse_args() -> argparse.Namespace:
         help="Reject if a promoted page has no extractable headings when heading checks are active.",
     )
     parser.add_argument(
+        "--body-doc-pages-jsonl",
+        default="",
+        help=(
+            "Optional doc_pages JSONL used for body/query relevance safety checks. "
+            "When omitted, body checks are disabled."
+        ),
+    )
+    parser.add_argument(
+        "--body-field",
+        action="append",
+        default=[],
+        help=(
+            "Doc page field containing body text for body safety checks. Repeatable. "
+            "Defaults to markdown when --body-doc-pages-jsonl is set."
+        ),
+    )
+    parser.add_argument("--body-max-chars", type=int, default=8000)
+    parser.add_argument("--body-min-token-len", type=int, default=3)
+    parser.add_argument(
+        "--body-score-mode",
+        choices=["idf_query_recall", "overlap_count"],
+        default="idf_query_recall",
+    )
+    parser.add_argument(
+        "--body-min-promoted-query-score",
+        type=float,
+        default=None,
+        help="Reject promotions whose body/query relevance score is below this value.",
+    )
+    parser.add_argument(
+        "--body-min-score-advantage",
+        type=float,
+        default=None,
+        help=(
+            "Reject promotions unless their body/query score beats the compared base page "
+            "by at least this margin."
+        ),
+    )
+    parser.add_argument(
+        "--body-compare-base-top-k",
+        type=int,
+        default=4,
+        help="Number of base top pages used for body-score comparison.",
+    )
+    parser.add_argument(
+        "--body-compare-mode",
+        choices=["strongest_base_top", "displaced_boundary", "none"],
+        default="displaced_boundary",
+        help="Which base page(s) the promoted page must beat by body/query score.",
+    )
+    parser.add_argument(
+        "--body-reject-missing-promoted",
+        action="store_true",
+        help="Reject if a promoted page has no body tokens when body checks are active.",
+    )
+    parser.add_argument(
         "--query-block-regex",
         action="append",
         default=[],
@@ -500,6 +556,69 @@ def load_heading_catalog(
     }
 
 
+def load_body_catalog(
+    path: Path,
+    *,
+    fields: list[str],
+    max_chars: int,
+    min_token_len: int,
+) -> dict[str, Any]:
+    if not path:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"body doc_pages JSONL does not exist: {path}")
+    page_tokens: dict[str, set[str]] = {}
+    page_snippets: dict[str, str] = {}
+    token_df: Counter[str] = Counter()
+    page_count = 0
+    char_limit = max(0, int(max_chars))
+
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            doc_id = str(row.get("doc_id", "") or row.get("doc_name", "")).strip()
+            raw_page_idx = row.get("page_idx", row.get("page_id", row.get("page")))
+            if not doc_id or raw_page_idx is None:
+                continue
+            try:
+                uid = page_uid(doc_id, raw_page_idx)
+            except (TypeError, ValueError):
+                continue
+            page_count += 1
+            parts: list[str] = []
+            for field in fields:
+                raw_text = row.get(field)
+                if isinstance(raw_text, (list, dict)):
+                    raw_text = json.dumps(raw_text, ensure_ascii=False)
+                text = str(raw_text or "")
+                if text:
+                    parts.append(text)
+            text = "\n".join(parts)
+            if char_limit > 0:
+                text = text[:char_limit]
+            token_set = set(heading_tokens(text, min_token_len=min_token_len))
+            if token_set:
+                page_tokens[uid] = token_set
+                token_df.update(token_set)
+                page_snippets[uid] = re.sub(r"\s+", " ", text).strip()[:240]
+
+    idf = {
+        token: math.log((float(max(1, page_count)) + 1.0) / (float(df) + 1.0)) + 1.0
+        for token, df in token_df.items()
+    }
+    return {
+        "path": str(path),
+        "fields": list(fields),
+        "page_count": page_count,
+        "page_tokens": page_tokens,
+        "page_snippets": page_snippets,
+        "token_idf": idf,
+    }
+
+
 def heading_relevance_score(
     *,
     question: str,
@@ -529,11 +648,47 @@ def heading_relevance_score(
     }
 
 
+def body_relevance_score(
+    *,
+    question: str,
+    uid: str,
+    catalog: dict[str, Any],
+    mode: str,
+    min_token_len: int,
+) -> dict[str, Any]:
+    query_tokens = set(heading_tokens(question, min_token_len=min_token_len))
+    page_tokens = set(catalog.get("page_tokens", {}).get(uid, set()))
+    overlap = sorted(query_tokens & page_tokens)
+    if mode == "overlap_count":
+        score = float(len(overlap))
+    else:
+        token_idf = catalog.get("token_idf", {})
+        denom = sum(float(token_idf.get(token, 1.0)) for token in query_tokens)
+        numer = sum(float(token_idf.get(token, 1.0)) for token in overlap)
+        score = numer / denom if denom > 0 else 0.0
+    return {
+        "score": float(score),
+        "overlap_tokens": overlap,
+        "query_token_count": len(query_tokens),
+        "page_token_count": len(page_tokens),
+        "body_snippet": str(catalog.get("page_snippets", {}).get(uid, "")),
+        "has_body": bool(page_tokens),
+    }
+
+
 def heading_checks_enabled(args: argparse.Namespace, heading_catalog: dict[str, Any]) -> bool:
     return bool(heading_catalog) and (
         args.heading_min_promoted_query_score is not None
         or args.heading_min_score_advantage is not None
         or bool(args.heading_reject_missing_promoted)
+    )
+
+
+def body_checks_enabled(args: argparse.Namespace, body_catalog: dict[str, Any]) -> bool:
+    return bool(body_catalog) and (
+        args.body_min_promoted_query_score is not None
+        or args.body_min_score_advantage is not None
+        or bool(args.body_reject_missing_promoted)
     )
 
 
@@ -547,18 +702,44 @@ def question_block_match(question: str, patterns: list[str]) -> str | None:
     return None
 
 
-def heading_compare_pages(base_top_pages: list[str], uid: str, args: argparse.Namespace) -> list[str]:
-    mode = str(args.heading_compare_mode)
+def compare_pages(
+    base_top_pages: list[str],
+    uid: str,
+    *,
+    mode: str,
+    compare_base_top_k: int,
+    hit_k: int,
+) -> list[str]:
     if mode == "none":
         return []
     if mode == "displaced_boundary":
-        hit_k = max(1, int(args.hit_k))
-        if len(base_top_pages) < hit_k:
+        cutoff = max(1, int(hit_k))
+        if len(base_top_pages) < cutoff:
             return []
-        page = base_top_pages[hit_k - 1]
+        page = base_top_pages[cutoff - 1]
         return [] if page == uid else [page]
-    compare_limit = max(0, int(args.heading_compare_base_top_k))
+    compare_limit = max(0, int(compare_base_top_k))
     return [page for page in base_top_pages[:compare_limit] if page != uid]
+
+
+def heading_compare_pages(base_top_pages: list[str], uid: str, args: argparse.Namespace) -> list[str]:
+    return compare_pages(
+        base_top_pages,
+        uid,
+        mode=str(args.heading_compare_mode),
+        compare_base_top_k=int(args.heading_compare_base_top_k),
+        hit_k=int(args.hit_k),
+    )
+
+
+def body_compare_pages(base_top_pages: list[str], uid: str, args: argparse.Namespace) -> list[str]:
+    return compare_pages(
+        base_top_pages,
+        uid,
+        mode=str(args.body_compare_mode),
+        compare_base_top_k=int(args.body_compare_base_top_k),
+        hit_k=int(args.hit_k),
+    )
 
 
 def ranked_page_uids(rows: list[Any], limit: int = 0) -> list[str]:
@@ -824,6 +1005,7 @@ def reject_promotion_reason(
     candidate_rows: list[Any],
     support_view_rows: list[tuple[str, dict[str, Any] | None]],
     heading_catalog: dict[str, Any],
+    body_catalog: dict[str, Any],
     args: argparse.Namespace,
 ) -> tuple[str | None, dict[str, Any]]:
     doc_id, _page_idx = parse_page_uid(uid)
@@ -919,6 +1101,57 @@ def reject_promotion_reason(
             if float(promoted_heading.get("score", 0.0)) < required:
                 detail["heading_relevance"]["required_promoted_score"] = required
                 return "promoted_heading_score_not_above_base", detail
+    if body_checks_enabled(args, body_catalog):
+        promoted_body = body_relevance_score(
+            question=question,
+            uid=uid,
+            catalog=body_catalog,
+            mode=str(args.body_score_mode),
+            min_token_len=max(1, int(args.body_min_token_len)),
+        )
+        compared_pages = body_compare_pages(base_top_pages, uid, args)
+        compared_body_scores = {
+            page: body_relevance_score(
+                question=question,
+                uid=page,
+                catalog=body_catalog,
+                mode=str(args.body_score_mode),
+                min_token_len=max(1, int(args.body_min_token_len)),
+            )
+            for page in compared_pages
+        }
+        best_base_uid = None
+        best_base_score = 0.0
+        for page, score_row in compared_body_scores.items():
+            score = float(score_row.get("score", 0.0))
+            if best_base_uid is None or score > best_base_score:
+                best_base_uid = page
+                best_base_score = score
+        detail["body_relevance"] = {
+            "score_mode": str(args.body_score_mode),
+            "promoted_score": promoted_body,
+            "compare_mode": str(args.body_compare_mode),
+            "compare_base_top_k": int(args.body_compare_base_top_k),
+            "compared_pages": compared_pages,
+            "best_base_page_uid": best_base_uid,
+            "best_base_score": best_base_score,
+            "best_base_score_detail": (
+                compared_body_scores.get(best_base_uid) if best_base_uid else None
+            ),
+            "base_scores": compared_body_scores,
+        }
+        if bool(args.body_reject_missing_promoted) and not bool(promoted_body.get("has_body")):
+            return "promoted_body_missing", detail
+        if args.body_min_promoted_query_score is not None:
+            if float(promoted_body.get("score", 0.0)) < float(
+                args.body_min_promoted_query_score
+            ):
+                return "promoted_body_score_below_min", detail
+        if args.body_min_score_advantage is not None and compared_pages:
+            required = best_base_score + float(args.body_min_score_advantage)
+            if float(promoted_body.get("score", 0.0)) < required:
+                detail["body_relevance"]["required_promoted_score"] = required
+                return "promoted_body_score_not_above_base", detail
     if int(args.min_support_page_votes) > 0:
         if int(detail["support_page_vote_count"]) < int(args.min_support_page_votes):
             return "support_page_votes_below_min", detail
@@ -934,6 +1167,7 @@ def select_promotions(
     candidate_row: dict[str, Any] | None,
     support_view_rows: list[tuple[str, dict[str, Any] | None]],
     heading_catalog: dict[str, Any],
+    body_catalog: dict[str, Any],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     base_rows = prediction_rows(base_row)
@@ -1033,6 +1267,7 @@ def select_promotions(
             candidate_rows=candidate_rows,
             support_view_rows=support_view_rows,
             heading_catalog=heading_catalog,
+            body_catalog=body_catalog,
             args=args,
         )
         if reason is None:
@@ -1143,6 +1378,16 @@ def build_output_row(
         "heading_compare_base_top_k": int(args.heading_compare_base_top_k),
         "heading_compare_mode": str(args.heading_compare_mode),
         "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
+        "body_doc_pages_jsonl": str(args.body_doc_pages_jsonl),
+        "body_field": list(args.body_field),
+        "body_max_chars": int(args.body_max_chars),
+        "body_min_token_len": int(args.body_min_token_len),
+        "body_score_mode": str(args.body_score_mode),
+        "body_min_promoted_query_score": args.body_min_promoted_query_score,
+        "body_min_score_advantage": args.body_min_score_advantage,
+        "body_compare_base_top_k": int(args.body_compare_base_top_k),
+        "body_compare_mode": str(args.body_compare_mode),
+        "body_reject_missing_promoted": bool(args.body_reject_missing_promoted),
         "query_block_regex": list(args.query_block_regex or []),
         "reject_promoted_page_idx": [int(value) for value in args.reject_promoted_page_idx or []],
         "mode": str(args.mode),
@@ -1282,6 +1527,16 @@ def summarize_cases(
             "heading_compare_base_top_k": int(args.heading_compare_base_top_k),
             "heading_compare_mode": str(args.heading_compare_mode),
             "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
+            "body_doc_pages_jsonl": str(args.body_doc_pages_jsonl),
+            "body_field": list(args.body_field),
+            "body_max_chars": int(args.body_max_chars),
+            "body_min_token_len": int(args.body_min_token_len),
+            "body_score_mode": str(args.body_score_mode),
+            "body_min_promoted_query_score": args.body_min_promoted_query_score,
+            "body_min_score_advantage": args.body_min_score_advantage,
+            "body_compare_base_top_k": int(args.body_compare_base_top_k),
+            "body_compare_mode": str(args.body_compare_mode),
+            "body_reject_missing_promoted": bool(args.body_reject_missing_promoted),
             "query_block_regex": list(args.query_block_regex or []),
             "reject_promoted_page_idx": [
                 int(value) for value in args.reject_promoted_page_idx or []
@@ -1409,6 +1664,8 @@ def main() -> None:
     args = parse_args()
     if args.heading_doc_pages_jsonl and not args.heading_field:
         args.heading_field = ["markdown"]
+    if args.body_doc_pages_jsonl and not args.body_field:
+        args.body_field = ["markdown"]
     base = load_prediction(Path(args.base_prediction))
     candidate = load_prediction(Path(args.candidate_prediction))
     support_inputs = [parse_labeled_path(value) for value in args.support_prediction]
@@ -1430,6 +1687,16 @@ def main() -> None:
         if args.heading_doc_pages_jsonl
         else {}
     )
+    body_catalog = (
+        load_body_catalog(
+            Path(args.body_doc_pages_jsonl),
+            fields=[str(field) for field in args.body_field],
+            max_chars=int(args.body_max_chars),
+            min_token_len=int(args.body_min_token_len),
+        )
+        if args.body_doc_pages_jsonl
+        else {}
+    )
 
     output: dict[str, dict[str, Any]] = {}
     cases: list[dict[str, Any]] = []
@@ -1445,6 +1712,7 @@ def main() -> None:
             candidate_row=candidate_row,
             support_view_rows=support_view_rows,
             heading_catalog=heading_catalog,
+            body_catalog=body_catalog,
             args=args,
         )
         output_row = build_output_row(
