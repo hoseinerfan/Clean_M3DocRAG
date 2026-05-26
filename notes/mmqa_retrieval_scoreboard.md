@@ -181,6 +181,10 @@ M3DOCVQA_PAGE_TEXT_JSONL=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs
 Use the raw `mmqa_dev_splade.prediction.json`; graph/source-ablation/no-SPLADE artifacts should not
 be used as the sparse input for this run.
 
+M3DocVQA gold identifies supporting documents but does not identify a true answer page. Safe-gate
+page-hit/recovered/lost fields therefore cannot be reported for this dataset; the runner reports
+document recall and downstream VQA must establish whether promoted pages are useful.
+
 Pending Markdown-source comparison: `scripts/export_pdf_page_markdown.py` and the selected-dataset
 runner support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. For the current HPC comparison this means
 pinned `pymupdf4llm==0.3.4`, using native PDF structured Markdown without automatic ONNX Layout

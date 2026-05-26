@@ -1450,11 +1450,21 @@ def add_gold_metrics(
     case["base_first_gold_doc_rank"] = base_doc_rank
     case["candidate_first_gold_doc_rank"] = candidate_doc_rank
     case["output_first_gold_doc_rank"] = output_doc_rank
-    case["movement_vs_base"] = movement_for_hit(base_page_rank, output_page_rank, hit_k)
-    case["candidate_movement_vs_base"] = movement_for_hit(
-        base_page_rank,
-        candidate_page_rank,
-        hit_k,
+    case["movement_vs_base"] = (
+        movement_for_hit(base_page_rank, output_page_rank, hit_k) if page_gold else None
+    )
+    case["candidate_movement_vs_base"] = (
+        movement_for_hit(base_page_rank, candidate_page_rank, hit_k)
+        if page_gold
+        else None
+    )
+    case["doc_movement_vs_base"] = (
+        movement_for_hit(base_doc_rank, output_doc_rank, hit_k) if doc_gold else None
+    )
+    case["candidate_doc_movement_vs_base"] = (
+        movement_for_hit(base_doc_rank, candidate_doc_rank, hit_k)
+        if doc_gold
+        else None
     )
     case["page_recall_at_k"] = {}
     case["doc_recall_at_k"] = {}
@@ -1585,10 +1595,17 @@ def summarize_cases(
         "gold": str(args.gold) if args.gold else "",
     }
 
-    if gold_cases:
-        movement_counts = Counter(str(case["movement_vs_base"]) for case in gold_cases)
+    page_gold_cases = [case for case in gold_cases if case.get("gold_page_uids")]
+    doc_gold_cases = [case for case in gold_cases if case.get("gold_doc_ids")]
+    summary["page_labeled_gold_qid_count"] = len(page_gold_cases)
+    summary["doc_labeled_gold_qid_count"] = len(doc_gold_cases)
+    summary["page_metrics_available"] = bool(page_gold_cases)
+    summary["doc_metrics_available"] = bool(doc_gold_cases)
+
+    if page_gold_cases:
+        movement_counts = Counter(str(case["movement_vs_base"]) for case in page_gold_cases)
         candidate_movement_counts = Counter(
-            str(case["candidate_movement_vs_base"]) for case in gold_cases
+            str(case["candidate_movement_vs_base"]) for case in page_gold_cases
         )
         summary["movement_vs_base_counts"] = dict(sorted(movement_counts.items()))
         summary["candidate_movement_vs_base_counts"] = dict(
@@ -1607,57 +1624,98 @@ def summarize_cases(
 
         hit_k = int(args.hit_k)
         summary["base_page_hit_at_k_count"] = sum(
-            1 for case in gold_cases if hit_at(case["base_first_gold_page_rank"], hit_k)
+            1 for case in page_gold_cases if hit_at(case["base_first_gold_page_rank"], hit_k)
         )
         summary["candidate_page_hit_at_k_count"] = sum(
             1
-            for case in gold_cases
+            for case in page_gold_cases
             if hit_at(case["candidate_first_gold_page_rank"], hit_k)
         )
         summary["page_hit_at_k_count"] = sum(
-            1 for case in gold_cases if hit_at(case["output_first_gold_page_rank"], hit_k)
-        )
-        summary["base_doc_hit_at_k_count"] = sum(
-            1 for case in gold_cases if hit_at(case["base_first_gold_doc_rank"], hit_k)
-        )
-        summary["candidate_doc_hit_at_k_count"] = sum(
-            1
-            for case in gold_cases
-            if hit_at(case["candidate_first_gold_doc_rank"], hit_k)
-        )
-        summary["doc_hit_at_k_count"] = sum(
-            1 for case in gold_cases if hit_at(case["output_first_gold_doc_rank"], hit_k)
+            1 for case in page_gold_cases if hit_at(case["output_first_gold_page_rank"], hit_k)
         )
         summary[f"base_page_hit_at_{hit_k}_count"] = summary["base_page_hit_at_k_count"]
         summary[f"candidate_page_hit_at_{hit_k}_count"] = summary[
             "candidate_page_hit_at_k_count"
         ]
         summary[f"page_hit_at_{hit_k}_count"] = summary["page_hit_at_k_count"]
+        page_values: dict[str, list[float]] = {str(k): [] for k in args.recall_ks}
+        for case in page_gold_cases:
+            for cutoff in args.recall_ks:
+                key = str(cutoff)
+                page_value = case["page_recall_at_k"].get(key)
+                if page_value is not None:
+                    page_values[key].append(float(page_value))
+        summary["page_recall_at_k"] = {
+            key: mean_or_none(values) for key, values in page_values.items()
+        }
+        summary["top_recovered"] = top_cases(page_gold_cases, "recovered", int(args.top_examples))
+        summary["top_lost"] = top_cases(page_gold_cases, "lost", int(args.top_examples))
+    else:
+        summary["movement_vs_base_counts"] = {}
+        summary["candidate_movement_vs_base_counts"] = {}
+        summary["recovered"] = None
+        summary["lost"] = None
+        summary["net_recovered"] = None
+        summary["candidate_recovered"] = None
+        summary["candidate_lost"] = None
+        summary["candidate_net_recovered"] = None
+        summary["base_page_hit_at_k_count"] = None
+        summary["candidate_page_hit_at_k_count"] = None
+        summary["page_hit_at_k_count"] = None
+        summary[f"base_page_hit_at_{int(args.hit_k)}_count"] = None
+        summary[f"candidate_page_hit_at_{int(args.hit_k)}_count"] = None
+        summary[f"page_hit_at_{int(args.hit_k)}_count"] = None
+        summary["page_recall_at_k"] = {str(k): None for k in args.recall_ks}
+        summary["top_recovered"] = []
+        summary["top_lost"] = []
+
+    if doc_gold_cases:
+        doc_movement_counts = Counter(str(case["doc_movement_vs_base"]) for case in doc_gold_cases)
+        candidate_doc_movement_counts = Counter(
+            str(case["candidate_doc_movement_vs_base"]) for case in doc_gold_cases
+        )
+        summary["doc_movement_vs_base_counts"] = dict(sorted(doc_movement_counts.items()))
+        summary["candidate_doc_movement_vs_base_counts"] = dict(
+            sorted(candidate_doc_movement_counts.items())
+        )
+        summary["doc_recovered"] = int(doc_movement_counts.get("recovered", 0))
+        summary["doc_lost"] = int(doc_movement_counts.get("lost", 0))
+        summary["doc_net_recovered"] = summary["doc_recovered"] - summary["doc_lost"]
+        summary["candidate_doc_recovered"] = int(
+            candidate_doc_movement_counts.get("recovered", 0)
+        )
+        summary["candidate_doc_lost"] = int(candidate_doc_movement_counts.get("lost", 0))
+        summary["candidate_doc_net_recovered"] = (
+            summary["candidate_doc_recovered"] - summary["candidate_doc_lost"]
+        )
+        hit_k = int(args.hit_k)
+        summary["base_doc_hit_at_k_count"] = sum(
+            1 for case in doc_gold_cases if hit_at(case["base_first_gold_doc_rank"], hit_k)
+        )
+        summary["candidate_doc_hit_at_k_count"] = sum(
+            1
+            for case in doc_gold_cases
+            if hit_at(case["candidate_first_gold_doc_rank"], hit_k)
+        )
+        summary["doc_hit_at_k_count"] = sum(
+            1 for case in doc_gold_cases if hit_at(case["output_first_gold_doc_rank"], hit_k)
+        )
         summary[f"base_doc_hit_at_{hit_k}_count"] = summary["base_doc_hit_at_k_count"]
         summary[f"candidate_doc_hit_at_{hit_k}_count"] = summary[
             "candidate_doc_hit_at_k_count"
         ]
         summary[f"doc_hit_at_{hit_k}_count"] = summary["doc_hit_at_k_count"]
-
-        page_values: dict[str, list[float]] = {str(k): [] for k in args.recall_ks}
         doc_values: dict[str, list[float]] = {str(k): [] for k in args.recall_ks}
-        for case in gold_cases:
+        for case in doc_gold_cases:
             for cutoff in args.recall_ks:
                 key = str(cutoff)
-                page_value = case["page_recall_at_k"].get(key)
                 doc_value = case["doc_recall_at_k"].get(key)
-                if page_value is not None:
-                    page_values[key].append(float(page_value))
                 if doc_value is not None:
                     doc_values[key].append(float(doc_value))
-        summary["page_recall_at_k"] = {
-            key: mean_or_none(values) for key, values in page_values.items()
-        }
         summary["doc_recall_at_k"] = {
             key: mean_or_none(values) for key, values in doc_values.items()
         }
-        summary["top_recovered"] = top_cases(gold_cases, "recovered", int(args.top_examples))
-        summary["top_lost"] = top_cases(gold_cases, "lost", int(args.top_examples))
 
     accepted_cases = [case for case in cases if bool(case.get("accepted"))]
     summary["top_accepted"] = accepted_cases[: int(args.top_examples)]
@@ -1806,17 +1864,30 @@ def main() -> None:
     print(f"qid_count: {summary['qid_count']}")
     print(f"accepted: {summary['accepted_count']}")
     if gold_cases:
-        print(f"base_page_hit_at_{args.hit_k}_count: {summary['base_page_hit_at_k_count']}")
-        print(
-            f"candidate_page_hit_at_{args.hit_k}_count: "
-            f"{summary['candidate_page_hit_at_k_count']}"
-        )
-        print(f"page_hit_at_{args.hit_k}_count: {summary['page_hit_at_k_count']}")
-        print(f"recovered: {summary['recovered']}")
-        print(f"lost: {summary['lost']}")
-        print(f"net_recovered: {summary['net_recovered']}")
-        print(f"page_recall_at_k: {summary['page_recall_at_k']}")
-        print(f"doc_recall_at_k: {summary['doc_recall_at_k']}")
+        if summary["page_metrics_available"]:
+            print(f"base_page_hit_at_{args.hit_k}_count: {summary['base_page_hit_at_k_count']}")
+            print(
+                f"candidate_page_hit_at_{args.hit_k}_count: "
+                f"{summary['candidate_page_hit_at_k_count']}"
+            )
+            print(f"page_hit_at_{args.hit_k}_count: {summary['page_hit_at_k_count']}")
+            print(f"recovered: {summary['recovered']}")
+            print(f"lost: {summary['lost']}")
+            print(f"net_recovered: {summary['net_recovered']}")
+            print(f"page_recall_at_k: {summary['page_recall_at_k']}")
+        else:
+            print("page_metrics_unavailable: gold has no page-level labels")
+        if summary["doc_metrics_available"]:
+            print(f"base_doc_hit_at_{args.hit_k}_count: {summary['base_doc_hit_at_k_count']}")
+            print(
+                f"candidate_doc_hit_at_{args.hit_k}_count: "
+                f"{summary['candidate_doc_hit_at_k_count']}"
+            )
+            print(f"doc_hit_at_{args.hit_k}_count: {summary['doc_hit_at_k_count']}")
+            print(f"doc_recovered: {summary['doc_recovered']}")
+            print(f"doc_lost: {summary['doc_lost']}")
+            print(f"doc_net_recovered: {summary['doc_net_recovered']}")
+            print(f"doc_recall_at_k: {summary['doc_recall_at_k']}")
 
 
 if __name__ == "__main__":

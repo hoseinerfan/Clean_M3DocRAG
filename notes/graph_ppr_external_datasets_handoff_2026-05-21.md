@@ -723,6 +723,12 @@ Use the raw `mmqa_dev_splade.prediction.json` for the safe-gate run. Historical
 `fulldev_graph_ppr_sourceablate_no_splade` outputs are graph diagnostics and are not valid SPLADE
 inputs here.
 
+M3DocVQA has supporting document labels but no true supporting page indices in `MMQA_dev.jsonl`.
+Consequently the safe-gate page-hit and recovered/lost metrics are not measurable on this dataset.
+The runner now reports those fields as unavailable, prints document recall for retrieval sanity,
+and skips the page-position gold audit. Evaluate the promoted page set through downstream VQA
+before treating this dataset as positive or negative evidence for page rescue.
+
 Alternative M3DocVQA Markdown extraction experiment:
 
 The exporter and selected-dataset runner now support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. The

@@ -114,22 +114,37 @@ import sys
 dataset, path = sys.argv[1], sys.argv[2]
 with open(path, "r", encoding="utf-8") as handle:
     s = json.load(handle)
+page_metrics_available = s.get("page_metrics_available", True)
+def report(value):
+    return "NA" if value is None else value
 print(
     "| {dataset} | {accepted} | {base_page} | {candidate_page} | {page} | "
     "{recovered} | {lost} | {net} | {body_rejects} |".format(
         dataset=dataset,
         accepted=s.get("accepted_count"),
-        base_page=s.get("base_page_hit_at_k_count") or s.get("base_page_hit_at_4_count"),
-        candidate_page=s.get("candidate_page_hit_at_k_count") or s.get("candidate_page_hit_at_4_count"),
-        page=s.get("page_hit_at_k_count") or s.get("page_hit_at_4_count"),
-        recovered=s.get("recovered"),
-        lost=s.get("lost"),
-        net=s.get("net_recovered"),
+        base_page=report(s.get("base_page_hit_at_k_count") if page_metrics_available else None),
+        candidate_page=report(s.get("candidate_page_hit_at_k_count") if page_metrics_available else None),
+        page=report(s.get("page_hit_at_k_count") if page_metrics_available else None),
+        recovered=report(s.get("recovered") if page_metrics_available else None),
+        lost=report(s.get("lost") if page_metrics_available else None),
+        net=report(s.get("net_recovered") if page_metrics_available else None),
         body_rejects=(s.get("rejected_promotion_reason_counts") or {}).get(
             "promoted_body_score_not_above_base", 0
         ),
     )
 )
+if not page_metrics_available and s.get("doc_metrics_available"):
+    print(
+        "# {dataset}: page gold unavailable; doc@{k} base={base} candidate={candidate} "
+        "gated={output} doc_net={net}".format(
+            dataset=dataset,
+            k=(s.get("config") or {}).get("hit_k", 4),
+            base=s.get("base_doc_hit_at_k_count"),
+            candidate=s.get("candidate_doc_hit_at_k_count"),
+            output=s.get("doc_hit_at_k_count"),
+            net=s.get("doc_net_recovered"),
+        )
+    )
 PY
 }
 
@@ -257,7 +272,14 @@ run_safe_gate() {
 
   print_summary_row "$dataset_label" "$output_summary"
 
-  if [[ "$RUN_GOLD_RANK_AUDIT" == "1" ]]; then
+  if [[ "$RUN_GOLD_RANK_AUDIT" == "1" && "$dataset_label" == "m3docvqa" ]]; then
+    echo "# m3docvqa: skipping page-position audit because MMQA gold has document labels only"
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/analyze_m3docvqa_retrieval.py" \
+      --pred "$output_prediction" \
+      --gold "$gold" \
+      --recall-k 1 2 4 5 10 20 \
+      --summary-only
+  elif [[ "$RUN_GOLD_RANK_AUDIT" == "1" ]]; then
     "$PYTHON_BIN" "$REPO_ROOT/scripts/audit_gold_rank_positions.py" \
       --prediction "$output_prediction" \
       --gold "$gold" \

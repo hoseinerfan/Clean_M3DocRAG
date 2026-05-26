@@ -696,6 +696,14 @@ M3DOCVQA_PAGE_TEXT_JSONL=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs
 
 Use the raw `mmqa_dev_splade.prediction.json` for `M3DOCVQA_SPARSE_PRED`; do not substitute historical graph/source-ablation/no-SPLADE outputs.
 
+M3DocVQA annotation limitation:
+
+`MMQA_dev.jsonl` supplies supporting document IDs but no true supporting page indices. For this
+dataset, safe-gate `page@4`, `recovered`, and `lost` are unavailable rather than zero; use the
+reported document recall for retrieval sanity and run downstream VQA evaluation to assess whether
+the promoted pages improve answer quality. Page-level rescue safety remains measurable on
+MMDocIR, SciEGQA, ViDoSeek, DUDE, and ViDoRe.
+
 Alternative PDF-to-Markdown quality check:
 
 The native PDF Markdown exporter uses PDF bookmarks and font-size heuristics. To test whether the
