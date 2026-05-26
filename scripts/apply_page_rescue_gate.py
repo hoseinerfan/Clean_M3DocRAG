@@ -916,6 +916,23 @@ def mean_or_none(values: list[float]) -> float | None:
     return statistics.fmean(values) if values else None
 
 
+def sorted_rank_counter(values: list[Any]) -> dict[str, int]:
+    counter: Counter[str] = Counter()
+    for value in values:
+        counter[str(value) if value is not None else "missing"] += 1
+
+    def sort_key(item: tuple[str, int]) -> tuple[int, int | str]:
+        key, _count = item
+        if key == "missing":
+            return (1, 10**9)
+        try:
+            return (0, int(key))
+        except ValueError:
+            return (0, key)
+
+    return dict(sorted(counter.items(), key=sort_key))
+
+
 def maybe_rewrite_scores(rows: list[Any], score_mode: str) -> list[Any]:
     if score_mode != "rank":
         return rows
@@ -1501,6 +1518,21 @@ def summarize_cases(
                 float(item.get("support_doc_vote_count", 0))
                 for item in accepted_promotion_details
             ]
+        ),
+        "accepted_candidate_rank_counts": sorted_rank_counter(
+            [item.get("candidate_rank") for item in accepted_promotion_details]
+        ),
+        "accepted_base_rank_counts": sorted_rank_counter(
+            [item.get("base_rank") for item in accepted_promotion_details]
+        ),
+        "accepted_base_doc_rank_counts": sorted_rank_counter(
+            [item.get("base_doc_rank") for item in accepted_promotion_details]
+        ),
+        "accepted_support_page_vote_count_counts": sorted_rank_counter(
+            [item.get("support_page_vote_count") for item in accepted_promotion_details]
+        ),
+        "accepted_support_doc_vote_count_counts": sorted_rank_counter(
+            [item.get("support_doc_vote_count") for item in accepted_promotion_details]
         ),
         "config": {
             "hit_k": int(args.hit_k),

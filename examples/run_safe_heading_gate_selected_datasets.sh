@@ -7,6 +7,7 @@ set -euo pipefail
 #   bash examples/run_safe_heading_gate_selected_datasets.sh
 #   DATASETS="m3docvqa dude vidore" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   DATASETS="dude" BODY_MIN_SCORE_ADVANTAGE=0.0 bash examples/run_safe_heading_gate_selected_datasets.sh
+#   SAFE_GATE_PROFILE=window20 RUN_GOLD_RANK_AUDIT=1 DATASETS="dude vidore" bash examples/run_safe_heading_gate_selected_datasets.sh
 #
 # The script assumes the expensive dense/plain_top224 and SPLADE predictions already
 # exist. If any are missing it prints the expected path and exits before reranking.
@@ -22,6 +23,41 @@ DATASETS="${DATASETS:-m3docvqa dude vidore}"
 LAYOUT_QUERY_BLOCK="${LAYOUT_QUERY_BLOCK:-(?i)\b(row|column)\b|\b(immediately\s+)?(to\s+the\s+)?(right|left)\s+of\b}"
 HEADING_MIN_SCORE_ADVANTAGE="${HEADING_MIN_SCORE_ADVANTAGE:-0.01}"
 BODY_MIN_SCORE_ADVANTAGE="${BODY_MIN_SCORE_ADVANTAGE:-0.0}"
+SAFE_GATE_PROFILE="${SAFE_GATE_PROFILE:-boundary}"
+HIT_K="${HIT_K:-4}"
+INSERT_POSITION="${INSERT_POSITION:-$HIT_K}"
+MAX_PROMOTIONS="${MAX_PROMOTIONS:-1}"
+RUN_GOLD_RANK_AUDIT="${RUN_GOLD_RANK_AUDIT:-0}"
+REJECT_PROMOTED_PAGE_IDX="${REJECT_PROMOTED_PAGE_IDX:-}"
+
+case "$SAFE_GATE_PROFILE" in
+  boundary)
+    SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-safe_gate_bodyguard}"
+    CANDIDATE_RANK_MAX="${CANDIDATE_RANK_MAX:-4}"
+    RESCUE_RANK_MIN="${RESCUE_RANK_MIN:-5}"
+    RESCUE_RANK_MAX="${RESCUE_RANK_MAX:-5}"
+    MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-3}"
+    SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-4}"
+    MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-2}"
+    ;;
+  window20)
+    SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-safe_window20_gate_bodyguard}"
+    CANDIDATE_RANK_MAX="${CANDIDATE_RANK_MAX:-20}"
+    RESCUE_RANK_MIN="${RESCUE_RANK_MIN:-5}"
+    RESCUE_RANK_MAX="${RESCUE_RANK_MAX:-20}"
+    MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-3}"
+    SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-20}"
+    MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-2}"
+    ;;
+  *)
+    echo "unknown_SAFE_GATE_PROFILE: $SAFE_GATE_PROFILE" >&2
+    exit 2
+    ;;
+esac
+
+HEADING_COMPARE_BASE_TOP_K="${HEADING_COMPARE_BASE_TOP_K:-$HIT_K}"
+BODY_COMPARE_BASE_TOP_K="${BODY_COMPARE_BASE_TOP_K:-$HIT_K}"
+GOLD_RANK_AUDIT_BOUNDARY_RANK="${GOLD_RANK_AUDIT_BOUNDARY_RANK:-$((HIT_K + 1))}"
 
 require_file() {
   local label="$1"
@@ -137,6 +173,14 @@ run_safe_gate() {
   local body_doc_pages="$9"
   local output_stem="${10}"
   local promoted_doc_max_base_rank="${11:-4}"
+  local output_prediction="$out_dir/${output_stem}.prediction.json"
+  local output_summary="$out_dir/${output_stem}.summary.json"
+  local output_cases="$out_dir/${output_stem}.cases.json"
+  local extra_args=()
+
+  for page_idx in $REJECT_PROMOTED_PAGE_IDX; do
+    extra_args+=(--reject-promoted-page-idx "$page_idx")
+  done
 
   "$PYTHON_BIN" "$REPO_ROOT/scripts/apply_page_rescue_gate.py" \
     --base-prediction "$base_pred" \
@@ -144,17 +188,17 @@ run_safe_gate() {
     --support-prediction "heuristic=$heuristic_pred" \
     --support-prediction "strict=$strict_pred" \
     --gold "$gold" \
-    --hit-k 4 \
-    --candidate-rank-max 4 \
-    --rescue-rank-min 5 \
-    --rescue-rank-max 5 \
-    --min-page-overlap 3 \
+    --hit-k "$HIT_K" \
+    --candidate-rank-max "$CANDIDATE_RANK_MAX" \
+    --rescue-rank-min "$RESCUE_RANK_MIN" \
+    --rescue-rank-max "$RESCUE_RANK_MAX" \
+    --min-page-overlap "$MIN_PAGE_OVERLAP" \
     --promoted-doc-max-base-rank "$promoted_doc_max_base_rank" \
-    --support-page-rank-max 4 \
-    --min-support-page-votes 2 \
+    --support-page-rank-max "$SUPPORT_PAGE_RANK_MAX" \
+    --min-support-page-votes "$MIN_SUPPORT_PAGE_VOTES" \
     --heading-doc-pages-jsonl "$heading_doc_pages" \
     --heading-min-score-advantage "$HEADING_MIN_SCORE_ADVANTAGE" \
-    --heading-compare-base-top-k 4 \
+    --heading-compare-base-top-k "$HEADING_COMPARE_BASE_TOP_K" \
     --heading-compare-mode displaced_boundary \
     --body-doc-pages-jsonl "$body_doc_pages" \
     --body-field markdown \
@@ -163,16 +207,28 @@ run_safe_gate() {
     --body-field page_text \
     --body-field content \
     --body-min-score-advantage "$BODY_MIN_SCORE_ADVANTAGE" \
-    --body-compare-base-top-k 4 \
+    --body-compare-base-top-k "$BODY_COMPARE_BASE_TOP_K" \
     --body-compare-mode displaced_boundary \
     --query-block-regex "$LAYOUT_QUERY_BLOCK" \
+    "${extra_args[@]}" \
     --mode swap_promoted \
-    --insert-position 4 \
-    --output-prediction-json "$out_dir/${output_stem}.prediction.json" \
-    --output-summary-json "$out_dir/${output_stem}.summary.json" \
-    --output-cases-json "$out_dir/${output_stem}.cases.json"
+    --insert-position "$INSERT_POSITION" \
+    --max-promotions "$MAX_PROMOTIONS" \
+    --output-prediction-json "$output_prediction" \
+    --output-summary-json "$output_summary" \
+    --output-cases-json "$output_cases"
 
-  print_summary_row "$dataset_label" "$out_dir/${output_stem}.summary.json"
+  print_summary_row "$dataset_label" "$output_summary"
+
+  if [[ "$RUN_GOLD_RANK_AUDIT" == "1" ]]; then
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/audit_gold_rank_positions.py" \
+      --prediction "$output_prediction" \
+      --gold "$gold" \
+      --top-k "$HIT_K" \
+      --boundary-rank "$GOLD_RANK_AUDIT_BOUNDARY_RANK" \
+      --output-json "$out_dir/${output_stem}.gold_rank_positions.json" \
+      --output-md "$out_dir/${output_stem}.gold_rank_positions.md"
+  fi
 }
 
 run_m3docvqa() {
@@ -223,7 +279,7 @@ run_m3docvqa() {
     "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
     "$pdf_markdown_jsonl" \
     "$pdf_markdown_jsonl" \
-    "${tag}_safe_gate_bodyguard" \
+    "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
     4
 }
 
@@ -258,6 +314,7 @@ run_dude() {
   run_graph_view dude "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view dude "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
 
+  local dude_suffix="${DUDE_SAFE_GATE_OUTPUT_SUFFIX:-${SAFE_GATE_OUTPUT_SUFFIX}_docrank${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}}"
   run_safe_gate \
     dude \
     "$gold" \
@@ -268,7 +325,7 @@ run_dude() {
     "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
     "$pdf_markdown_jsonl" \
     "$pdf_markdown_jsonl" \
-    "${tag}_safe_gate_bodyguard_docrank1" \
+    "${tag}_${dude_suffix}" \
     "${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}"
 }
 
@@ -312,11 +369,12 @@ run_vidore() {
     "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
     "$data_root/doc_pages_dev.jsonl" \
     "$data_root/doc_pages_dev.jsonl" \
-    "${tag}_safe_gate_bodyguard" \
+    "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
     4
 }
 
-echo "| dataset | accepted | base page@4 | candidate page@4 | gated page@4 | recovered | lost | net | body rejects |"
+echo "safe_gate_profile=$SAFE_GATE_PROFILE hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} support_page_rank_max=$SUPPORT_PAGE_RANK_MAX"
+echo "| dataset | accepted | base page@$HIT_K | candidate page@$HIT_K | gated page@$HIT_K | recovered | lost | net | body rejects |"
 echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
 
 for dataset in $DATASETS; do

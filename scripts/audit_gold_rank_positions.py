@@ -9,18 +9,43 @@ from pathlib import Path
 from typing import Any
 
 
+DEFAULT_RANK_BANDS = [
+    ("top1", 1, 1),
+    ("top2_4", 2, 4),
+    ("rank5", 5, 5),
+    ("rank6_10", 6, 10),
+    ("rank11_20", 11, 20),
+    ("rank21_100", 21, 100),
+    ("rank101_1000", 101, 1000),
+    ("rank1001_plus", 1001, None),
+]
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Audit where gold pages appear in a retrieval ranking. Reports slot-level "
             "gold counts, first-gold-rank counts, top-k gold patterns, and rank-(k+1) "
-            "boundary opportunities."
+            "boundary opportunities. Also splits first gold page rank bands by first "
+            "gold document rank bands so deeper rescue opportunities can be separated "
+            "from document-retrieval failures."
         )
     )
     parser.add_argument("--prediction", required=True)
     parser.add_argument("--gold", required=True)
     parser.add_argument("--top-k", type=int, default=4)
     parser.add_argument("--boundary-rank", type=int, default=5)
+    parser.add_argument(
+        "--rank-band",
+        action="append",
+        default=[],
+        metavar="LABEL=START-END",
+        help=(
+            "Optional rank band. Repeatable. Examples: top4=1-4, window=5-20, "
+            "deep=21+, missing=missing. Defaults to top1/top2_4/rank5/rank6_10/"
+            "rank11_20/rank21_100/rank101_1000/rank1001_plus/missing."
+        ),
+    )
     parser.add_argument("--output-json", default="")
     parser.add_argument("--output-md", default="")
     parser.add_argument("--examples", type=int, default=20)
@@ -63,6 +88,17 @@ def page_uid(doc_id: object, page_idx: object) -> str:
     return f"{doc_id}_page{int(page_idx)}"
 
 
+def parse_page_uid(uid: str) -> tuple[str, int] | None:
+    marker = "_page"
+    if marker not in str(uid):
+        return None
+    doc_id, page_idx = str(uid).rsplit(marker, 1)
+    try:
+        return doc_id, int(page_idx)
+    except ValueError:
+        return None
+
+
 def row_page_uid(row: Any) -> str | None:
     if isinstance(row, (list, tuple)) and len(row) >= 2:
         return page_uid(row[0], row[1])
@@ -73,6 +109,21 @@ def row_page_uid(row: Any) -> str | None:
         page_idx = row.get("page_idx", row.get("page_id", row.get("page")))
         if doc_id is not None and page_idx is not None:
             return page_uid(doc_id, page_idx)
+    return None
+
+
+def row_doc_id(row: Any) -> str | None:
+    if isinstance(row, (list, tuple)) and len(row) >= 1:
+        value = str(row[0]).strip()
+        return value or None
+    if isinstance(row, dict):
+        value = row.get("doc_id", row.get("doc_name"))
+        if value is not None:
+            value = str(value).strip()
+            return value or None
+        uid = row_page_uid(row)
+        parsed = parse_page_uid(uid) if uid else None
+        return parsed[0] if parsed else None
     return None
 
 
@@ -103,11 +154,24 @@ def ranked_page_uids(row: dict[str, Any] | None) -> list[str]:
     return ranked
 
 
+def ranked_doc_ids(row: dict[str, Any] | None) -> list[str]:
+    ranked: list[str] = []
+    seen: set[str] = set()
+    for item in prediction_rows(row):
+        doc_id = row_doc_id(item)
+        if doc_id and doc_id not in seen:
+            seen.add(doc_id)
+            ranked.append(doc_id)
+    return ranked
+
+
 def gold_page_uids(row: dict[str, Any]) -> set[str]:
     metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
     values = metadata.get("gold_page_uids")
     if isinstance(values, list) and values:
-        return {str(value) for value in values}
+        uids = {str(value) for value in values}
+    else:
+        uids = set()
     doc_ids = metadata.get("gold_doc_ids") or row.get("gold_doc_ids") or []
     page_ids = metadata.get("gold_page_ids") or row.get("gold_page_ids") or []
     if not isinstance(doc_ids, list):
@@ -116,11 +180,37 @@ def gold_page_uids(row: dict[str, Any]) -> set[str]:
         page_ids = [page_ids]
     if len(doc_ids) == 1 and len(page_ids) > 1:
         doc_ids = doc_ids * len(page_ids)
-    return {
+    uids.update(
         page_uid(doc_id, page_idx)
         for doc_id, page_idx in zip(doc_ids, page_ids)
         if doc_id is not None and page_idx is not None
-    }
+    )
+    for ctx in row.get("supporting_context", []):
+        if not isinstance(ctx, dict):
+            continue
+        doc_id = ctx.get("doc_id", ctx.get("doc_name"))
+        page_idx = ctx.get("page_idx", ctx.get("page_id", ctx.get("page")))
+        if doc_id is not None and page_idx is not None:
+            uids.add(page_uid(doc_id, page_idx))
+    return uids
+
+
+def gold_doc_ids(row: dict[str, Any], page_gold: set[str]) -> set[str]:
+    metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
+    values = metadata.get("gold_doc_ids") or row.get("gold_doc_ids") or []
+    if not isinstance(values, list):
+        values = [values]
+    doc_ids = {str(value).strip() for value in values if str(value).strip()}
+    for uid in page_gold:
+        parsed = parse_page_uid(uid)
+        if parsed:
+            doc_ids.add(parsed[0])
+    for ctx in row.get("supporting_context", []):
+        if isinstance(ctx, dict):
+            doc_id = str(ctx.get("doc_id", ctx.get("doc_name", ""))).strip()
+            if doc_id:
+                doc_ids.add(doc_id)
+    return doc_ids
 
 
 def first_rank(ranked: list[str], gold: set[str]) -> int | None:
@@ -136,18 +226,72 @@ def pct(count: int, denom: int) -> str:
     return f"{100.0 * count / denom:.2f}%"
 
 
+def parse_rank_band(value: str) -> tuple[str, int | None, int | None]:
+    if "=" not in value:
+        raise ValueError(f"Rank band must be LABEL=RANGE, got: {value}")
+    label, raw_range = value.split("=", 1)
+    label = label.strip()
+    raw_range = raw_range.strip().lower()
+    if not label:
+        raise ValueError(f"Rank band label is empty: {value}")
+    if raw_range == "missing":
+        return label, None, None
+    if raw_range.endswith("+"):
+        return label, int(raw_range[:-1]), None
+    if "-" in raw_range:
+        start, end = raw_range.split("-", 1)
+        return label, int(start), int(end)
+    rank = int(raw_range)
+    return label, rank, rank
+
+
+def rank_band(rank: int | None, bands: list[tuple[str, int | None, int | None]]) -> str:
+    if rank is None:
+        return "missing"
+    for label, start, end in bands:
+        if start is None:
+            continue
+        if rank < start:
+            continue
+        if end is None or rank <= end:
+            return label
+    return f"rank{rank}"
+
+
+def sorted_rank_counts(counter: Counter[str]) -> dict[str, int]:
+    def key_fn(item: tuple[str, int]) -> tuple[int, int | str]:
+        key, _count = item
+        if key == "missing":
+            return (1, 10**9)
+        if key.isdigit():
+            return (0, int(key))
+        return (0, key)
+
+    return dict(sorted(counter.items(), key=key_fn))
+
+
 def main() -> None:
     args = parse_args()
     prediction = load_prediction(Path(args.prediction))
     gold_rows = {str(row.get("qid", "")).strip(): row for row in read_jsonl(Path(args.gold))}
     top_k = int(args.top_k)
     boundary_rank = int(args.boundary_rank)
+    rank_bands = (
+        [parse_rank_band(value) for value in args.rank_band]
+        if args.rank_band
+        else list(DEFAULT_RANK_BANDS)
+    )
 
     slot_gold_counts: Counter[int] = Counter()
     first_rank_counts: Counter[str] = Counter()
+    first_doc_rank_counts: Counter[str] = Counter()
+    first_page_rank_band_counts: Counter[str] = Counter()
+    first_doc_rank_band_counts: Counter[str] = Counter()
+    page_doc_rank_band_counts: Counter[str] = Counter()
     gold_count_in_topk: Counter[int] = Counter()
     pattern_counts: Counter[str] = Counter()
     boundary_gold_pattern_counts: Counter[str] = Counter()
+    page_window_doc_band_examples: dict[str, list[dict[str, Any]]] = {}
     boundary_examples: list[dict[str, Any]] = []
     inner_replacement_opportunities: list[dict[str, Any]] = []
     inner_replacement_opportunity_count = 0
@@ -166,6 +310,8 @@ def main() -> None:
             missing_prediction += 1
             continue
         ranked = ranked_page_uids(pred_row)
+        ranked_docs = ranked_doc_ids(pred_row)
+        doc_gold = gold_doc_ids(gold_row, gold)
         evaluated += 1
 
         top_pages = ranked[:top_k]
@@ -180,6 +326,26 @@ def main() -> None:
 
         rank = first_rank(ranked, gold)
         first_rank_counts[str(rank) if rank is not None else "missing"] += 1
+        doc_rank = first_rank(ranked_docs, doc_gold)
+        first_doc_rank_counts[str(doc_rank) if doc_rank is not None else "missing"] += 1
+        page_band = rank_band(rank, rank_bands)
+        doc_band = rank_band(doc_rank, rank_bands)
+        first_page_rank_band_counts[page_band] += 1
+        first_doc_rank_band_counts[doc_band] += 1
+        band_key = f"{page_band}__doc_{doc_band}"
+        page_doc_rank_band_counts[band_key] += 1
+        if len(page_window_doc_band_examples.setdefault(band_key, [])) < int(args.examples):
+            page_window_doc_band_examples[band_key].append(
+                {
+                    "qid": qid,
+                    "question": gold_row.get("question", ""),
+                    "gold_page_uids": sorted(gold),
+                    "gold_doc_ids": sorted(doc_gold),
+                    "first_gold_page_rank": rank,
+                    "first_gold_doc_rank": doc_rank,
+                    "top_pages": top_pages,
+                }
+            )
 
         boundary_uid = ranked[boundary_rank - 1] if len(ranked) >= boundary_rank else None
         boundary_is_gold = boundary_uid in gold if boundary_uid else False
@@ -223,7 +389,25 @@ def main() -> None:
             str(k): (slot_gold_counts.get(k, 0) / evaluated if evaluated else 0.0)
             for k in range(1, top_k + 1)
         },
-        "first_gold_rank_counts": dict(sorted(first_rank_counts.items(), key=lambda kv: (kv[0] == "missing", int(kv[0]) if kv[0].isdigit() else 10**9))),
+        "rank_bands": [
+            {"label": label, "start": start, "end": end}
+            for label, start, end in rank_bands
+        ]
+        + [{"label": "missing", "start": None, "end": None}],
+        "first_gold_rank_counts": sorted_rank_counts(first_rank_counts),
+        "first_gold_doc_rank_counts": sorted_rank_counts(first_doc_rank_counts),
+        "first_gold_page_rank_band_counts": {
+            label: first_page_rank_band_counts.get(label, 0)
+            for label, _start, _end in rank_bands
+        }
+        | {"missing": first_page_rank_band_counts.get("missing", 0)},
+        "first_gold_doc_rank_band_counts": {
+            label: first_doc_rank_band_counts.get(label, 0)
+            for label, _start, _end in rank_bands
+        }
+        | {"missing": first_doc_rank_band_counts.get("missing", 0)},
+        "page_doc_rank_band_counts": dict(page_doc_rank_band_counts.most_common()),
+        "page_doc_rank_band_examples": page_window_doc_band_examples,
         "gold_count_in_topk_counts": {
             str(k): gold_count_in_topk.get(k, 0) for k in range(0, top_k + 1)
         },
@@ -249,6 +433,18 @@ def main() -> None:
     print("\nfirst_gold_rank_counts")
     for key, count in summary["first_gold_rank_counts"].items():
         print(f"{key}: {count} ({pct(int(count), evaluated)})")
+    print("\nfirst_gold_doc_rank_counts")
+    for key, count in summary["first_gold_doc_rank_counts"].items():
+        print(f"{key}: {count} ({pct(int(count), evaluated)})")
+    print("\nfirst_gold_page_rank_band_counts")
+    for key, count in summary["first_gold_page_rank_band_counts"].items():
+        print(f"{key}: {count} ({pct(int(count), evaluated)})")
+    print("\nfirst_gold_doc_rank_band_counts")
+    for key, count in summary["first_gold_doc_rank_band_counts"].items():
+        print(f"{key}: {count} ({pct(int(count), evaluated)})")
+    print("\npage_doc_rank_band_counts")
+    for key, count in page_doc_rank_band_counts.most_common(30):
+        print(f"{key}: {count} ({pct(count, evaluated)})")
     print("\ngold_count_in_topk_counts")
     for key, count in summary["gold_count_in_topk_counts"].items():
         print(f"{key}: {count} ({pct(int(count), evaluated)})")
@@ -296,6 +492,63 @@ def main() -> None:
         )
         for key, count in summary["first_gold_rank_counts"].items():
             lines.append(f"| {key} | {count} | {pct(int(count), evaluated)} |")
+        lines.extend(
+            [
+                "",
+                "## First Gold Doc Rank Counts",
+                "",
+                "| first gold doc rank | qids | rate |",
+                "|---:|---:|---:|",
+            ]
+        )
+        for key, count in summary["first_gold_doc_rank_counts"].items():
+            lines.append(f"| {key} | {count} | {pct(int(count), evaluated)} |")
+        lines.extend(
+            [
+                "",
+                "## First Gold Page Rank Bands",
+                "",
+                "| page rank band | qids | rate |",
+                "|---|---:|---:|",
+            ]
+        )
+        for key, count in summary["first_gold_page_rank_band_counts"].items():
+            lines.append(f"| `{key}` | {count} | {pct(int(count), evaluated)} |")
+        lines.extend(
+            [
+                "",
+                "## First Gold Doc Rank Bands",
+                "",
+                "| doc rank band | qids | rate |",
+                "|---|---:|---:|",
+            ]
+        )
+        for key, count in summary["first_gold_doc_rank_band_counts"].items():
+            lines.append(f"| `{key}` | {count} | {pct(int(count), evaluated)} |")
+        doc_band_labels = [label for label, _start, _end in rank_bands] + ["missing"]
+        page_band_labels = [label for label, _start, _end in rank_bands] + ["missing"]
+        lines.extend(
+            [
+                "",
+                "## Page Rank Band By Doc Rank Band",
+                "",
+                "| page band | " + " | ".join(f"`{label}`" for label in doc_band_labels) + " |",
+                "|---|" + "|".join("---:" for _label in doc_band_labels) + "|",
+            ]
+        )
+        for page_band_label in page_band_labels:
+            row_counts = [
+                page_doc_rank_band_counts.get(
+                    f"{page_band_label}__doc_{doc_band_label}",
+                    0,
+                )
+                for doc_band_label in doc_band_labels
+            ]
+            lines.append(
+                f"| `{page_band_label}` | "
+                + " | ".join(str(value) for value in row_counts)
+                + " |"
+            )
         lines.extend(
             [
                 "",

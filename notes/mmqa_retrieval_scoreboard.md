@@ -26,6 +26,7 @@ Purpose: keep a short, updateable MMQA scoreboard with the exact tables, configs
   - precision-oriented rescue layer on top of heading-augmented graph views
   - accepts only narrow rank-window page promotions with multi-view heading support, displaced-boundary heading comparison, layout-query abstention, and body-evidence guard
   - report as a conservative post-processing gate, not as a global reranker
+  - default runner profile is `boundary`; use `SAFE_GATE_PROFILE=window20` to scan candidate ranks/base ranks through 20 with the same guards
 
 ## Table A: Doc Hit@k
 
@@ -146,6 +147,20 @@ Pending safe-gate evaluation targets:
 DATASETS="m3docvqa vidore" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
+
+Rank-window variant:
+
+```bash
+SAFE_GATE_PROFILE=window20 \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="m3docvqa dude vidore" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+The window profile writes `*_safe_window20_gate_bodyguard*.summary.json` plus optional
+`*.gold_rank_positions.{json,md}` audits. The audit now reports first gold document ranks and
+page/doc rank-band matrices, which is the main check for whether rank `6-20` misses are
+same-document/page-local opportunities or document-retrieval failures.
 
 ## Table E: Dataset Run Status
 

@@ -689,6 +689,21 @@ bash examples/run_safe_heading_gate_selected_datasets.sh
 
 Next evaluation targets are M3DocVQA and ViDoRe. The runner expects `plain_top224` and SPLADE predictions to exist first; if any prerequisite is missing, it prints the missing path and stops.
 
+Full rank-window rescue profile:
+
+```bash
+SAFE_GATE_PROFILE=window20 \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="m3docvqa dude vidore" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+This keeps the same heading/body/layout/doc-rank safety checks but scans candidate ranks through
+20 and only promotes pages whose base rank is in `5-20`. The default profile remains `boundary`
+for reproducing the validated rank-5 artifacts. With `RUN_GOLD_RANK_AUDIT=1`, each dataset also
+gets a `*.gold_rank_positions.md` report containing first gold page/doc ranks and a page-rank-band
+by doc-rank-band matrix.
+
 ## SciEGQA Targeted Sweep Runner
 
 A ready-to-run SciEGQA sweep is available:

@@ -638,6 +638,31 @@ bash examples/run_safe_heading_gate_selected_datasets.sh
 
 This helper currently targets M3DocVQA, DUDE, and ViDoRe after their `plain_top224` and SPLADE artifacts exist. It writes per-dataset `*_safe_gate_bodyguard.summary.json`, `.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory. DUDE uses the stricter `dude_safe_gate_bodyguard_docrank1.*` output by default.
 
+Rank-window rescue profile:
+
+```bash
+SAFE_GATE_PROFILE=window20 \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="m3docvqa dude vidore" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+`SAFE_GATE_PROFILE=window20` keeps the same safety stack but expands the candidate scan from
+the rank-5 boundary to the base rank `5-20` window:
+
+- `candidate_rank_max=20`
+- `rescue_rank_min=5`
+- `rescue_rank_max=20`
+- `support_page_rank_max=20`
+- same displaced-boundary heading/body comparison
+- same multi-view support, layout-query block, optional promoted page-index block, and doc-rank gate
+
+The default profile remains `boundary`, so the validated frozen artifacts above stay reproducible.
+Set `RUN_GOLD_RANK_AUDIT=1` to also write `*.gold_rank_positions.json` and
+`*.gold_rank_positions.md` next to each output. The audit now includes first gold document ranks,
+page/doc rank bands, and a page-rank-band by doc-rank-band matrix so rank `6-20` opportunities can
+be separated from document-retrieval failures.
+
 Limitation report / failure taxonomy audit for the frozen graph outputs:
 
 ```bash
