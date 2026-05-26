@@ -619,6 +619,24 @@ page_hit@4=1558
 doc_hit@4=1925
 ```
 
+The Graph-PPR artifact is:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/graph_ppr_plain_top224_splade/dude_denseheavy125_medium_both.prediction.json
+```
+
+Observed Graph-PPR:
+
+```text
+n_qids=2903
+page_recall@4=0.5881731542082902
+page_recall@20=0.7172139931871244
+doc_recall@4=0.6796417499138822
+doc_recall@20=0.7833275921460559
+page_hit@4=1714
+doc_hit@4=1973
+```
+
 Environment reset:
 
 ```bash
@@ -627,7 +645,7 @@ unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_
 source dude/env_hpc.sh
 ```
 
-Next run `denseheavy125_medium_both`. Full commands are in `dude/README.md` and `DATASET_WORKFLOWS.md`.
+DUDE is complete through the frozen `denseheavy125_medium_both` page-labeled Graph-PPR config.
 
 ## SciEGQA Targeted Sweep Runner
 

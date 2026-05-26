@@ -52,7 +52,7 @@ This corresponds to the row we call `denseheavy125_medium_both`. ViDoSeek has a 
 | ViDoSeek | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
 | OpenDocVQA | Full OCR-backed Graph-PPR completed. Full-dev no-support `pairwise_content_posterior` was negative: page hit@4 `26173 -> 22592`, net `-3581`. | Keep Graph-PPR as the full-dev result; use content posterior only as a hard-subset diagnostic/rescue component. |
 | MMLongBench DocQA | Prepared: 708 docs, 30,917 pages, 14,466 QAs, 19 missing gold pages; embedding job was submitted. | Check embedding completion, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
-| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. Dense baseline, plain_top224, and SPLADE/doc-RRF are complete. SPLADE/doc-RRF improves doc@4 to `0.6631` but lowers page@4 to `0.5312`. | Run Graph-PPR. |
+| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. Dense baseline, plain_top224, SPLADE/doc-RRF, and Graph-PPR are complete. Graph-PPR is best: page@4 `0.5882`, doc@4 `0.6796`. | None unless rerunning for reproducibility. |
 
 ## Common Sanity Checks
 
@@ -773,7 +773,19 @@ page_hit@4=1558
 doc_hit@4=1925
 ```
 
-Run Graph-PPR next:
+Observed Graph-PPR:
+
+```text
+n_qids=2903
+page_recall@4=0.5881731542082902
+page_recall@20=0.7172139931871244
+doc_recall@4=0.6796417499138822
+doc_recall@20=0.7833275921460559
+page_hit@4=1714
+doc_hit@4=1973
+```
+
+Graph-PPR command:
 
 ```bash
 DATA_NAME=dude \

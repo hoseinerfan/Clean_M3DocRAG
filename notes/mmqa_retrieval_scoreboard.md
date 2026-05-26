@@ -104,7 +104,7 @@ Use this section for datasets with exact page labels. These numbers are **averag
 | Dense baseline (`baseline_ret1000`) | `53.54%` | `65.44%` | `61.14%` | `72.48%` |
 | MaxSim+ (`plain_top224_ret1000`) | `57.20%` | `68.66%` | `65.07%` | `75.61%` |
 | Dense+SPLADE doc-RRF | `53.12%` | `61.80%` | `66.31%` | `77.47%` |
-| Graph Page Preserve (`denseheavy125_medium_both`) | `N/A` | `N/A` | `N/A` | `N/A` |
+| Graph Page Preserve (`denseheavy125_medium_both`) | `58.82%` | `71.72%` | `67.96%` | `78.33%` |
 
 Interpretation:
 
@@ -112,7 +112,7 @@ Interpretation:
 - ViDoSeek is almost saturated under `plain_top224`; the previously recorded dataset-specific best used heavier graph weights, but this table intentionally leaves the uniform `denseheavy125_medium_both` row as `N/A` until that exact config is recorded.
 - OpenDocVQA now has a valid OCR-backed Graph-PPR row. The earlier all-empty SPLADE run should still be ignored.
 - MMLongBench DocQA now has a converted page-labeled split, but retrieval numbers are not available until embeddings, dense retrieval, `plain_top224`, SPLADE, and Graph-PPR finish.
-- DUDE is prepared and now has dense baseline, `plain_top224`, and SPLADE/doc-RRF results. SPLADE improves doc recall but hurts exact page recall, so Graph-PPR should be treated as the next diagnostic.
+- DUDE is prepared and now has dense baseline, `plain_top224`, SPLADE/doc-RRF, and Graph-PPR results. Graph-PPR is best on DUDE at page@4/page@20 and doc@4/doc@20.
 
 ## Table D: Dataset Run Status
 
@@ -125,7 +125,7 @@ Interpretation:
 | ViDoSeek | yes | yes | PDF text | yes | none |
 | OpenDocVQA | yes | yes | OCR-backed page text | yes | keep Graph-PPR as full-dev result; unconditional `pairwise_content_posterior` was negative |
 | MMLongBench DocQA | yes | no | `page_text_list` in manifest | no | wait for embeddings, then run dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |
-| DUDE | yes | yes | DUDE OCR in manifest | no | run Graph-PPR |
+| DUDE | yes | yes | DUDE OCR in manifest | yes | none |
 
 ## Historical Baseline Note
 
