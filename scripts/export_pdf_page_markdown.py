@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import re
 import statistics
 from collections import Counter, defaultdict
+from importlib import metadata as importlib_metadata
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +21,8 @@ def parse_args() -> argparse.Namespace:
         description=(
             "Export a doc_pages JSONL with a PDF-derived markdown field. The exporter "
             "uses original PDF text without OCR or VLM text. The native backend uses "
-            "outlines/bookmarks and font-size heading cues; pymupdf4llm uses its "
-            "layout-aware Markdown conversion with OCR explicitly disabled."
+            "outlines/bookmarks and font-size heading cues; pymupdf4llm uses structured "
+            "Markdown conversion with OCR explicitly disabled."
         )
     )
     parser.add_argument("--doc-pages-jsonl", required=True)
@@ -38,7 +40,7 @@ def parse_args() -> argparse.Namespace:
         default="native",
         help=(
             "PDF-to-Markdown backend. native preserves the existing font/outline exporter; "
-            "pymupdf4llm uses layout-aware page Markdown with use_ocr=False."
+            "pymupdf4llm uses page Markdown with OCR controls disabled."
         ),
     )
     parser.add_argument("--max-pages", type=int, default=0)
@@ -62,6 +64,15 @@ def parse_args() -> argparse.Namespace:
         "--pymupdf4llm-keep-footer",
         action="store_true",
         help="Retain footers in pymupdf4llm output. Disabled by default to reduce repeated page furniture.",
+    )
+    parser.add_argument(
+        "--allow-pymupdf4llm-auto-layout",
+        action="store_true",
+        help=(
+            "Allow a PyMuPDF4LLM version other than 0.3.4. Newer releases can initialize "
+            "an ONNX layout model on import; this option is intended only for a separately "
+            "controlled neural-layout experiment."
+        ),
     )
     parser.add_argument(
         "--require-heading-pages",
@@ -369,14 +380,19 @@ def pymupdf4llm_pages(
     args: argparse.Namespace,
     pymupdf4llm: Any,
 ) -> dict[int, tuple[str, dict[str, int]]]:
-    chunks = pymupdf4llm.to_markdown(
-        str(pdf_path),
-        page_chunks=True,
-        use_ocr=False,
-        header=bool(args.pymupdf4llm_keep_header),
-        footer=bool(args.pymupdf4llm_keep_footer),
-        show_progress=False,
-    )
+    supported = inspect.signature(pymupdf4llm.to_markdown).parameters
+    converter_args: dict[str, Any] = {
+        "page_chunks": True,
+        "header": bool(args.pymupdf4llm_keep_header),
+        "footer": bool(args.pymupdf4llm_keep_footer),
+        "show_progress": False,
+    }
+    converter_args = {key: value for key, value in converter_args.items() if key in supported}
+    if "use_ocr" in supported:
+        converter_args["use_ocr"] = False
+    if "force_ocr" in supported:
+        converter_args["force_ocr"] = False
+    chunks = pymupdf4llm.to_markdown(str(pdf_path), **converter_args)
     if not isinstance(chunks, list):
         raise TypeError("pymupdf4llm page_chunks=True did not return a page chunk list")
     converted: dict[int, tuple[str, dict[str, int]]] = {}
@@ -406,15 +422,40 @@ def main() -> None:
             "with `import fitz` available."
         ) from exc
     pymupdf4llm = None
+    pymupdf4llm_version = ""
+    pymupdf4llm_has_use_ocr = False
     if args.backend == "pymupdf4llm":
+        try:
+            pymupdf4llm_version = importlib_metadata.version("pymupdf4llm")
+        except importlib_metadata.PackageNotFoundError as exc:
+            raise SystemExit(
+                "The pymupdf4llm backend requires `pymupdf4llm`. For the non-OCR "
+                "HPC-safe experiment install `pip install --force-reinstall "
+                "\"pymupdf4llm==0.3.4\"`."
+            ) from exc
+        if (
+            pymupdf4llm_version != "0.3.4"
+            and not bool(args.allow_pymupdf4llm_auto_layout)
+        ):
+            raise SystemExit(
+                "The HPC-safe PyMuPDF4LLM experiment requires `pymupdf4llm==0.3.4`; "
+                f"found {pymupdf4llm_version}. Recent releases auto-activate ONNX layout "
+                "on import and may fail CPU-affinity setup under SLURM. Install with "
+                "`pip install --force-reinstall \"pymupdf4llm==0.3.4\"`, or pass "
+                "`--allow-pymupdf4llm-auto-layout` only for a controlled layout-model run."
+            )
         try:
             import pymupdf4llm as pymupdf4llm_module  # type: ignore
         except ImportError as exc:
             raise SystemExit(
-                "The pymupdf4llm backend requires `pymupdf4llm`. Install it in the "
-                "experiment environment with `pip install pymupdf4llm`."
+                "The installed `pymupdf4llm` package could not be imported. Reinstall the "
+                "HPC-safe experiment dependency with `pip install --force-reinstall "
+                "\"pymupdf4llm==0.3.4\"`."
             ) from exc
         pymupdf4llm = pymupdf4llm_module
+        pymupdf4llm_has_use_ocr = "use_ocr" in inspect.signature(
+            pymupdf4llm_module.to_markdown
+        ).parameters
 
     if not args.pdf_root:
         raise ValueError("Provide at least one --pdf-root.")
@@ -430,8 +471,10 @@ def main() -> None:
 
     output_jsonl = Path(args.output_jsonl)
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
+    output_jsonl_tmp = output_jsonl.with_suffix(output_jsonl.suffix + ".tmp")
     output_summary_json = Path(args.output_summary_json)
     output_summary_json.parent.mkdir(parents=True, exist_ok=True)
+    output_summary_json_tmp = output_summary_json.with_suffix(output_summary_json.suffix + ".tmp")
 
     page_count = 0
     nonempty_markdown_page_count = 0
@@ -445,7 +488,7 @@ def main() -> None:
     heading_counts: list[int] = []
     backend_errors: list[dict[str, str]] = []
 
-    with output_jsonl.open("w", encoding="utf-8") as handle:
+    with output_jsonl_tmp.open("w", encoding="utf-8") as handle:
         for doc_index, (doc_id, doc_rows) in enumerate(sorted(rows_by_doc.items())):
             pdf_path, match_reason = choose_pdf_for_doc(doc_rows, pdf_index, pdf_paths)
             pdf_match_counts[match_reason] += 1
@@ -582,10 +625,16 @@ def main() -> None:
         "min_heading_font_size": float(args.min_heading_font_size),
         "max_heading_words": int(args.max_heading_words),
         "pymupdf4llm_use_ocr": False if args.backend == "pymupdf4llm" else None,
+        "pymupdf4llm_has_use_ocr_argument": (
+            pymupdf4llm_has_use_ocr if args.backend == "pymupdf4llm" else None
+        ),
+        "pymupdf4llm_version": pymupdf4llm_version if args.backend == "pymupdf4llm" else None,
         "pymupdf4llm_keep_header": bool(args.pymupdf4llm_keep_header),
         "pymupdf4llm_keep_footer": bool(args.pymupdf4llm_keep_footer),
     }
-    output_summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    output_jsonl_tmp.replace(output_jsonl)
+    output_summary_json_tmp.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    output_summary_json_tmp.replace(output_summary_json)
     print(f"saved_jsonl: {output_jsonl}")
     print(f"saved_summary: {output_summary_json}")
     print(f"page_count: {page_count}")

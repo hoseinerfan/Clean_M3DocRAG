@@ -699,21 +699,24 @@ Use the raw `mmqa_dev_splade.prediction.json` for `M3DOCVQA_SPARSE_PRED`; do not
 Alternative PDF-to-Markdown quality check:
 
 The native PDF Markdown exporter uses PDF bookmarks and font-size heuristics. To test whether the
-heading signal improves with a layout-aware converter, the same pipeline can use
-`PyMuPDF4LLM`. This backend is configured with `use_ocr=False`, so it still uses only native PDF
-content and does not introduce OCR text. It writes to a distinct output directory and does not
-overwrite the validated native artifacts.
+heading signal improves with another structured Markdown converter, the same pipeline can use
+legacy `PyMuPDF4LLM` `0.3.4`. This backend disables OCR where its API exposes the control, uses
+native PDF content, and writes to a distinct output directory without overwriting the validated
+native artifacts.
 
-Installing `pymupdf4llm` may upgrade PyMuPDF in the experiment environment. Preserve the existing
-native JSONL artifacts; do not present a newly regenerated native extraction as an exact
-reproduction without recording the resulting package versions.
+Do not install an unpinned current `pymupdf4llm` for this comparison. Releases introduced in
+March 2026 automatically activate the ONNX-based Layout component on import, which emits CPU
+affinity errors under the current SLURM binding. A neural-layout run is a separate experiment and
+needs its own runtime configuration. Installing even the pinned package may update PyMuPDF in the
+experiment environment, so preserve existing native JSONL artifacts and record package versions
+before claiming exact reproduction.
 
 ```bash
 cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
 source hpc_vital_paths.generated.env
 source scripts/m3docvqa_internal_env.sh
 
-"$PWD/env/bin/python" -m pip install pymupdf4llm
+"$PWD/env/bin/python" -m pip install --force-reinstall "pymupdf4llm==0.3.4"
 
 export ALT_DIR="$LOCAL_OUTPUT_DIR/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation"
 mkdir -p "$ALT_DIR"
@@ -787,6 +790,19 @@ If heading coverage and sampled headings are reasonable, run the graph/gate eval
 will reuse the extracted alternative JSONL above rather than regenerate it.
 
 ```bash
+PDF_MARKDOWN_BACKEND=pymupdf4llm \
+SAFE_GATE_PROFILE=window20 \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="m3docvqa" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+After an interrupted extraction, rerun with `PDF_MARKDOWN_FORCE_REBUILD=1`. The exporter now
+publishes JSONL and summary files only after conversion completes, so future interrupted runs
+leave only `.tmp` files and cannot be reused as completed extraction data.
+
+```bash
+PDF_MARKDOWN_FORCE_REBUILD=1 \
 PDF_MARKDOWN_BACKEND=pymupdf4llm \
 SAFE_GATE_PROFILE=window20 \
 RUN_GOLD_RANK_AUDIT=1 \

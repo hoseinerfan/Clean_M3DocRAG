@@ -33,6 +33,7 @@ REJECT_PROMOTED_PAGE_IDX="${REJECT_PROMOTED_PAGE_IDX:-}"
 HPC_PATH_ENV="${HPC_PATH_ENV:-}"
 PDF_MARKDOWN_BACKEND="${PDF_MARKDOWN_BACKEND:-native}"
 PDF_MARKDOWN_RUN_SUFFIX="${PDF_MARKDOWN_RUN_SUFFIX:-}"
+PDF_MARKDOWN_FORCE_REBUILD="${PDF_MARKDOWN_FORCE_REBUILD:-0}"
 
 if [[ -n "$HPC_PATH_ENV" ]]; then
   # shellcheck disable=SC1090
@@ -181,7 +182,7 @@ prepare_pdf_markdown() {
   local summary_json="$4"
   local variant_dir="$5"
 
-  if [[ ! -f "$output_jsonl" ]]; then
+  if [[ "$PDF_MARKDOWN_FORCE_REBUILD" == "1" || ! -f "$output_jsonl" || ! -f "$summary_json" ]]; then
     "$PYTHON_BIN" "$REPO_ROOT/scripts/export_pdf_page_markdown.py" \
       --doc-pages-jsonl "$doc_pages_jsonl" \
       --pdf-root "$pdf_root" \

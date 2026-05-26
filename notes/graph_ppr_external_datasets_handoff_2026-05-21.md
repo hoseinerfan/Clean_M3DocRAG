@@ -726,17 +726,19 @@ inputs here.
 Alternative M3DocVQA Markdown extraction experiment:
 
 The exporter and selected-dataset runner now support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. The
-backend calls PyMuPDF4LLM page conversion with `use_ocr=False`; it is a native-PDF layout-aware
-Markdown comparison, not an OCR experiment. It writes a separate output tree with suffix
-`_pymupdf4llm_source_ablation`. Installing it may update PyMuPDF in the shared environment, so
-keep the frozen native JSONL artifacts and record package versions before claiming exact
-reproduction of native extraction.
+HPC-safe comparison uses legacy PyMuPDF4LLM `0.3.4`, disables OCR controls exposed by its API,
+and is a native-PDF structured-Markdown comparison rather than an OCR experiment. It writes a
+separate output tree with suffix `_pymupdf4llm_source_ablation`. Current March 2026 releases
+auto-activate ONNX-based Layout during import and emit invalid CPU-affinity errors under the
+current SLURM binding; evaluate that neural-layout backend only as a separate configured run.
+Installing the pinned converter may still update PyMuPDF in the shared environment, so keep the
+frozen native JSONL artifacts and record package versions before claiming exact reproduction.
 
 ```bash
 cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
 source hpc_vital_paths.generated.env
 source scripts/m3docvqa_internal_env.sh
-"$PWD/env/bin/python" -m pip install pymupdf4llm
+"$PWD/env/bin/python" -m pip install --force-reinstall "pymupdf4llm==0.3.4"
 
 export ALT_DIR="$LOCAL_OUTPUT_DIR/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation"
 mkdir -p "$ALT_DIR"
@@ -763,12 +765,17 @@ Markdown: the decisive check is whether audited promotions become more relevant 
 `lost`.
 
 ```bash
+PDF_MARKDOWN_FORCE_REBUILD=1 \
 PDF_MARKDOWN_BACKEND=pymupdf4llm \
 SAFE_GATE_PROFILE=window20 \
 RUN_GOLD_RANK_AUDIT=1 \
 DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
+
+`PDF_MARKDOWN_FORCE_REBUILD=1` is required after any interrupted pre-fix extraction, because an
+older run may have left a partial JSONL at the completed artifact path. Updated exports write
+through `.tmp` files and move them into place only after conversion completes.
 
 ## SciEGQA Targeted Sweep Runner
 

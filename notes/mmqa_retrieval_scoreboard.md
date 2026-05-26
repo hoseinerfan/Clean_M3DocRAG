@@ -182,9 +182,11 @@ Use the raw `mmqa_dev_splade.prediction.json`; graph/source-ablation/no-SPLADE a
 be used as the sparse input for this run.
 
 Pending Markdown-source comparison: `scripts/export_pdf_page_markdown.py` and the selected-dataset
-runner support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. This alternative invokes layout-aware
-PyMuPDF4LLM extraction with `use_ocr=False` and writes
-`m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/`. Add a result row only
+runner support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. For the current HPC comparison this means
+pinned `pymupdf4llm==0.3.4`, using native PDF structured Markdown without automatic ONNX Layout
+initialization; current auto-layout releases failed CPU-affinity setup under SLURM. It writes
+`m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/`, with atomic extraction
+outputs and `PDF_MARKDOWN_FORCE_REBUILD=1` recovery after interruption. Add a result row only
 after the extracted heading summary and accepted/lost promotion audit are available.
 
 ## Table E: Dataset Run Status
