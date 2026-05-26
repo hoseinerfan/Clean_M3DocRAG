@@ -38,6 +38,13 @@ FINAL_TOP_DOCS="${FINAL_TOP_DOCS:-20}"
 
 mkdir -p "$OUT_DIR"
 
+echo "doc_rrf_config DATA_NAME=$DATA_NAME"
+echo "doc_rrf_config DATA_ROOT=$DATA_ROOT"
+echo "doc_rrf_config GOLD=$GOLD"
+echo "doc_rrf_config QIDS_JSONL=$QIDS_JSONL"
+echo "doc_rrf_config DOC_PAGES_JSONL=$DOC_PAGES_JSONL"
+echo "doc_rrf_config OUT_DIR=$OUT_DIR"
+
 PAGE_TEXT_JSONL="${PAGE_TEXT_JSONL:-$OUT_DIR/${DATA_NAME}_page_text_${SPLIT}.jsonl}"
 PAGE_TEXT_SUMMARY="${PAGE_TEXT_SUMMARY:-$OUT_DIR/${DATA_NAME}_page_text_${SPLIT}_summary.json}"
 SPLADE_INDEX_PT="${SPLADE_INDEX_PT:-$OUT_DIR/${DATA_NAME}_splade_page_index.pt}"
