@@ -621,6 +621,7 @@ Current validated runs:
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json` |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json` |
+| ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/heading_breadcrumb_text_source_ablation/vidore_safe_gate_bodyguard.summary.json` |
 
 Interpretation:
 
@@ -628,6 +629,7 @@ Interpretation:
 - SciEGQA-Bench is a useful negative control: the raw heading candidate improves page hit@4, but the safe gate abstains enough to preserve the baseline with zero losses.
 - ViDoSeek shows that the body guard and page-0 abstention remove the observed losses while preserving a positive net gain.
 - DUDE is a negative/neutral transfer case: the unconstrained gate lost one page hit because a cross-document annual-report heading looked better than a near-empty gold cover page. Requiring promoted documents to be base doc rank 1 makes the gate safely abstain (`0` net, `0` lost).
+- ViDoRe V3 is a heading-unavailable transfer case: `doc_pages_dev` text produced `0` outline/heuristic/strict heading lines, so full/heuristic/strict graph views were identical to the no-heading control and the safe gate had no heading evidence to accept promotions.
 
 Runner for additional datasets:
 

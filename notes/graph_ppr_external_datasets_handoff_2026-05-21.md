@@ -668,6 +668,7 @@ Validated safe-gate results so far:
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
+| ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 |
 
 Artifact paths:
 
@@ -676,18 +677,24 @@ Artifact paths:
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/heading_breadcrumb_text_source_ablation/vidore_safe_gate_bodyguard.summary.json
 ```
 
 DUDE note: the broad doc-top4 gate had one cross-document loss on a generic annual-report/year query. The `doc-rank-1` variant removes that loss and makes DUDE a neutral abstention result.
 
+ViDoRe V3 note: the text-source Markdown variant preparation produced `0` outline heading lines,
+`0` heuristic heading lines, and `0` strict heuristic heading lines. Consequently, the full,
+heuristic-only, and strict heading graph outputs are identical to the no-heading control; the gate
+accepts `0` promotions because there is no heading signal to verify.
+
 Runner for next targets:
 
 ```bash
-DATASETS="m3docvqa vidore" \
+DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
-Next evaluation targets are M3DocVQA and ViDoRe. The runner expects `plain_top224` and SPLADE predictions to exist first; if any prerequisite is missing, it prints the missing path and stops.
+Next evaluation target is M3DocVQA. The runner expects `plain_top224` and SPLADE predictions to exist first; if any prerequisite is missing, it prints the missing path and stops.
 
 Full rank-window rescue profile:
 

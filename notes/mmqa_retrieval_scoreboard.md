@@ -129,6 +129,7 @@ These numbers are page hit counts at `k=4`, not average recall. The gate is inte
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
+| ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 |
 
 Safe-gate artifacts:
 
@@ -140,11 +141,18 @@ Safe-gate artifacts:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json`
 - DUDE summary:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json`
+- ViDoRe V3 summary:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/heading_breadcrumb_text_source_ablation/vidore_safe_gate_bodyguard.summary.json`
+
+ViDoRe note: the text-derived Markdown variants contain `0` raw outline headings and `0` raw
+heuristic headings, so the heading-augmented graph views are identical to the no-heading control.
+This is a valid no-op transfer result for the heading gate, not evidence that heading rescue failed
+when headings are present.
 
 Pending safe-gate evaluation targets:
 
 ```bash
-DATASETS="m3docvqa vidore" \
+DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
