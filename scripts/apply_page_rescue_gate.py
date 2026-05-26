@@ -217,6 +217,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--heading-compare-mode",
+        choices=["strongest_base_top", "displaced_boundary", "none"],
+        default="strongest_base_top",
+        help=(
+            "Which base page(s) the promoted page must beat by heading/query score. "
+            "strongest_base_top compares against the strongest page among the configured "
+            "base top-k window. displaced_boundary compares only against the base page "
+            "that would be pushed out of hit-k by the promotion."
+        ),
+    )
+    parser.add_argument(
         "--heading-reject-missing-promoted",
         action="store_true",
         help="Reject if a promoted page has no extractable headings when heading checks are active.",
@@ -503,6 +514,20 @@ def heading_checks_enabled(args: argparse.Namespace, heading_catalog: dict[str, 
         or args.heading_min_score_advantage is not None
         or bool(args.heading_reject_missing_promoted)
     )
+
+
+def heading_compare_pages(base_top_pages: list[str], uid: str, args: argparse.Namespace) -> list[str]:
+    mode = str(args.heading_compare_mode)
+    if mode == "none":
+        return []
+    if mode == "displaced_boundary":
+        hit_k = max(1, int(args.hit_k))
+        if len(base_top_pages) < hit_k:
+            return []
+        page = base_top_pages[hit_k - 1]
+        return [] if page == uid else [page]
+    compare_limit = max(0, int(args.heading_compare_base_top_k))
+    return [page for page in base_top_pages[:compare_limit] if page != uid]
 
 
 def ranked_page_uids(rows: list[Any], limit: int = 0) -> list[str]:
@@ -814,8 +839,7 @@ def reject_promotion_reason(
             mode=str(args.heading_score_mode),
             min_token_len=max(1, int(args.heading_min_token_len)),
         )
-        compare_limit = max(0, int(args.heading_compare_base_top_k))
-        compared_pages = [page for page in base_top_pages[:compare_limit] if page != uid]
+        compared_pages = heading_compare_pages(base_top_pages, uid, args)
         compared_heading_scores = {
             page: heading_relevance_score(
                 question=question,
@@ -836,7 +860,9 @@ def reject_promotion_reason(
         detail["heading_relevance"] = {
             "score_mode": str(args.heading_score_mode),
             "promoted_score": promoted_heading,
-            "compare_base_top_k": compare_limit,
+            "compare_mode": str(args.heading_compare_mode),
+            "compare_base_top_k": int(args.heading_compare_base_top_k),
+            "compared_pages": compared_pages,
             "best_base_page_uid": best_base_uid,
             "best_base_score": best_base_score,
             "best_base_score_detail": (
@@ -1062,6 +1088,7 @@ def build_output_row(
         "heading_min_promoted_query_score": args.heading_min_promoted_query_score,
         "heading_min_score_advantage": args.heading_min_score_advantage,
         "heading_compare_base_top_k": int(args.heading_compare_base_top_k),
+        "heading_compare_mode": str(args.heading_compare_mode),
         "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
         "mode": str(args.mode),
         "insert_position": int(args.insert_position),
@@ -1198,6 +1225,7 @@ def summarize_cases(
             "heading_min_promoted_query_score": args.heading_min_promoted_query_score,
             "heading_min_score_advantage": args.heading_min_score_advantage,
             "heading_compare_base_top_k": int(args.heading_compare_base_top_k),
+            "heading_compare_mode": str(args.heading_compare_mode),
             "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
             "mode": str(args.mode),
             "insert_position": int(args.insert_position),
