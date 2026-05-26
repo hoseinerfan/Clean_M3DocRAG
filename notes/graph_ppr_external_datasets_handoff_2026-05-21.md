@@ -723,6 +723,53 @@ Use the raw `mmqa_dev_splade.prediction.json` for the safe-gate run. Historical
 `fulldev_graph_ppr_sourceablate_no_splade` outputs are graph diagnostics and are not valid SPLADE
 inputs here.
 
+Alternative M3DocVQA Markdown extraction experiment:
+
+The exporter and selected-dataset runner now support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. The
+backend calls PyMuPDF4LLM page conversion with `use_ocr=False`; it is a native-PDF layout-aware
+Markdown comparison, not an OCR experiment. It writes a separate output tree with suffix
+`_pymupdf4llm_source_ablation`. Installing it may update PyMuPDF in the shared environment, so
+keep the frozen native JSONL artifacts and record package versions before claiming exact
+reproduction of native extraction.
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+source hpc_vital_paths.generated.env
+source scripts/m3docvqa_internal_env.sh
+"$PWD/env/bin/python" -m pip install pymupdf4llm
+
+export ALT_DIR="$LOCAL_OUTPUT_DIR/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation"
+mkdir -p "$ALT_DIR"
+"$PWD/env/bin/python" scripts/export_pdf_page_markdown.py \
+  --doc-pages-jsonl "$M3DOCVQA_PAGE_TEXT_JSONL" \
+  --pdf-root "$DATASET_ROOT" \
+  --backend pymupdf4llm \
+  --output-jsonl "$ALT_DIR/doc_pages_dev_with_pdf_markdown.jsonl" \
+  --output-summary-json "$ALT_DIR/pdf_markdown_summary.json" \
+  --progress-every 1000 \
+  --body-char-limit 6000 \
+  --require-heading-pages
+"$PWD/env/bin/python" scripts/prepare_pdf_markdown_variants.py \
+  --input-jsonl "$ALT_DIR/doc_pages_dev_with_pdf_markdown.jsonl" \
+  --output-dir "$ALT_DIR/pdf_markdown_variants"
+```
+
+Inspect `pdf_markdown_summary.json` and `pdf_markdown_variants/pdf_markdown_variants.summary.json`
+in
+`/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation`
+before running or interpreting the gate summary; the displayed pipeline reuses those extraction
+artifacts if the inspection passes. More heading lines are not sufficient evidence of better
+Markdown: the decisive check is whether audited promotions become more relevant without increasing
+`lost`.
+
+```bash
+PDF_MARKDOWN_BACKEND=pymupdf4llm \
+SAFE_GATE_PROFILE=window20 \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="m3docvqa" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
 ## SciEGQA Targeted Sweep Runner
 
 A ready-to-run SciEGQA sweep is available:

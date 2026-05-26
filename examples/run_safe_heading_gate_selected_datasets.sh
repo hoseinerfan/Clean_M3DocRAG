@@ -8,6 +8,7 @@ set -euo pipefail
 #   DATASETS="m3docvqa dude vidore" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   DATASETS="dude" BODY_MIN_SCORE_ADVANTAGE=0.0 bash examples/run_safe_heading_gate_selected_datasets.sh
 #   SAFE_GATE_PROFILE=window20 RUN_GOLD_RANK_AUDIT=1 DATASETS="dude vidore" bash examples/run_safe_heading_gate_selected_datasets.sh
+#   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=window20 DATASETS="m3docvqa" bash examples/run_safe_heading_gate_selected_datasets.sh
 #
 # The script assumes the expensive dense/plain_top224 and SPLADE predictions already
 # exist. If any are missing it prints the expected path and exits before reranking.
@@ -30,6 +31,8 @@ MAX_PROMOTIONS="${MAX_PROMOTIONS:-1}"
 RUN_GOLD_RANK_AUDIT="${RUN_GOLD_RANK_AUDIT:-0}"
 REJECT_PROMOTED_PAGE_IDX="${REJECT_PROMOTED_PAGE_IDX:-}"
 HPC_PATH_ENV="${HPC_PATH_ENV:-}"
+PDF_MARKDOWN_BACKEND="${PDF_MARKDOWN_BACKEND:-native}"
+PDF_MARKDOWN_RUN_SUFFIX="${PDF_MARKDOWN_RUN_SUFFIX:-}"
 
 if [[ -n "$HPC_PATH_ENV" ]]; then
   # shellcheck disable=SC1090
@@ -38,6 +41,18 @@ elif [[ -f "$REPO_ROOT/hpc_vital_paths.generated.env" ]]; then
   # shellcheck disable=SC1091
   source "$REPO_ROOT/hpc_vital_paths.generated.env"
 fi
+
+case "$PDF_MARKDOWN_BACKEND" in
+  native)
+    ;;
+  pymupdf4llm)
+    PDF_MARKDOWN_RUN_SUFFIX="${PDF_MARKDOWN_RUN_SUFFIX:-_pymupdf4llm}"
+    ;;
+  *)
+    echo "unknown_PDF_MARKDOWN_BACKEND: $PDF_MARKDOWN_BACKEND" >&2
+    exit 2
+    ;;
+esac
 
 case "$SAFE_GATE_PROFILE" in
   boundary)
@@ -170,6 +185,7 @@ prepare_pdf_markdown() {
     "$PYTHON_BIN" "$REPO_ROOT/scripts/export_pdf_page_markdown.py" \
       --doc-pages-jsonl "$doc_pages_jsonl" \
       --pdf-root "$pdf_root" \
+      --backend "$PDF_MARKDOWN_BACKEND" \
       --output-jsonl "$output_jsonl" \
       --output-summary-json "$summary_json" \
       --progress-every 1000 \
@@ -261,7 +277,7 @@ run_m3docvqa() {
 
   local data_root="$DATASET_ROOT"
   local gold="${M3DOCVQA_GOLD:-$GOLD}"
-  local out_dir="$LOCAL_OUTPUT_DIR/m3docvqa_heading_breadcrumb_pdf_markdown_source_ablation"
+  local out_dir="$LOCAL_OUTPUT_DIR/m3docvqa_heading_breadcrumb_pdf_markdown${PDF_MARKDOWN_RUN_SUFFIX}_source_ablation"
   local page_text_dir="$LOCAL_OUTPUT_DIR/m3docvqa_page_text"
   local page_text_jsonl="${M3DOCVQA_PAGE_TEXT_JSONL:-$page_text_dir/m3docvqa_dev_page_text.jsonl}"
   local pdf_markdown_jsonl="$out_dir/doc_pages_dev_with_pdf_markdown.jsonl"
@@ -337,7 +353,7 @@ run_dude() {
   local data_root="$LOCAL_DATA_DIR/dude"
   local gold="${DUDE_GOLD:-$data_root/MMQA_dev.jsonl}"
   local doc_pages_jsonl="${DUDE_DOC_PAGES:-$data_root/doc_pages_dev.jsonl}"
-  local out_dir="$LOCAL_OUTPUT_DIR/dude/heading_breadcrumb_pdf_markdown_source_ablation"
+  local out_dir="$LOCAL_OUTPUT_DIR/dude/heading_breadcrumb_pdf_markdown${PDF_MARKDOWN_RUN_SUFFIX}_source_ablation"
   local pdf_root="${DUDE_PDF_ROOT:-$data_root/raw/DUDE_train-val-test_binaries/PDF}"
   local pdf_markdown_jsonl="$out_dir/doc_pages_dev_with_pdf_markdown.jsonl"
   local pdf_markdown_summary="$out_dir/pdf_markdown_summary.json"
@@ -423,7 +439,7 @@ run_vidore() {
     4
 }
 
-echo "safe_gate_profile=$SAFE_GATE_PROFILE hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} support_page_rank_max=$SUPPORT_PAGE_RANK_MAX"
+echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} support_page_rank_max=$SUPPORT_PAGE_RANK_MAX"
 echo "| dataset | accepted | base page@$HIT_K | candidate page@$HIT_K | gated page@$HIT_K | recovered | lost | net | body rejects |"
 echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
 

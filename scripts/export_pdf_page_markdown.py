@@ -11,12 +11,16 @@ from pathlib import Path
 from typing import Any
 
 
+MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s+\S")
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Export a doc_pages JSONL with a PDF-derived markdown field. The exporter "
-            "uses original PDF text, outlines/bookmarks, and font-size heading cues; it "
-            "does not use OCR or VLM text."
+            "uses original PDF text without OCR or VLM text. The native backend uses "
+            "outlines/bookmarks and font-size heading cues; pymupdf4llm uses its "
+            "layout-aware Markdown conversion with OCR explicitly disabled."
         )
     )
     parser.add_argument("--doc-pages-jsonl", required=True)
@@ -28,6 +32,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--output-jsonl", required=True)
     parser.add_argument("--output-summary-json", required=True)
+    parser.add_argument(
+        "--backend",
+        choices=["native", "pymupdf4llm"],
+        default="native",
+        help=(
+            "PDF-to-Markdown backend. native preserves the existing font/outline exporter; "
+            "pymupdf4llm uses layout-aware page Markdown with use_ocr=False."
+        ),
+    )
     parser.add_argument("--max-pages", type=int, default=0)
     parser.add_argument("--progress-every", type=int, default=1000)
     parser.add_argument(
@@ -40,6 +53,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-heading-font-ratio", type=float, default=1.15)
     parser.add_argument("--min-heading-font-size", type=float, default=10.5)
     parser.add_argument("--max-heading-words", type=int, default=18)
+    parser.add_argument(
+        "--pymupdf4llm-keep-header",
+        action="store_true",
+        help="Retain headers in pymupdf4llm output. Disabled by default to reduce repeated page furniture.",
+    )
+    parser.add_argument(
+        "--pymupdf4llm-keep-footer",
+        action="store_true",
+        help="Retain footers in pymupdf4llm output. Disabled by default to reduce repeated page furniture.",
+    )
     parser.add_argument(
         "--require-heading-pages",
         action="store_true",
@@ -334,6 +357,45 @@ def markdown_from_page(
     }
 
 
+def markdown_heading_count(markdown: str) -> int:
+    return sum(
+        1 for line in str(markdown or "").splitlines() if MARKDOWN_HEADING_RE.match(line)
+    )
+
+
+def pymupdf4llm_pages(
+    pdf_path: Path,
+    page_count: int,
+    args: argparse.Namespace,
+    pymupdf4llm: Any,
+) -> dict[int, tuple[str, dict[str, int]]]:
+    chunks = pymupdf4llm.to_markdown(
+        str(pdf_path),
+        page_chunks=True,
+        use_ocr=False,
+        header=bool(args.pymupdf4llm_keep_header),
+        footer=bool(args.pymupdf4llm_keep_footer),
+        show_progress=False,
+    )
+    if not isinstance(chunks, list):
+        raise TypeError("pymupdf4llm page_chunks=True did not return a page chunk list")
+    converted: dict[int, tuple[str, dict[str, int]]] = {}
+    for idx, chunk in enumerate(chunks[:page_count]):
+        raw_markdown = chunk.get("text", "") if isinstance(chunk, dict) else ""
+        markdown = str(raw_markdown or "").strip()
+        if int(args.body_char_limit) > 0 and len(markdown) > int(args.body_char_limit):
+            markdown = markdown[: int(args.body_char_limit)].rstrip()
+        converted[idx] = (
+            markdown,
+            {
+                "outline_heading_count": 0,
+                "heuristic_heading_count": markdown_heading_count(markdown),
+                "body_char_count": len(markdown),
+            },
+        )
+    return converted
+
+
 def main() -> None:
     args = parse_args()
     try:
@@ -343,6 +405,16 @@ def main() -> None:
             "PyMuPDF is required for PDF markdown export. Install/use an environment "
             "with `import fitz` available."
         ) from exc
+    pymupdf4llm = None
+    if args.backend == "pymupdf4llm":
+        try:
+            import pymupdf4llm as pymupdf4llm_module  # type: ignore
+        except ImportError as exc:
+            raise SystemExit(
+                "The pymupdf4llm backend requires `pymupdf4llm`. Install it in the "
+                "experiment environment with `pip install pymupdf4llm`."
+            ) from exc
+        pymupdf4llm = pymupdf4llm_module
 
     if not args.pdf_root:
         raise ValueError("Provide at least one --pdf-root.")
@@ -371,6 +443,7 @@ def main() -> None:
     unmatched_docs: list[str] = []
     page_out_of_range = 0
     heading_counts: list[int] = []
+    backend_errors: list[dict[str, str]] = []
 
     with output_jsonl.open("w", encoding="utf-8") as handle:
         for doc_index, (doc_id, doc_rows) in enumerate(sorted(rows_by_doc.items())):
@@ -378,6 +451,8 @@ def main() -> None:
             pdf_match_counts[match_reason] += 1
             doc = None
             outline_by_page: list[list[tuple[int, str]]] = []
+            alternate_markdown_by_page: dict[int, tuple[str, dict[str, int]]] = {}
+            backend_failed = False
             if pdf_path is not None:
                 try:
                     doc = fitz.open(str(pdf_path))
@@ -385,6 +460,22 @@ def main() -> None:
                 except Exception:
                     doc = None
                     pdf_match_counts["open_error"] += 1
+                if doc is not None and args.backend == "pymupdf4llm":
+                    try:
+                        alternate_markdown_by_page = pymupdf4llm_pages(
+                            pdf_path,
+                            int(doc.page_count),
+                            args,
+                            pymupdf4llm,
+                        )
+                    except Exception as exc:
+                        backend_failed = True
+                        backend_errors.append(
+                            {
+                                "doc_id": doc_id,
+                                "error": f"{type(exc).__name__}: {exc}"[:500],
+                            }
+                        )
             else:
                 unmatched_docs.append(doc_id)
 
@@ -399,11 +490,21 @@ def main() -> None:
                 }
                 markdown = ""
                 idx = page_idx(row)
-                if doc is None:
+                if backend_failed:
+                    source = "pymupdf4llm_error"
+                elif doc is None:
                     source = "missing_pdf"
                 elif idx < 0 or idx >= int(doc.page_count):
                     source = "page_out_of_range"
                     page_out_of_range += 1
+                elif args.backend == "pymupdf4llm":
+                    markdown, stats = alternate_markdown_by_page.get(idx, ("", stats))
+                    if stats["heuristic_heading_count"]:
+                        source = "pymupdf4llm_heading"
+                    elif markdown:
+                        source = "pymupdf4llm_text_only"
+                    else:
+                        source = "empty"
                 else:
                     markdown, stats = markdown_from_page(
                         page=doc[idx],
@@ -421,6 +522,7 @@ def main() -> None:
 
                 output_row["markdown"] = markdown
                 output_row["markdown_source"] = source
+                output_row["markdown_backend"] = str(args.backend)
                 output_row["pdf_path"] = str(pdf_path) if pdf_path is not None else ""
                 output_row["pdf_outline_heading_count"] = stats["outline_heading_count"]
                 output_row["pdf_heuristic_heading_count"] = stats["heuristic_heading_count"]
@@ -454,6 +556,7 @@ def main() -> None:
 
     summary = {
         "doc_pages_jsonl": str(args.doc_pages_jsonl),
+        "backend": str(args.backend),
         "pdf_roots": [str(root) for root in args.pdf_root],
         "output_jsonl": str(output_jsonl),
         "doc_count": len(rows_by_doc),
@@ -463,6 +566,8 @@ def main() -> None:
         "unmatched_doc_count": len(unmatched_docs),
         "unmatched_doc_sample": unmatched_docs[:25],
         "page_out_of_range_count": page_out_of_range,
+        "backend_error_doc_count": len(backend_errors),
+        "backend_error_doc_sample": backend_errors[:25],
         "nonempty_markdown_page_count": nonempty_markdown_page_count,
         "heading_page_count": heading_page_count,
         "outline_heading_page_count": outline_heading_page_count,
@@ -476,6 +581,9 @@ def main() -> None:
         "min_heading_font_ratio": float(args.min_heading_font_ratio),
         "min_heading_font_size": float(args.min_heading_font_size),
         "max_heading_words": int(args.max_heading_words),
+        "pymupdf4llm_use_ocr": False if args.backend == "pymupdf4llm" else None,
+        "pymupdf4llm_keep_header": bool(args.pymupdf4llm_keep_header),
+        "pymupdf4llm_keep_footer": bool(args.pymupdf4llm_keep_footer),
     }
     output_summary_json.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(f"saved_jsonl: {output_jsonl}")

@@ -181,6 +181,12 @@ M3DOCVQA_PAGE_TEXT_JSONL=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs
 Use the raw `mmqa_dev_splade.prediction.json`; graph/source-ablation/no-SPLADE artifacts should not
 be used as the sparse input for this run.
 
+Pending Markdown-source comparison: `scripts/export_pdf_page_markdown.py` and the selected-dataset
+runner support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. This alternative invokes layout-aware
+PyMuPDF4LLM extraction with `use_ocr=False` and writes
+`m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/`. Add a result row only
+after the extracted heading summary and accepted/lost promotion audit are available.
+
 ## Table E: Dataset Run Status
 
 | Dataset | Prepared? | `plain_top224` | SPLADE text source | Graph-PPR page-labeled result | Next needed action |

@@ -696,6 +696,104 @@ M3DOCVQA_PAGE_TEXT_JSONL=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs
 
 Use the raw `mmqa_dev_splade.prediction.json` for `M3DOCVQA_SPARSE_PRED`; do not substitute historical graph/source-ablation/no-SPLADE outputs.
 
+Alternative PDF-to-Markdown quality check:
+
+The native PDF Markdown exporter uses PDF bookmarks and font-size heuristics. To test whether the
+heading signal improves with a layout-aware converter, the same pipeline can use
+`PyMuPDF4LLM`. This backend is configured with `use_ocr=False`, so it still uses only native PDF
+content and does not introduce OCR text. It writes to a distinct output directory and does not
+overwrite the validated native artifacts.
+
+Installing `pymupdf4llm` may upgrade PyMuPDF in the experiment environment. Preserve the existing
+native JSONL artifacts; do not present a newly regenerated native extraction as an exact
+reproduction without recording the resulting package versions.
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+source hpc_vital_paths.generated.env
+source scripts/m3docvqa_internal_env.sh
+
+"$PWD/env/bin/python" -m pip install pymupdf4llm
+
+export ALT_DIR="$LOCAL_OUTPUT_DIR/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation"
+mkdir -p "$ALT_DIR"
+
+"$PWD/env/bin/python" scripts/export_pdf_page_markdown.py \
+  --doc-pages-jsonl "$M3DOCVQA_PAGE_TEXT_JSONL" \
+  --pdf-root "$DATASET_ROOT" \
+  --backend pymupdf4llm \
+  --output-jsonl "$ALT_DIR/doc_pages_dev_with_pdf_markdown.jsonl" \
+  --output-summary-json "$ALT_DIR/pdf_markdown_summary.json" \
+  --progress-every 1000 \
+  --body-char-limit 6000 \
+  --require-heading-pages
+
+"$PWD/env/bin/python" scripts/prepare_pdf_markdown_variants.py \
+  --input-jsonl "$ALT_DIR/doc_pages_dev_with_pdf_markdown.jsonl" \
+  --output-dir "$ALT_DIR/pdf_markdown_variants"
+```
+
+Expected alternative artifact directory:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation
+```
+
+Compare the extracted heading coverage before interpreting retrieval:
+
+```bash
+python - <<'PY'
+import json, os, re
+from pathlib import Path
+
+alt = Path(os.environ["ALT_DIR"])
+for path in [
+    alt / "pdf_markdown_summary.json",
+    alt / "pdf_markdown_variants" / "pdf_markdown_variants.summary.json",
+    alt / "m3docvqa_safe_window20_gate_bodyguard.summary.json",
+]:
+    if not path.exists():
+        print("missing", path)
+        continue
+    with path.open() as f:
+        s = json.load(f)
+    print("\n==", path.name, "==")
+    for key in [
+        "backend", "page_count", "heading_page_count", "source_counts",
+        "raw_heuristic_heading_line_count", "strict_heuristic_heading_line_count",
+        "accepted_count", "base_page_hit_at_k_count", "candidate_page_hit_at_k_count",
+        "page_hit_at_k_count", "recovered", "lost", "net_recovered",
+    ]:
+        if key in s:
+            print(key, s[key])
+
+shown = 0
+print("\n== heading samples ==")
+with (alt / "doc_pages_dev_with_pdf_markdown.jsonl").open() as f:
+    for line in f:
+        row = json.loads(line)
+        markdown = str(row.get("markdown") or "")
+        if not re.search(r"(?m)^\s{0,3}#{1,6}\s+\S", markdown):
+            continue
+        print("\n", row.get("doc_id"), row.get("page_idx"))
+        print(markdown[:800])
+        shown += 1
+        if shown >= 5:
+            break
+PY
+```
+
+If heading coverage and sampled headings are reasonable, run the graph/gate evaluation. The runner
+will reuse the extracted alternative JSONL above rather than regenerate it.
+
+```bash
+PDF_MARKDOWN_BACKEND=pymupdf4llm \
+SAFE_GATE_PROFILE=window20 \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="m3docvqa" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
 Limitation report / failure taxonomy audit for the frozen graph outputs:
 
 ```bash
