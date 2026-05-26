@@ -68,6 +68,17 @@ require_file() {
   fi
 }
 
+first_existing_file() {
+  local path
+  for path in "$@"; do
+    if [[ -f "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
 print_summary_row() {
   local dataset="$1"
   local summary_json="$2"
@@ -247,12 +258,36 @@ run_m3docvqa() {
   local pdf_markdown_jsonl="$out_dir/doc_pages_dev_with_pdf_markdown.jsonl"
   local pdf_markdown_summary="$out_dir/pdf_markdown_summary.json"
   local variant_dir="$out_dir/pdf_markdown_variants"
-  local dense_pred="$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_dev/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json"
-  local sparse_pred="$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json"
+  local dense_pred
+  dense_pred="$(
+    first_existing_file \
+      "${M3DOCVQA_DENSE_PRED:-}" \
+      "$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_dev/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json" \
+      "$REPO_ROOT/output/m3docvqa_plain_top224_mmqa_dev/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json" \
+      "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json" \
+      || true
+  )"
+  local sparse_pred
+  sparse_pred="$(
+    first_existing_file \
+      "${M3DOCVQA_SPARSE_PRED:-}" \
+      "$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json" \
+      "$REPO_ROOT/output/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json" \
+      "/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json" \
+      || true
+  )"
 
   require_file gold "$gold"
-  require_file dense_pred "$dense_pred"
-  require_file sparse_pred "$sparse_pred"
+  if [[ -z "$dense_pred" ]]; then
+    echo "missing_dense_pred. Set M3DOCVQA_DENSE_PRED=/path/to/mmqa_dev_plain_top224*.prediction.json" >&2
+    echo "hint: find /mmfs1/scratch/jacks.local/aerfanshekooh/custom -type f -name '*plain_top224*.prediction.json' | grep -E 'mmqa|m3docvqa' | sort" >&2
+    return 1
+  fi
+  if [[ -z "$sparse_pred" ]]; then
+    echo "missing_sparse_pred. Set M3DOCVQA_SPARSE_PRED=/path/to/mmqa_dev_splade.prediction.json" >&2
+    echo "hint: find /mmfs1/scratch/jacks.local/aerfanshekooh/custom -type f -name '*splade*.prediction.json' | grep -E 'mmqa|m3docvqa' | sort" >&2
+    return 1
+  fi
   mkdir -p "$out_dir" "$page_text_dir"
 
   if [[ ! -f "$page_text_jsonl" ]]; then
