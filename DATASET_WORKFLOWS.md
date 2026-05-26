@@ -743,6 +743,49 @@ the gate (full-dev document hit@4 is `2,279` for the existing native run and `2,
 PyMuPDF4LLM run). Rerun native with the same current graph inputs/code revision before treating
 absolute differences between those backends as an extraction-quality comparison.
 
+Page-labeled PyMuPDF4LLM comparison:
+
+Use ViDoSeek first. It has exact gold pages, a positive native safe-gate result (`+6`, `0` lost),
+and only `5,349` pages. The runner keeps the ViDoSeek page-0 abstention rule and writes the
+alternative extraction/results under a separate `_pymupdf4llm_source_ablation` directory.
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+git pull --rebase origin codex/mmdocir-hpc-workflow
+source hpc_vital_paths.generated.env
+"$PWD/env/bin/python" -m pip install --force-reinstall "pymupdf4llm==0.3.4"
+
+PDF_MARKDOWN_FORCE_REBUILD=1 \
+PDF_MARKDOWN_BACKEND=pymupdf4llm \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="vidoseek" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+Expected ViDoSeek summary:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json
+```
+
+SciEGQA-Bench is a useful second exact-page test because the native safe gate was a safe
+abstention (`0` net, `0` lost) even though the unguarded heading candidate improved:
+
+```bash
+PDF_MARKDOWN_FORCE_REBUILD=1 \
+PDF_MARKDOWN_BACKEND=pymupdf4llm \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="sciegqa" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+DUDE is already supported by the same runner with `DATASETS="dude"`. MMDocIR remains the
+strongest positive native result, but its prepared Hugging Face artifact provides rendered pages
+rather than a declared source-PDF root. Run a PyMuPDF4LLM MMDocIR comparison only after identifying
+and recording a reproducible PDF source path.
+
 Alternative PDF-to-Markdown quality check:
 
 The native PDF Markdown exporter uses PDF bookmarks and font-size heuristics. To test whether the

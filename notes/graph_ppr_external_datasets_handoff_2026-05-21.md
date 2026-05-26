@@ -768,6 +768,25 @@ no-heading controls already differ before page rescue, including full-dev docume
 heading extraction, rerun the native control and gate under the current graph inputs/code revision
 before attributing this difference to Markdown conversion.
 
+The next backend test should use an exact-page dataset rather than another M3DocVQA proxy. The
+selected-dataset runner now supports `PDF_MARKDOWN_BACKEND=pymupdf4llm DATASETS="vidoseek"` and
+`DATASETS="sciegqa"`. Start with ViDoSeek because its native safe gate is positive and loss-free
+(`+6` at page hit@4) and its `5,349` pages keep extraction inexpensive. The ViDoSeek runner
+preserves the frozen page-0 abstention rule and writes:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json
+```
+
+```bash
+PDF_MARKDOWN_FORCE_REBUILD=1 \
+PDF_MARKDOWN_BACKEND=pymupdf4llm \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="vidoseek" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
 Alternative M3DocVQA Markdown extraction experiment:
 
 The exporter and selected-dataset runner support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. The

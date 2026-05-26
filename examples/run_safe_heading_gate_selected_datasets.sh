@@ -9,6 +9,7 @@ set -euo pipefail
 #   DATASETS="dude" BODY_MIN_SCORE_ADVANTAGE=0.0 bash examples/run_safe_heading_gate_selected_datasets.sh
 #   SAFE_GATE_PROFILE=window20 RUN_GOLD_RANK_AUDIT=1 DATASETS="dude vidore" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=window20 DATASETS="m3docvqa" bash examples/run_safe_heading_gate_selected_datasets.sh
+#   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="vidoseek sciegqa dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #
 # The script assumes the expensive dense/plain_top224 and SPLADE predictions already
 # exist. If any are missing it prints the expected path and exits before reranking.
@@ -225,12 +226,13 @@ run_safe_gate() {
   local body_doc_pages="$9"
   local output_stem="${10}"
   local promoted_doc_max_base_rank="${11:-4}"
+  local reject_promoted_page_idx="${12:-$REJECT_PROMOTED_PAGE_IDX}"
   local output_prediction="$out_dir/${output_stem}.prediction.json"
   local output_summary="$out_dir/${output_stem}.summary.json"
   local output_cases="$out_dir/${output_stem}.cases.json"
   local extra_args=()
 
-  for page_idx in $REJECT_PROMOTED_PAGE_IDX; do
+  for page_idx in $reject_promoted_page_idx; do
     extra_args+=(--reject-promoted-page-idx "$page_idx")
   done
 
@@ -415,6 +417,98 @@ run_dude() {
     "${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}"
 }
 
+run_sciegqa() {
+  echo
+  echo "== sciegqa =="
+  unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR LOCAL_MODEL_DIR
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/sciegqa/env_hpc.sh"
+
+  local data_root="$LOCAL_DATA_DIR/sci-egqa-bench"
+  local gold="${SCIEGQA_GOLD:-$data_root/MMQA_dev.jsonl}"
+  local doc_pages_jsonl="${SCIEGQA_DOC_PAGES:-$data_root/doc_pages_dev.jsonl}"
+  local out_dir="$LOCAL_OUTPUT_DIR/sciegqa/heading_breadcrumb_pdf_markdown${PDF_MARKDOWN_RUN_SUFFIX}_source_ablation"
+  local pdf_root="${SCIEGQA_PDF_ROOT:-$data_root/images_raw}"
+  local pdf_markdown_jsonl="$out_dir/doc_pages_dev_with_pdf_markdown.jsonl"
+  local pdf_markdown_summary="$out_dir/pdf_markdown_summary.json"
+  local variant_dir="$out_dir/pdf_markdown_variants"
+  local dense_pred="${SCIEGQA_DENSE_PRED:-$LOCAL_OUTPUT_DIR/sciegqa/plain_top224_ret1000_prediction.json}"
+  local sparse_pred="${SCIEGQA_SPARSE_PRED:-$LOCAL_OUTPUT_DIR/sciegqa/doc_rrf_plain_top224_splade/sciegqa_splade_ret1000.prediction.json}"
+
+  require_file gold "$gold"
+  require_file doc_pages "$doc_pages_jsonl"
+  require_file dense_pred "$dense_pred"
+  require_file sparse_pred "$sparse_pred"
+  mkdir -p "$out_dir"
+
+  prepare_pdf_markdown "$doc_pages_jsonl" "$pdf_root" "$pdf_markdown_jsonl" "$pdf_markdown_summary" "$variant_dir"
+
+  local tag="sciegqa"
+  run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$pdf_markdown_jsonl" "${tag}_heading_full_wide_edgeonly_transfer" query_gated_shared
+  run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
+  run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
+
+  run_safe_gate \
+    sciegqa \
+    "$gold" \
+    "$out_dir" \
+    "$dense_pred" \
+    "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
+    "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
+    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
+    "$pdf_markdown_jsonl" \
+    "$pdf_markdown_jsonl" \
+    "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
+    4
+}
+
+run_vidoseek() {
+  echo
+  echo "== vidoseek =="
+  unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR LOCAL_MODEL_DIR
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/vidoseek/env_hpc.sh"
+
+  local data_root="$LOCAL_DATA_DIR/vidoseek"
+  local gold="${VIDOSEEK_GOLD:-$data_root/MMQA_dev.jsonl}"
+  local doc_pages_jsonl="${VIDOSEEK_DOC_PAGES:-$data_root/doc_pages_dev.jsonl}"
+  local out_dir="$LOCAL_OUTPUT_DIR/vidoseek/heading_breadcrumb_pdf_markdown${PDF_MARKDOWN_RUN_SUFFIX}_source_ablation"
+  local pdf_root="${VIDOSEEK_PDF_ROOT:-$data_root/pdfs_raw}"
+  local pdf_markdown_jsonl="$out_dir/doc_pages_dev_with_pdf_markdown.jsonl"
+  local pdf_markdown_summary="$out_dir/pdf_markdown_summary.json"
+  local variant_dir="$out_dir/pdf_markdown_variants"
+  local dense_pred="${VIDOSEEK_DENSE_PRED:-$LOCAL_OUTPUT_DIR/vidoseek/plain_top224_ret1000_prediction.json}"
+  local sparse_pred="${VIDOSEEK_SPARSE_PRED:-$LOCAL_OUTPUT_DIR/vidoseek/doc_rrf_plain_top224_splade/vidoseek_splade_ret1000.prediction.json}"
+  local gate_suffix="${VIDOSEEK_SAFE_GATE_OUTPUT_SUFFIX:-${SAFE_GATE_OUTPUT_SUFFIX}_no_page0}"
+
+  require_file gold "$gold"
+  require_file doc_pages "$doc_pages_jsonl"
+  require_file dense_pred "$dense_pred"
+  require_file sparse_pred "$sparse_pred"
+  mkdir -p "$out_dir"
+
+  prepare_pdf_markdown "$doc_pages_jsonl" "$pdf_root" "$pdf_markdown_jsonl" "$pdf_markdown_summary" "$variant_dir"
+
+  local tag="vidoseek"
+  run_graph_view vidoseek "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$pdf_markdown_jsonl" "${tag}_heading_full_wide_edgeonly_transfer" query_gated_shared
+  run_graph_view vidoseek "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
+  run_graph_view vidoseek "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
+
+  run_safe_gate \
+    vidoseek \
+    "$gold" \
+    "$out_dir" \
+    "$dense_pred" \
+    "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
+    "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
+    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
+    "$pdf_markdown_jsonl" \
+    "$pdf_markdown_jsonl" \
+    "${tag}_${gate_suffix}" \
+    4 \
+    "${VIDOSEEK_REJECT_PROMOTED_PAGE_IDX:-0}"
+}
+
 run_vidore() {
   echo
   echo "== vidore =="
@@ -473,6 +567,12 @@ for dataset in $DATASETS; do
       ;;
     dude)
       run_dude
+      ;;
+    sciegqa|sci-egqa)
+      run_sciegqa
+      ;;
+    vidoseek)
+      run_vidoseek
       ;;
     vidore|vidore-v3)
       run_vidore
