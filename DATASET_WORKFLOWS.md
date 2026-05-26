@@ -638,7 +638,12 @@ DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
-This helper can target M3DocVQA, DUDE, and ViDoRe after their `plain_top224` and SPLADE artifacts exist, but the only remaining safe-gate evaluation target is M3DocVQA. DUDE and ViDoRe are recorded above. It writes per-dataset `*_safe_gate_bodyguard.summary.json`, `.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory. DUDE uses the stricter `dude_safe_gate_bodyguard_docrank1.*` output by default.
+This helper can target M3DocVQA, DUDE, and ViDoRe after their `plain_top224` and SPLADE artifacts
+exist. All three have now been run: DUDE and ViDoRe are recorded above, while M3DocVQA can be
+reported only as a document-level sanity check and optional synthetic page-0 diagnostic because
+its gold lacks page labels. It writes per-dataset `*_safe_gate_bodyguard.summary.json`,
+`.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory.
+DUDE uses the stricter `dude_safe_gate_bodyguard_docrank1.*` output by default.
 
 Rank-window rescue profile:
 
@@ -725,6 +730,19 @@ export M3DOCVQA_HEADING_OUT="$PWD/output/m3docvqa_heading_breadcrumb_pdf_markdow
   --output-json "$M3DOCVQA_HEADING_OUT/m3docvqa_safe_window20_gate_bodyguard.imagelistq_page0_proxy.json"
 ```
 
+Completed page-0 proxy check (`ImageListQ`, `n=141`):
+
+| Markdown source | heading pages | accepted | control synthetic hit@4 | gated synthetic hit@4 | recovered | lost | net | control doc hit@4 | gated doc hit@4 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| native PDF headings | 30,343 | 1,152 | 39 | 40 | 2 | 1 | +1 | 81 | 81 |
+| `pymupdf4llm==0.3.4` | 25,355 | 766 | 43 | 42 | 1 | 2 | -1 | 87 | 87 |
+
+This proxy gives weak positive direction for the native exporter and a negative direction for
+PyMuPDF4LLM, but neither is true page accuracy. The two no-heading controls also differ before
+the gate (full-dev document hit@4 is `2,279` for the existing native run and `2,346` for the
+PyMuPDF4LLM run). Rerun native with the same current graph inputs/code revision before treating
+absolute differences between those backends as an extraction-quality comparison.
+
 Alternative PDF-to-Markdown quality check:
 
 The native PDF Markdown exporter uses PDF bookmarks and font-size heuristics. To test whether the
@@ -765,10 +783,10 @@ mkdir -p "$ALT_DIR"
   --output-dir "$ALT_DIR/pdf_markdown_variants"
 ```
 
-Expected alternative artifact directory:
+Completed alternative artifact directory:
 
 ```text
-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation
 ```
 
 Compare the extracted heading coverage before interpreting retrieval:

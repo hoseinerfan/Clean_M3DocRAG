@@ -687,14 +687,16 @@ ViDoRe V3 note: the text-source Markdown variant preparation produced `0` outlin
 heuristic-only, and strict heading graph outputs are identical to the no-heading control; the gate
 accepts `0` promotions because there is no heading signal to verify.
 
-Runner for next targets:
+Runner for reproducing or extending the M3DocVQA diagnostic:
 
 ```bash
 DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
-Next evaluation target is M3DocVQA. The runner expects `plain_top224` and SPLADE predictions to exist first; if any prerequisite is missing, it prints the missing path and stops.
+M3DocVQA has now been run as a document-only and page-0 proxy diagnostic. The runner expects
+`plain_top224` and SPLADE predictions to exist first; if any prerequisite is missing, it prints
+the missing path and stops.
 
 Full rank-window rescue profile:
 
@@ -747,9 +749,28 @@ export M3DOCVQA_HEADING_OUT="$PWD/output/m3docvqa_heading_breadcrumb_pdf_markdow
   --output-json "$M3DOCVQA_HEADING_OUT/m3docvqa_safe_window20_gate_bodyguard.imagelistq_page0_proxy.json"
 ```
 
+Completed M3DocVQA proxy results (`ImageListQ`, `n=141`):
+
+| Markdown source | heading pages | accepted | control synthetic hit@4 | gated synthetic hit@4 | recovered | lost | net | control doc hit@4 | gated doc hit@4 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| native PDF headings | 30,343 | 1,152 | 39 | 40 | 2 | 1 | +1 | 81 | 81 |
+| `pymupdf4llm==0.3.4` | 25,355 | 766 | 43 | 42 | 1 | 2 | -1 | 87 | 87 |
+
+Within the PyMuPDF4LLM full-dev run, direct strict-heading graph output raises document hit@4
+from `2,346` to `2,349`, but the safe gate intentionally preserves the no-heading document
+selection at `2,346`. There is no annotated page metric with which to judge its `766` accepted
+page promotions. Under the page-0 proxy, the native extraction is mildly positive but not
+loss-free, while PyMuPDF4LLM is negative at synthetic hit@4.
+
+Do not compare the native and PyMuPDF4LLM control columns as a clean extraction ablation yet. The
+no-heading controls already differ before page rescue, including full-dev document hit@4
+(`2,279` native versus `2,346` PyMuPDF4LLM). Since a no-heading output should be independent of
+heading extraction, rerun the native control and gate under the current graph inputs/code revision
+before attributing this difference to Markdown conversion.
+
 Alternative M3DocVQA Markdown extraction experiment:
 
-The exporter and selected-dataset runner now support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. The
+The exporter and selected-dataset runner support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. The
 HPC-safe comparison uses legacy PyMuPDF4LLM `0.3.4`, disables OCR controls exposed by its API,
 and is a native-PDF structured-Markdown comparison rather than an OCR experiment. It writes a
 separate output tree with suffix `_pymupdf4llm_source_ablation`. Current March 2026 releases
@@ -780,13 +801,11 @@ mkdir -p "$ALT_DIR"
   --output-dir "$ALT_DIR/pdf_markdown_variants"
 ```
 
-Inspect `pdf_markdown_summary.json` and `pdf_markdown_variants/pdf_markdown_variants.summary.json`
-in
-`/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation`
-before running or interpreting the gate summary; the displayed pipeline reuses those extraction
-artifacts if the inspection passes. More heading lines are not sufficient evidence of better
-Markdown: the decisive check is whether audited promotions become more relevant without increasing
-`lost`.
+The completed PyMuPDF4LLM extraction is under
+`/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation`.
+It contains `44,294` pages, of which `25,355` contain headings, with `49,704` raw and `49,136`
+strict heuristic heading lines. More heading lines are not sufficient evidence of better
+Markdown: the paired page-0 proxy above is negative for the PyMuPDF4LLM safe gate.
 
 ```bash
 PDF_MARKDOWN_FORCE_REBUILD=1 \

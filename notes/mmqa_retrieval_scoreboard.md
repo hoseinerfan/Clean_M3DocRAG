@@ -190,19 +190,29 @@ Optional diagnostic only: evaluate the `ImageListQ` subset under a page-0 proxy 
 ImageListQ --first-page-idx 0`. Report these as `synthetic_page_*` metrics and never merge them
 with the exact-page results in Table C.
 
-Pending Markdown-source comparison: `scripts/export_pdf_page_markdown.py` and the selected-dataset
-runner support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. For the current HPC comparison this means
-pinned `pymupdf4llm==0.3.4`, using native PDF structured Markdown without automatic ONNX Layout
-initialization; current auto-layout releases failed CPU-affinity setup under SLURM. It writes
-`m3docvqa_heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/`, with atomic extraction
-outputs and `PDF_MARKDOWN_FORCE_REBUILD=1` recovery after interruption. Add a result row only
-after the extracted heading summary and accepted/lost promotion audit are available.
+The structured Markdown comparison has now been run with pinned `pymupdf4llm==0.3.4`, without
+OCR or automatic ONNX Layout initialization. `PyMuPDF4LLM` extracts fewer heading-bearing pages
+than the native heuristic exporter (`25,355 / 44,294` versus `30,343 / 44,294`). On the 141-query
+`ImageListQ` page-0 proxy, the gate moves the native control from `39` to `40` synthetic hits at
+`@4` (`2` recovered, `1` lost), while it moves the PyMuPDF4LLM control from `43` to `42`
+(`1` recovered, `2` lost).
+
+| M3DocVQA proxy source | Heading pages | Accepted | Control synthetic hit@4 | Gated synthetic hit@4 | Recovered | Lost | Net | Control doc hit@4 | Gated doc hit@4 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| native | 30,343 | 1,152 | 39 | 40 | 2 | 1 | +1 | 81 | 81 |
+| `pymupdf4llm==0.3.4` | 25,355 | 766 | 43 | 42 | 1 | 2 | -1 | 87 | 87 |
+
+These proxy results do not establish page-level accuracy. In addition, the native and
+PyMuPDF4LLM no-heading controls differ before gating, including full-dev document hit@4
+(`2,279` versus `2,346`). A no-heading control should not change solely because the heading
+extractor changed; therefore, do not attribute absolute cross-backend differences to Markdown
+quality until the native control is rerun using the same current graph inputs and code revision.
 
 ## Table E: Dataset Run Status
 
 | Dataset | Prepared? | `plain_top224` | SPLADE text source | Graph-PPR page-labeled result | Next needed action |
 | --- | --- | --- | --- | --- | --- |
-| M3DocVQA/MMQA | yes | yes | exported MMQA page text | yes, `denseheavy_lightboth` in Tables A/B; stronger doc-shortlist configs exist separately | run `SAFE_GATE_PROFILE=window20 DATASETS="m3docvqa"` safe-heading gate |
+| M3DocVQA/MMQA | yes | yes | exported MMQA page text | document-only safe-gate and `ImageListQ` page-0 proxy diagnostic complete; no true page labels | rerun current native no-heading control before making a backend-quality claim; use downstream VQA for promotion utility |
 | MMDocIR | yes | yes | manifest/PDF text | yes | none |
 | SciEGQA-Bench | yes | yes | PDF text | yes | none |
 | ViDoRe V3 | yes | yes | manifest/PDF text | yes | none for heading gate; text-derived Markdown has zero headings, so current gate is a recorded no-op |
