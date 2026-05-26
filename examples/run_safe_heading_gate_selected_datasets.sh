@@ -136,6 +136,7 @@ run_safe_gate() {
   local heading_doc_pages="$8"
   local body_doc_pages="$9"
   local output_stem="${10}"
+  local promoted_doc_max_base_rank="${11:-4}"
 
   "$PYTHON_BIN" "$REPO_ROOT/scripts/apply_page_rescue_gate.py" \
     --base-prediction "$base_pred" \
@@ -148,7 +149,7 @@ run_safe_gate() {
     --rescue-rank-min 5 \
     --rescue-rank-max 5 \
     --min-page-overlap 3 \
-    --promoted-doc-max-base-rank 4 \
+    --promoted-doc-max-base-rank "$promoted_doc_max_base_rank" \
     --support-page-rank-max 4 \
     --min-support-page-votes 2 \
     --heading-doc-pages-jsonl "$heading_doc_pages" \
@@ -222,7 +223,8 @@ run_m3docvqa() {
     "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
     "$pdf_markdown_jsonl" \
     "$pdf_markdown_jsonl" \
-    "${tag}_safe_gate_bodyguard"
+    "${tag}_safe_gate_bodyguard" \
+    4
 }
 
 run_dude() {
@@ -266,7 +268,8 @@ run_dude() {
     "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
     "$pdf_markdown_jsonl" \
     "$pdf_markdown_jsonl" \
-    "${tag}_safe_gate_bodyguard"
+    "${tag}_safe_gate_bodyguard_docrank1" \
+    "${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}"
 }
 
 run_vidore() {
@@ -309,7 +312,8 @@ run_vidore() {
     "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
     "$data_root/doc_pages_dev.jsonl" \
     "$data_root/doc_pages_dev.jsonl" \
-    "${tag}_safe_gate_bodyguard"
+    "${tag}_safe_gate_bodyguard" \
+    4
 }
 
 echo "| dataset | accepted | base page@4 | candidate page@4 | gated page@4 | recovered | lost | net | body rejects |"
