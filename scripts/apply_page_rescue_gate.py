@@ -5,10 +5,50 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
+import re
 import statistics
 from collections import Counter
 from pathlib import Path
 from typing import Any
+
+
+MARKDOWN_HEADING_RE = re.compile(r"^\s{0,3}(#{1,6})\s+(.+?)\s*$")
+HEADING_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "has",
+    "have",
+    "how",
+    "in",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "their",
+    "this",
+    "to",
+    "was",
+    "were",
+    "what",
+    "when",
+    "where",
+    "which",
+    "who",
+    "with",
+}
 
 
 def parse_args() -> argparse.Namespace:
@@ -127,6 +167,59 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Minimum support views that must contain the promoted doc within --support-doc-rank-max.",
+    )
+    parser.add_argument(
+        "--heading-doc-pages-jsonl",
+        default="",
+        help=(
+            "Optional doc_pages JSONL used for heading/query relevance safety checks. "
+            "When omitted, heading checks are disabled."
+        ),
+    )
+    parser.add_argument(
+        "--heading-field",
+        action="append",
+        default=[],
+        help=(
+            "Doc page field containing Markdown headings for heading safety checks. "
+            "Repeatable. Defaults to markdown when --heading-doc-pages-jsonl is set."
+        ),
+    )
+    parser.add_argument("--heading-max-lines", type=int, default=12)
+    parser.add_argument("--heading-min-token-len", type=int, default=3)
+    parser.add_argument(
+        "--heading-score-mode",
+        choices=["idf_query_recall", "overlap_count"],
+        default="idf_query_recall",
+    )
+    parser.add_argument(
+        "--heading-min-promoted-query-score",
+        type=float,
+        default=None,
+        help="Reject promotions whose heading/query relevance score is below this value.",
+    )
+    parser.add_argument(
+        "--heading-min-score-advantage",
+        type=float,
+        default=None,
+        help=(
+            "Reject promotions unless their heading/query score beats the strongest compared "
+            "base top page by at least this margin."
+        ),
+    )
+    parser.add_argument(
+        "--heading-compare-base-top-k",
+        type=int,
+        default=4,
+        help=(
+            "Number of base top pages used for heading-score comparison. "
+            "Use 0 to disable the comparison set."
+        ),
+    )
+    parser.add_argument(
+        "--heading-reject-missing-promoted",
+        action="store_true",
+        help="Reject if a promoted page has no extractable headings when heading checks are active.",
     )
     parser.add_argument(
         "--mode",
@@ -255,6 +348,161 @@ def row_score(row: Any) -> float | None:
         return float(row[2])
     except (TypeError, ValueError):
         return None
+
+
+def clean_markdown_heading_label(value: str) -> str:
+    text = str(value or "").strip()
+    text = re.sub(r"\s+#+\s*$", "", text)
+    text = re.sub(r"\{#[^}]+\}\s*$", "", text)
+    text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = text.replace("`", " ").replace("*", " ").replace("_", " ")
+    return re.sub(r"\s+", " ", text).strip(" -:\t")
+
+
+def heading_tokens(value: str, *, min_token_len: int) -> list[str]:
+    tokens: list[str] = []
+    for raw_token in re.findall(r"[\w]+", str(value or "").lower(), flags=re.UNICODE):
+        token = raw_token.strip("_")
+        if len(token) > 4 and token.endswith("ies"):
+            token = token[:-3] + "y"
+        elif len(token) > 3 and token.endswith("s") and not token.endswith("ss"):
+            token = token[:-1]
+        if not token or token in HEADING_STOPWORDS:
+            continue
+        if token.isdigit() or len(token) >= min_token_len:
+            tokens.append(token)
+    return tokens
+
+
+def markdown_heading_labels(text: str, max_lines: int) -> list[str]:
+    if not text or max_lines <= 0:
+        return []
+    labels: list[str] = []
+    seen: set[str] = set()
+    for line in str(text).splitlines():
+        match = MARKDOWN_HEADING_RE.match(line)
+        if not match:
+            continue
+        label = clean_markdown_heading_label(match.group(2))
+        key = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
+        if not label or not key or key in seen:
+            continue
+        seen.add(key)
+        labels.append(label)
+        if len(labels) >= max_lines:
+            break
+    return labels
+
+
+def load_heading_catalog(
+    path: Path,
+    *,
+    fields: list[str],
+    max_lines: int,
+    min_token_len: int,
+) -> dict[str, Any]:
+    if not path:
+        return {}
+    if not path.exists():
+        raise FileNotFoundError(f"heading doc_pages JSONL does not exist: {path}")
+    page_tokens: dict[str, set[str]] = {}
+    page_labels: dict[str, list[str]] = {}
+    token_df: Counter[str] = Counter()
+    page_count = 0
+
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            doc_id = str(row.get("doc_id", "") or row.get("doc_name", "")).strip()
+            raw_page_idx = row.get("page_idx", row.get("page_id", row.get("page")))
+            if not doc_id or raw_page_idx is None:
+                continue
+            try:
+                uid = page_uid(doc_id, raw_page_idx)
+            except (TypeError, ValueError):
+                continue
+            page_count += 1
+            labels: list[str] = []
+            seen_labels: set[str] = set()
+            for field in fields:
+                raw_text = row.get(field)
+                if isinstance(raw_text, (list, dict)):
+                    raw_text = json.dumps(raw_text, ensure_ascii=False)
+                for label in markdown_heading_labels(str(raw_text or ""), max_lines=max_lines):
+                    key = re.sub(r"[^a-z0-9]+", " ", label.lower()).strip()
+                    if not key or key in seen_labels:
+                        continue
+                    seen_labels.add(key)
+                    labels.append(label)
+                    if len(labels) >= max_lines:
+                        break
+                if len(labels) >= max_lines:
+                    break
+            token_set = {
+                token
+                for label in labels
+                for token in heading_tokens(label, min_token_len=min_token_len)
+            }
+            if labels:
+                page_labels[uid] = labels
+            if token_set:
+                page_tokens[uid] = token_set
+                token_df.update(token_set)
+
+    idf = {
+        token: math.log((float(max(1, page_count)) + 1.0) / (float(df) + 1.0)) + 1.0
+        for token, df in token_df.items()
+    }
+    return {
+        "path": str(path),
+        "fields": list(fields),
+        "page_count": page_count,
+        "page_tokens": page_tokens,
+        "page_labels": page_labels,
+        "token_idf": idf,
+    }
+
+
+def heading_relevance_score(
+    *,
+    question: str,
+    uid: str,
+    catalog: dict[str, Any],
+    mode: str,
+    min_token_len: int,
+) -> dict[str, Any]:
+    query_tokens = set(heading_tokens(question, min_token_len=min_token_len))
+    page_tokens = set(catalog.get("page_tokens", {}).get(uid, set()))
+    overlap = sorted(query_tokens & page_tokens)
+    labels = list(catalog.get("page_labels", {}).get(uid, []))
+    if mode == "overlap_count":
+        score = float(len(overlap))
+    else:
+        token_idf = catalog.get("token_idf", {})
+        denom = sum(float(token_idf.get(token, 1.0)) for token in query_tokens)
+        numer = sum(float(token_idf.get(token, 1.0)) for token in overlap)
+        score = numer / denom if denom > 0 else 0.0
+    return {
+        "score": float(score),
+        "overlap_tokens": overlap,
+        "query_token_count": len(query_tokens),
+        "page_token_count": len(page_tokens),
+        "heading_labels": labels[:12],
+        "has_heading": bool(page_tokens),
+    }
+
+
+def heading_checks_enabled(args: argparse.Namespace, heading_catalog: dict[str, Any]) -> bool:
+    return bool(heading_catalog) and (
+        args.heading_min_promoted_query_score is not None
+        or args.heading_min_score_advantage is not None
+        or bool(args.heading_reject_missing_promoted)
+    )
 
 
 def ranked_page_uids(rows: list[Any], limit: int = 0) -> list[str]:
@@ -513,10 +761,13 @@ def reject_promotion_reason(
     *,
     uid: str,
     candidate_rank: int,
+    question: str,
+    base_top_pages: list[str],
     base_page_rank_by_uid: dict[str, int],
     base_doc_rank_by_id: dict[str, int],
     candidate_rows: list[Any],
     support_view_rows: list[tuple[str, dict[str, Any] | None]],
+    heading_catalog: dict[str, Any],
     args: argparse.Namespace,
 ) -> tuple[str | None, dict[str, Any]]:
     doc_id, _page_idx = parse_page_uid(uid)
@@ -555,6 +806,58 @@ def reject_promotion_reason(
             return "candidate_score_margin_missing", detail
         if margin < float(args.min_candidate_score_margin):
             return "candidate_score_margin_below_min", detail
+    if heading_checks_enabled(args, heading_catalog):
+        promoted_heading = heading_relevance_score(
+            question=question,
+            uid=uid,
+            catalog=heading_catalog,
+            mode=str(args.heading_score_mode),
+            min_token_len=max(1, int(args.heading_min_token_len)),
+        )
+        compare_limit = max(0, int(args.heading_compare_base_top_k))
+        compared_pages = [page for page in base_top_pages[:compare_limit] if page != uid]
+        compared_heading_scores = {
+            page: heading_relevance_score(
+                question=question,
+                uid=page,
+                catalog=heading_catalog,
+                mode=str(args.heading_score_mode),
+                min_token_len=max(1, int(args.heading_min_token_len)),
+            )
+            for page in compared_pages
+        }
+        best_base_uid = None
+        best_base_score = 0.0
+        for page, score_row in compared_heading_scores.items():
+            score = float(score_row.get("score", 0.0))
+            if best_base_uid is None or score > best_base_score:
+                best_base_uid = page
+                best_base_score = score
+        detail["heading_relevance"] = {
+            "score_mode": str(args.heading_score_mode),
+            "promoted_score": promoted_heading,
+            "compare_base_top_k": compare_limit,
+            "best_base_page_uid": best_base_uid,
+            "best_base_score": best_base_score,
+            "best_base_score_detail": (
+                compared_heading_scores.get(best_base_uid) if best_base_uid else None
+            ),
+            "base_scores": compared_heading_scores,
+        }
+        if bool(args.heading_reject_missing_promoted) and not bool(
+            promoted_heading.get("has_heading")
+        ):
+            return "promoted_heading_missing", detail
+        if args.heading_min_promoted_query_score is not None:
+            if float(promoted_heading.get("score", 0.0)) < float(
+                args.heading_min_promoted_query_score
+            ):
+                return "promoted_heading_score_below_min", detail
+        if args.heading_min_score_advantage is not None and compared_pages:
+            required = best_base_score + float(args.heading_min_score_advantage)
+            if float(promoted_heading.get("score", 0.0)) < required:
+                detail["heading_relevance"]["required_promoted_score"] = required
+                return "promoted_heading_score_not_above_base", detail
     if int(args.min_support_page_votes) > 0:
         if int(detail["support_page_vote_count"]) < int(args.min_support_page_votes):
             return "support_page_votes_below_min", detail
@@ -569,6 +872,7 @@ def select_promotions(
     base_row: dict[str, Any],
     candidate_row: dict[str, Any] | None,
     support_view_rows: list[tuple[str, dict[str, Any] | None]],
+    heading_catalog: dict[str, Any],
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     base_rows = prediction_rows(base_row)
@@ -643,10 +947,13 @@ def select_promotions(
         reason, detail = reject_promotion_reason(
             uid=uid,
             candidate_rank=candidate_rank,
+            question=str(base_row.get("question", "")),
+            base_top_pages=base_top_pages,
             base_page_rank_by_uid=base_page_rank_by_uid,
             base_doc_rank_by_id=base_doc_rank_by_id,
             candidate_rows=candidate_rows,
             support_view_rows=support_view_rows,
+            heading_catalog=heading_catalog,
             args=args,
         )
         if reason is None:
@@ -747,6 +1054,15 @@ def build_output_row(
         "support_doc_rank_max": int(args.support_doc_rank_max),
         "min_support_page_votes": int(args.min_support_page_votes),
         "min_support_doc_votes": int(args.min_support_doc_votes),
+        "heading_doc_pages_jsonl": str(args.heading_doc_pages_jsonl),
+        "heading_field": list(args.heading_field),
+        "heading_max_lines": int(args.heading_max_lines),
+        "heading_min_token_len": int(args.heading_min_token_len),
+        "heading_score_mode": str(args.heading_score_mode),
+        "heading_min_promoted_query_score": args.heading_min_promoted_query_score,
+        "heading_min_score_advantage": args.heading_min_score_advantage,
+        "heading_compare_base_top_k": int(args.heading_compare_base_top_k),
+        "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
         "mode": str(args.mode),
         "insert_position": int(args.insert_position),
         "max_promotions": int(args.max_promotions),
@@ -874,6 +1190,15 @@ def summarize_cases(
             "support_doc_rank_max": int(args.support_doc_rank_max),
             "min_support_page_votes": int(args.min_support_page_votes),
             "min_support_doc_votes": int(args.min_support_doc_votes),
+            "heading_doc_pages_jsonl": str(args.heading_doc_pages_jsonl),
+            "heading_field": list(args.heading_field),
+            "heading_max_lines": int(args.heading_max_lines),
+            "heading_min_token_len": int(args.heading_min_token_len),
+            "heading_score_mode": str(args.heading_score_mode),
+            "heading_min_promoted_query_score": args.heading_min_promoted_query_score,
+            "heading_min_score_advantage": args.heading_min_score_advantage,
+            "heading_compare_base_top_k": int(args.heading_compare_base_top_k),
+            "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
             "mode": str(args.mode),
             "insert_position": int(args.insert_position),
             "max_promotions": int(args.max_promotions),
@@ -995,6 +1320,8 @@ def top_cases(cases: list[dict[str, Any]], movement: str, limit: int) -> list[di
 
 def main() -> None:
     args = parse_args()
+    if args.heading_doc_pages_jsonl and not args.heading_field:
+        args.heading_field = ["markdown"]
     base = load_prediction(Path(args.base_prediction))
     candidate = load_prediction(Path(args.candidate_prediction))
     support_inputs = [parse_labeled_path(value) for value in args.support_prediction]
@@ -1004,6 +1331,16 @@ def main() -> None:
     gold_by_qid = (
         {str(row.get("qid", "")).strip(): row for row in read_jsonl(Path(args.gold))}
         if args.gold
+        else {}
+    )
+    heading_catalog = (
+        load_heading_catalog(
+            Path(args.heading_doc_pages_jsonl),
+            fields=[str(field) for field in args.heading_field],
+            max_lines=int(args.heading_max_lines),
+            min_token_len=int(args.heading_min_token_len),
+        )
+        if args.heading_doc_pages_jsonl
         else {}
     )
 
@@ -1020,6 +1357,7 @@ def main() -> None:
             base_row=base_row,
             candidate_row=candidate_row,
             support_view_rows=support_view_rows,
+            heading_catalog=heading_catalog,
             args=args,
         )
         output_row = build_output_row(
