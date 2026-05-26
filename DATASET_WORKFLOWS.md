@@ -620,12 +620,14 @@ Current validated runs:
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json` |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json` |
+| DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json` |
 
 Interpretation:
 
 - MMDocIR is the strongest positive-control result: the raw heading candidate is slightly worse than base at page hit@4, but the gate extracts 3 additional hits with zero losses.
 - SciEGQA-Bench is a useful negative control: the raw heading candidate improves page hit@4, but the safe gate abstains enough to preserve the baseline with zero losses.
 - ViDoSeek shows that the body guard and page-0 abstention remove the observed losses while preserving a positive net gain.
+- DUDE is a negative/neutral transfer case: the unconstrained gate lost one page hit because a cross-document annual-report heading looked better than a near-empty gold cover page. Requiring promoted documents to be base doc rank 1 makes the gate safely abstain (`0` net, `0` lost).
 
 Runner for additional datasets:
 
@@ -634,7 +636,7 @@ DATASETS="m3docvqa dude vidore" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
-This helper currently targets M3DocVQA, DUDE, and ViDoRe after their `plain_top224` and SPLADE artifacts exist. It writes per-dataset `*_safe_gate_bodyguard.summary.json`, `.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory.
+This helper currently targets M3DocVQA, DUDE, and ViDoRe after their `plain_top224` and SPLADE artifacts exist. It writes per-dataset `*_safe_gate_bodyguard.summary.json`, `.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory. DUDE uses the stricter `dude_safe_gate_bodyguard_docrank1.*` output by default.
 
 Limitation report / failure taxonomy audit for the frozen graph outputs:
 

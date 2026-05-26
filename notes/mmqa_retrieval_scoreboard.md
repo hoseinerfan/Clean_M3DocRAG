@@ -127,6 +127,7 @@ These numbers are page hit counts at `k=4`, not average recall. The gate is inte
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
+| DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
 
 Safe-gate artifacts:
 
@@ -136,11 +137,13 @@ Safe-gate artifacts:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json`
 - ViDoSeek summary:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json`
+- DUDE summary:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json`
 
 Pending safe-gate evaluation targets:
 
 ```bash
-DATASETS="m3docvqa dude vidore" \
+DATASETS="m3docvqa vidore" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
