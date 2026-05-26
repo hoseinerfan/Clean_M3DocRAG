@@ -52,7 +52,7 @@ This corresponds to the row we call `denseheavy125_medium_both`. ViDoSeek has a 
 | ViDoSeek | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
 | OpenDocVQA | Full OCR-backed Graph-PPR completed. Full-dev no-support `pairwise_content_posterior` was negative: page hit@4 `26173 -> 22592`, net `-3581`. | Keep Graph-PPR as the full-dev result; use content posterior only as a hard-subset diagnostic/rescue component. |
 | MMLongBench DocQA | Prepared: 708 docs, 30,917 pages, 14,466 QAs, 19 missing gold pages; embedding job was submitted. | Check embedding completion, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
-| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. Dense baseline retrieval is complete: page@4 `0.5354`, doc@4 `0.6114`. | Run plain_top224, then SPLADE and Graph-PPR. |
+| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. Dense baseline and plain_top224 retrieval are complete: page@4 `0.5720`, doc@4 `0.6507` after plain_top224. | Run SPLADE, then Graph-PPR. |
 
 ## Common Sanity Checks
 
@@ -748,10 +748,31 @@ page_hit@4=1565
 doc_hit@4=1775
 ```
 
-Run `plain_top224` next:
+Observed `plain_top224` retrieval:
+
+```text
+n_qids=2903
+page_recall@4=0.5719543001492708
+page_recall@20=0.6866134649978949
+doc_recall@4=0.6507061660351361
+doc_recall@20=0.7561143644505683
+page_hit@4=1672
+doc_hit@4=1889
+improved_doc_rank_count=781
+```
+
+Run SPLADE next:
 
 ```bash
-bash dude/run_plain_top224_dude.sh
+DATA_NAME=dude \
+DATA_ROOT="$LOCAL_DATA_DIR/dude" \
+DENSE_PRED="$LOCAL_OUTPUT_DIR/dude/plain_top224_ret1000_prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/dude/doc_rrf_plain_top224_splade" \
+DENSE_WEIGHT=1.25 \
+SPARSE_WEIGHT=0.75 \
+RRF_K=10 \
+SPLADE_DEVICE=auto \
+bash scripts/run_external_doc_rrf_pipeline.sh
 ```
 
 Then follow the standard page-labeled pipeline with:

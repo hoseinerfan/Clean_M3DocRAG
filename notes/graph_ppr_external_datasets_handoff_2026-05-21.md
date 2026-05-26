@@ -581,6 +581,25 @@ page_hit@4=1565
 doc_hit@4=1775
 ```
 
+The `plain_top224` artifact is:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/plain_top224_ret1000_prediction.json
+```
+
+Observed `plain_top224`:
+
+```text
+n_qids=2903
+page_recall@4=0.5719543001492708
+page_recall@20=0.6866134649978949
+doc_recall@4=0.6507061660351361
+doc_recall@20=0.7561143644505683
+page_hit@4=1672
+doc_hit@4=1889
+improved_doc_rank_count=781
+```
+
 Environment reset:
 
 ```bash
@@ -589,7 +608,7 @@ unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_
 source dude/env_hpc.sh
 ```
 
-Next run `plain_top224`, then SPLADE, then `denseheavy125_medium_both`. Full commands are in `dude/README.md` and `DATASET_WORKFLOWS.md`.
+Next run SPLADE, then `denseheavy125_medium_both`. Full commands are in `dude/README.md` and `DATASET_WORKFLOWS.md`.
 
 ## SciEGQA Targeted Sweep Runner
 
