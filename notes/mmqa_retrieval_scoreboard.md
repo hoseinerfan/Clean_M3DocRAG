@@ -185,6 +185,11 @@ M3DocVQA gold identifies supporting documents but does not identify a true answe
 page-hit/recovered/lost fields therefore cannot be reported for this dataset; the runner reports
 document recall and downstream VQA must establish whether promoted pages are useful.
 
+Optional diagnostic only: evaluate the `ImageListQ` subset under a page-0 proxy assumption with
+`scripts/evaluate_first_page_gold_retrieval.py --baseline-pred ... --pred ... --question-type
+ImageListQ --first-page-idx 0`. Report these as `synthetic_page_*` metrics and never merge them
+with the exact-page results in Table C.
+
 Pending Markdown-source comparison: `scripts/export_pdf_page_markdown.py` and the selected-dataset
 runner support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. For the current HPC comparison this means
 pinned `pymupdf4llm==0.3.4`, using native PDF structured Markdown without automatic ONNX Layout

@@ -729,6 +729,24 @@ The runner now reports those fields as unavailable, prints document recall for r
 and skips the page-position gold audit. Evaluate the promoted page set through downstream VQA
 before treating this dataset as positive or negative evidence for page rescue.
 
+An `ImageListQ` page-0 proxy diagnostic is available for analysis only. It assumes page index `0`
+of every supporting document is a relevant page, compares the safe gate with its no-heading
+control, and reports all values under `synthetic_page_*` names so they are not confused with true
+gold-page metrics:
+
+```bash
+export M3DOCVQA_HEADING_OUT="$PWD/output/m3docvqa_heading_breadcrumb_pdf_markdown_source_ablation"
+"$PWD/env/bin/python" scripts/evaluate_first_page_gold_retrieval.py \
+  --baseline-pred "$M3DOCVQA_HEADING_OUT/m3docvqa_heading_control_no_heading.prediction.json" \
+  --pred "$M3DOCVQA_HEADING_OUT/m3docvqa_safe_window20_gate_bodyguard.prediction.json" \
+  --gold "$PWD/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl" \
+  --question-type ImageListQ \
+  --first-page-idx 0 \
+  --hit-k 4 \
+  --recall-k 1 2 4 5 10 20 \
+  --output-json "$M3DOCVQA_HEADING_OUT/m3docvqa_safe_window20_gate_bodyguard.imagelistq_page0_proxy.json"
+```
+
 Alternative M3DocVQA Markdown extraction experiment:
 
 The exporter and selected-dataset runner now support `PDF_MARKDOWN_BACKEND=pymupdf4llm`. The
