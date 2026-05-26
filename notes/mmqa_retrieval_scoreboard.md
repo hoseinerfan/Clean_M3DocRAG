@@ -161,7 +161,7 @@ Rank-window variant:
 ```bash
 SAFE_GATE_PROFILE=window20 \
 RUN_GOLD_RANK_AUDIT=1 \
-DATASETS="m3docvqa dude vidore" \
+DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
@@ -170,14 +170,25 @@ The window profile writes `*_safe_window20_gate_bodyguard*.summary.json` plus op
 page/doc rank-band matrices, which is the main check for whether rank `6-20` misses are
 same-document/page-local opportunities or document-retrieval failures.
 
+Current M3DocVQA safe-gate input paths:
+
+```text
+M3DOCVQA_DENSE_PRED=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json
+M3DOCVQA_SPARSE_PRED=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json
+M3DOCVQA_PAGE_TEXT_JSONL=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_page_text/m3docvqa_dev_page_text.jsonl
+```
+
+Use the raw `mmqa_dev_splade.prediction.json`; graph/source-ablation/no-SPLADE artifacts should not
+be used as the sparse input for this run.
+
 ## Table E: Dataset Run Status
 
 | Dataset | Prepared? | `plain_top224` | SPLADE text source | Graph-PPR page-labeled result | Next needed action |
 | --- | --- | --- | --- | --- | --- |
-| M3DocVQA/MMQA | yes | yes | exported MMQA page text | yes, `denseheavy_lightboth` in Tables A/B; stronger doc-shortlist configs exist separately | optional: rerun MMQA with `denseheavy125_medium_both` if we want the newer page-labeled profile on MMQA |
+| M3DocVQA/MMQA | yes | yes | exported MMQA page text | yes, `denseheavy_lightboth` in Tables A/B; stronger doc-shortlist configs exist separately | run `SAFE_GATE_PROFILE=window20 DATASETS="m3docvqa"` safe-heading gate |
 | MMDocIR | yes | yes | manifest/PDF text | yes | none |
 | SciEGQA-Bench | yes | yes | PDF text | yes | none |
-| ViDoRe V3 | yes | yes | manifest/PDF text | yes | none |
+| ViDoRe V3 | yes | yes | manifest/PDF text | yes | none for heading gate; text-derived Markdown has zero headings, so current gate is a recorded no-op |
 | ViDoSeek | yes | yes | PDF text | yes | none |
 | OpenDocVQA | yes | yes | OCR-backed page text | yes | keep Graph-PPR as full-dev result; unconditional `pairwise_content_posterior` was negative |
 | MMLongBench DocQA | yes | no | `page_text_list` in manifest | no | wait for embeddings, then run dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |

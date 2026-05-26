@@ -634,18 +634,18 @@ Interpretation:
 Runner for additional datasets:
 
 ```bash
-DATASETS="m3docvqa dude vidore" \
+DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
-This helper currently targets M3DocVQA, DUDE, and ViDoRe after their `plain_top224` and SPLADE artifacts exist. It writes per-dataset `*_safe_gate_bodyguard.summary.json`, `.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory. DUDE uses the stricter `dude_safe_gate_bodyguard_docrank1.*` output by default.
+This helper can target M3DocVQA, DUDE, and ViDoRe after their `plain_top224` and SPLADE artifacts exist, but the only remaining safe-gate evaluation target is M3DocVQA. DUDE and ViDoRe are recorded above. It writes per-dataset `*_safe_gate_bodyguard.summary.json`, `.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory. DUDE uses the stricter `dude_safe_gate_bodyguard_docrank1.*` output by default.
 
 Rank-window rescue profile:
 
 ```bash
 SAFE_GATE_PROFILE=window20 \
 RUN_GOLD_RANK_AUDIT=1 \
-DATASETS="m3docvqa dude vidore" \
+DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
@@ -676,7 +676,7 @@ source hpc_vital_paths.generated.env
 
 SAFE_GATE_PROFILE=window20 \
 RUN_GOLD_RANK_AUDIT=1 \
-DATASETS="m3docvqa dude vidore" \
+DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
@@ -685,6 +685,16 @@ The generated env exports include variables such as `M3DOCVQA_DENSE_PRED`,
 `VIDORE_SPARSE_PRED`. The selected-dataset runner automatically sources
 `hpc_vital_paths.generated.env` from the repo root when present; use `HPC_PATH_ENV=/path/to/file`
 to point it somewhere else.
+
+Current M3DocVQA path sanity:
+
+```text
+M3DOCVQA_DENSE_PRED=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json
+M3DOCVQA_SPARSE_PRED=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json
+M3DOCVQA_PAGE_TEXT_JSONL=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_page_text/m3docvqa_dev_page_text.jsonl
+```
+
+Use the raw `mmqa_dev_splade.prediction.json` for `M3DOCVQA_SPARSE_PRED`; do not substitute historical graph/source-ablation/no-SPLADE outputs.
 
 Limitation report / failure taxonomy audit for the frozen graph outputs:
 

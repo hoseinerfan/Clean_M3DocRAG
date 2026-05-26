@@ -701,7 +701,7 @@ Full rank-window rescue profile:
 ```bash
 SAFE_GATE_PROFILE=window20 \
 RUN_GOLD_RANK_AUDIT=1 \
-DATASETS="m3docvqa dude vidore" \
+DATASETS="m3docvqa" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
@@ -710,6 +710,18 @@ This keeps the same heading/body/layout/doc-rank safety checks but scans candida
 for reproducing the validated rank-5 artifacts. With `RUN_GOLD_RANK_AUDIT=1`, each dataset also
 gets a `*.gold_rank_positions.md` report containing first gold page/doc ranks and a page-rank-band
 by doc-rank-band matrix.
+
+Current M3DocVQA path sanity from `scripts/discover_hpc_vital_paths.py`:
+
+```text
+M3DOCVQA_DENSE_PRED=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json
+M3DOCVQA_SPARSE_PRED=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json
+M3DOCVQA_PAGE_TEXT_JSONL=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_page_text/m3docvqa_dev_page_text.jsonl
+```
+
+Use the raw `mmqa_dev_splade.prediction.json` for the safe-gate run. Historical
+`fulldev_graph_ppr_sourceablate_no_splade` outputs are graph diagnostics and are not valid SPLADE
+inputs here.
 
 ## SciEGQA Targeted Sweep Runner
 
