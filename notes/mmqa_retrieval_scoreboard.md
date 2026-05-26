@@ -101,6 +101,7 @@ Use this section for datasets with exact page labels. These numbers are **averag
 
 | Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
 | --- | ---: | ---: | ---: | ---: |
+| Dense baseline (`baseline_ret1000`) | `53.54%` | `65.44%` | `61.14%` | `72.48%` |
 | MaxSim+ | `N/A` | `N/A` | `N/A` | `N/A` |
 | Graph Page Preserve (`denseheavy125_medium_both`) | `N/A` | `N/A` | `N/A` | `N/A` |
 
@@ -110,7 +111,7 @@ Interpretation:
 - ViDoSeek is almost saturated under `plain_top224`; the previously recorded dataset-specific best used heavier graph weights, but this table intentionally leaves the uniform `denseheavy125_medium_both` row as `N/A` until that exact config is recorded.
 - OpenDocVQA now has a valid OCR-backed Graph-PPR row. The earlier all-empty SPLADE run should still be ignored.
 - MMLongBench DocQA now has a converted page-labeled split, but retrieval numbers are not available until embeddings, dense retrieval, `plain_top224`, SPLADE, and Graph-PPR finish.
-- DUDE is scaffolded as the MP-DocVQA replacement target. It should use the same page-labeled default first after prepare/embedding/retrieval.
+- DUDE is prepared and now has a dense baseline retrieval result. Next run `plain_top224`, then SPLADE and Graph-PPR.
 
 ## Table D: Dataset Run Status
 
@@ -123,7 +124,7 @@ Interpretation:
 | ViDoSeek | yes | yes | PDF text | yes | none |
 | OpenDocVQA | yes | yes | OCR-backed page text | yes | keep Graph-PPR as full-dev result; unconditional `pairwise_content_posterior` was negative |
 | MMLongBench DocQA | yes | no | `page_text_list` in manifest | no | wait for embeddings, then run dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |
-| DUDE | scaffolded | no | DUDE OCR in manifest | no | prepare val split, then embed, dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |
+| DUDE | yes | no | DUDE OCR in manifest | no | run `plain_top224`, then SPLADE and Graph-PPR |
 
 ## Historical Baseline Note
 

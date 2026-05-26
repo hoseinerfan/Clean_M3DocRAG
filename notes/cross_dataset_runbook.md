@@ -52,7 +52,7 @@ This corresponds to the row we call `denseheavy125_medium_both`. ViDoSeek has a 
 | ViDoSeek | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
 | OpenDocVQA | Full OCR-backed Graph-PPR completed. Full-dev no-support `pairwise_content_posterior` was negative: page hit@4 `26173 -> 22592`, net `-3581`. | Keep Graph-PPR as the full-dev result; use content posterior only as a hard-subset diagnostic/rescue component. |
 | MMLongBench DocQA | Prepared: 708 docs, 30,917 pages, 14,466 QAs, 19 missing gold pages; embedding job was submitted. | Check embedding completion, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
-| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. | Embed pages, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
+| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. Dense baseline retrieval is complete: page@4 `0.5354`, doc@4 `0.6114`. | Run plain_top224, then SPLADE and Graph-PPR. |
 
 ## Common Sanity Checks
 
@@ -736,14 +736,25 @@ bad_succeeded_prefix_pages=1
 missing_images=0
 ```
 
-Embed next:
+Observed dense baseline retrieval:
 
-```bash
-sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
-  dude/sbatch_embed_dude_array.sh
+```text
+n_qids=2903
+page_recall@4=0.5354403490641865
+page_recall@20=0.6543920082673097
+doc_recall@4=0.6114364450568378
+doc_recall@20=0.7247674819152601
+page_hit@4=1565
+doc_hit@4=1775
 ```
 
-After embedding, follow the standard page-labeled pipeline with:
+Run `plain_top224` next:
+
+```bash
+bash dude/run_plain_top224_dude.sh
+```
+
+Then follow the standard page-labeled pipeline with:
 
 ```text
 DATA_NAME=dude

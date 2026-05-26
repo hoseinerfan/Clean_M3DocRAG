@@ -559,35 +559,37 @@ sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
 
 After dense retrieval and `plain_top224`, use `denseheavy125_medium_both` as the first Graph-PPR config. Full commands are in `mmlongbench/README.md` and `DATASET_WORKFLOWS.md`.
 
-## DUDE Next Run
+## DUDE Status
 
-DUDE support is scaffolded under `dude/`. Use it as the MP-DocVQA replacement path because it is multi-page DocQA, exposes PDFs/OCR, and has answer page bounding boxes that can be converted into exact page retrieval labels.
+DUDE support is implemented under `dude/`. Use it as the MP-DocVQA replacement path because it is multi-page DocQA, exposes PDFs/OCR, and has answer page bounding boxes that can be converted into exact page retrieval labels.
 
-Recommended first run:
+Current status: DUDE is prepared, embedded/indexed, and dense baseline retrieval is complete. The dense baseline artifact is:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/baseline_ret1000.json
+```
+
+Observed dense baseline:
+
+```text
+n_qids=2903
+page_recall@4=0.5354403490641865
+page_recall@20=0.6543920082673097
+doc_recall@4=0.6114364450568378
+doc_recall@20=0.7247674819152601
+page_hit@4=1565
+doc_hit@4=1775
+```
+
+Environment reset:
 
 ```bash
 unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR
 unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_CACHE XDG_CACHE_HOME
 source dude/env_hpc.sh
-
-"$REPO_ROOT/env/bin/python" dude/prepare_dude.py \
-  --output-root "$LOCAL_DATA_DIR/dude" \
-  --hf-config Amazon_due \
-  --source-split val
-
-"$REPO_ROOT/env/bin/python" - <<'PY'
-import json, os
-p=os.environ["LOCAL_DATA_DIR"] + "/dude/prepare_dev_summary.json"
-s=json.load(open(p))
-for k in ["source_row_count","qa_count","doc_count","page_count","answer_page_base","answer_page_base_missing_counts","skipped_no_gold_page_count","missing_gold_page_count","answer_type_counts_kept"]:
-    print(k, s.get(k))
-PY
-
-sbatch --time=12:00:00 --array=0-31 --export=ALL,NUM_SHARDS=32,BATCH_SIZE=2 \
-  dude/sbatch_embed_dude_array.sh
 ```
 
-After embeddings, run dense retrieval, `plain_top224`, SPLADE, then `denseheavy125_medium_both`. Full commands are in `dude/README.md` and `DATASET_WORKFLOWS.md`.
+Next run `plain_top224`, then SPLADE, then `denseheavy125_medium_both`. Full commands are in `dude/README.md` and `DATASET_WORKFLOWS.md`.
 
 ## SciEGQA Targeted Sweep Runner
 
