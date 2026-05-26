@@ -243,6 +243,17 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reject-promoted-page-idx",
+        action="append",
+        type=int,
+        default=[],
+        help=(
+            "Reject candidate promotions whose zero-based page index matches this value. "
+            "Repeatable. This is useful for abstaining from heading-induced cover/title "
+            "page promotions on datasets where those pages are broad document summaries."
+        ),
+    )
+    parser.add_argument(
         "--mode",
         choices=["swap_promoted", "use_candidate"],
         default="swap_promoted",
@@ -837,6 +848,10 @@ def reject_promotion_reason(
 
     if base_rank is None:
         return "promoted_page_missing_from_base_pool", detail
+    rejected_page_indices = {int(value) for value in args.reject_promoted_page_idx or []}
+    if rejected_page_indices and _page_idx in rejected_page_indices:
+        detail["rejected_page_indices"] = sorted(rejected_page_indices)
+        return "promoted_page_idx_blocked", detail
     if base_rank < int(args.rescue_rank_min):
         return "promoted_page_before_rescue_window", detail
     if int(args.rescue_rank_max) > 0 and base_rank > int(args.rescue_rank_max):
@@ -1129,6 +1144,7 @@ def build_output_row(
         "heading_compare_mode": str(args.heading_compare_mode),
         "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
         "query_block_regex": list(args.query_block_regex or []),
+        "reject_promoted_page_idx": [int(value) for value in args.reject_promoted_page_idx or []],
         "mode": str(args.mode),
         "insert_position": int(args.insert_position),
         "max_promotions": int(args.max_promotions),
@@ -1267,6 +1283,9 @@ def summarize_cases(
             "heading_compare_mode": str(args.heading_compare_mode),
             "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
             "query_block_regex": list(args.query_block_regex or []),
+            "reject_promoted_page_idx": [
+                int(value) for value in args.reject_promoted_page_idx or []
+            ],
             "mode": str(args.mode),
             "insert_position": int(args.insert_position),
             "max_promotions": int(args.max_promotions),
