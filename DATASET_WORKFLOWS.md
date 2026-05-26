@@ -663,6 +663,27 @@ Set `RUN_GOLD_RANK_AUDIT=1` to also write `*.gold_rank_positions.json` and
 page/doc rank bands, and a page-rank-band by doc-rank-band matrix so rank `6-20` opportunities can
 be separated from document-retrieval failures.
 
+If paths drift across historical output roots, generate and source a canonical path manifest first:
+
+```bash
+python scripts/discover_hpc_vital_paths.py \
+  --output-json hpc_vital_paths.generated.json \
+  --output-env hpc_vital_paths.generated.env
+
+source hpc_vital_paths.generated.env
+
+SAFE_GATE_PROFILE=window20 \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="m3docvqa dude vidore" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+The generated env exports include variables such as `M3DOCVQA_DENSE_PRED`,
+`M3DOCVQA_SPARSE_PRED`, `DUDE_DENSE_PRED`, `DUDE_SPARSE_PRED`, `VIDORE_DENSE_PRED`, and
+`VIDORE_SPARSE_PRED`. The selected-dataset runner automatically sources
+`hpc_vital_paths.generated.env` from the repo root when present; use `HPC_PATH_ENV=/path/to/file`
+to point it somewhere else.
+
 Limitation report / failure taxonomy audit for the frozen graph outputs:
 
 ```bash

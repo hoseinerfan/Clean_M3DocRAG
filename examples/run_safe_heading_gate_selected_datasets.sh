@@ -29,6 +29,15 @@ INSERT_POSITION="${INSERT_POSITION:-$HIT_K}"
 MAX_PROMOTIONS="${MAX_PROMOTIONS:-1}"
 RUN_GOLD_RANK_AUDIT="${RUN_GOLD_RANK_AUDIT:-0}"
 REJECT_PROMOTED_PAGE_IDX="${REJECT_PROMOTED_PAGE_IDX:-}"
+HPC_PATH_ENV="${HPC_PATH_ENV:-}"
+
+if [[ -n "$HPC_PATH_ENV" ]]; then
+  # shellcheck disable=SC1090
+  source "$HPC_PATH_ENV"
+elif [[ -f "$REPO_ROOT/hpc_vital_paths.generated.env" ]]; then
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/hpc_vital_paths.generated.env"
+fi
 
 case "$SAFE_GATE_PROFILE" in
   boundary)
@@ -251,10 +260,10 @@ run_m3docvqa() {
   source "$REPO_ROOT/scripts/m3docvqa_internal_env.sh"
 
   local data_root="$DATASET_ROOT"
-  local gold="$GOLD"
+  local gold="${M3DOCVQA_GOLD:-$GOLD}"
   local out_dir="$LOCAL_OUTPUT_DIR/m3docvqa_heading_breadcrumb_pdf_markdown_source_ablation"
   local page_text_dir="$LOCAL_OUTPUT_DIR/m3docvqa_page_text"
-  local page_text_jsonl="$page_text_dir/m3docvqa_dev_page_text.jsonl"
+  local page_text_jsonl="${M3DOCVQA_PAGE_TEXT_JSONL:-$page_text_dir/m3docvqa_dev_page_text.jsonl}"
   local pdf_markdown_jsonl="$out_dir/doc_pages_dev_with_pdf_markdown.jsonl"
   local pdf_markdown_summary="$out_dir/pdf_markdown_summary.json"
   local variant_dir="$out_dir/pdf_markdown_variants"
@@ -326,22 +335,25 @@ run_dude() {
   source "$REPO_ROOT/dude/env_hpc.sh"
 
   local data_root="$LOCAL_DATA_DIR/dude"
-  local gold="$data_root/MMQA_dev.jsonl"
+  local gold="${DUDE_GOLD:-$data_root/MMQA_dev.jsonl}"
+  local doc_pages_jsonl="${DUDE_DOC_PAGES:-$data_root/doc_pages_dev.jsonl}"
   local out_dir="$LOCAL_OUTPUT_DIR/dude/heading_breadcrumb_pdf_markdown_source_ablation"
   local pdf_root="${DUDE_PDF_ROOT:-$data_root/raw/DUDE_train-val-test_binaries/PDF}"
   local pdf_markdown_jsonl="$out_dir/doc_pages_dev_with_pdf_markdown.jsonl"
   local pdf_markdown_summary="$out_dir/pdf_markdown_summary.json"
   local variant_dir="$out_dir/pdf_markdown_variants"
   local dense_pred="$LOCAL_OUTPUT_DIR/dude/plain_top224_ret1000_prediction.json"
+  dense_pred="${DUDE_DENSE_PRED:-$dense_pred}"
   local sparse_pred="$LOCAL_OUTPUT_DIR/dude/doc_rrf_plain_top224_splade/dude_splade_ret1000.prediction.json"
+  sparse_pred="${DUDE_SPARSE_PRED:-$sparse_pred}"
 
   require_file gold "$gold"
-  require_file doc_pages "$data_root/doc_pages_dev.jsonl"
+  require_file doc_pages "$doc_pages_jsonl"
   require_file dense_pred "$dense_pred"
   require_file sparse_pred "$sparse_pred"
   mkdir -p "$out_dir"
 
-  prepare_pdf_markdown "$data_root/doc_pages_dev.jsonl" "$pdf_root" "$pdf_markdown_jsonl" "$pdf_markdown_summary" "$variant_dir"
+  prepare_pdf_markdown "$doc_pages_jsonl" "$pdf_root" "$pdf_markdown_jsonl" "$pdf_markdown_summary" "$variant_dir"
 
   local tag="dude"
   run_graph_view dude "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$pdf_markdown_jsonl" "${tag}_heading_control_no_heading" none
@@ -372,25 +384,28 @@ run_vidore() {
   source "$REPO_ROOT/vidore/env_hpc.sh"
 
   local data_root="$LOCAL_DATA_DIR/vidore-v3"
-  local gold="$data_root/MMQA_dev.jsonl"
+  local gold="${VIDORE_GOLD:-$data_root/MMQA_dev.jsonl}"
+  local doc_pages_jsonl="${VIDORE_DOC_PAGES:-$data_root/doc_pages_dev.jsonl}"
   local out_dir="$LOCAL_OUTPUT_DIR/vidore-v3/heading_breadcrumb_text_source_ablation"
   local variant_dir="$out_dir/markdown_variants"
   local dense_pred="$LOCAL_OUTPUT_DIR/vidore-v3/plain_top224_ret1000_prediction.json"
+  dense_pred="${VIDORE_DENSE_PRED:-$dense_pred}"
   local sparse_pred="$LOCAL_OUTPUT_DIR/vidore-v3/doc_rrf_plain_top224_splade/vidore-v3_splade_ret1000.prediction.json"
+  sparse_pred="${VIDORE_SPARSE_PRED:-$sparse_pred}"
 
   require_file gold "$gold"
-  require_file doc_pages "$data_root/doc_pages_dev.jsonl"
+  require_file doc_pages "$doc_pages_jsonl"
   require_file dense_pred "$dense_pred"
   require_file sparse_pred "$sparse_pred"
   mkdir -p "$out_dir"
 
   "$PYTHON_BIN" "$REPO_ROOT/scripts/prepare_pdf_markdown_variants.py" \
-    --input-jsonl "$data_root/doc_pages_dev.jsonl" \
+    --input-jsonl "$doc_pages_jsonl" \
     --output-dir "$variant_dir"
 
   local tag="vidore"
-  run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$data_root/doc_pages_dev.jsonl" "${tag}_heading_control_no_heading" none
-  run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$data_root/doc_pages_dev.jsonl" "${tag}_heading_full_wide_edgeonly_transfer" query_gated_shared
+  run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$doc_pages_jsonl" "${tag}_heading_control_no_heading" none
+  run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$doc_pages_jsonl" "${tag}_heading_full_wide_edgeonly_transfer" query_gated_shared
   run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
 
@@ -402,8 +417,8 @@ run_vidore() {
     "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
-    "$data_root/doc_pages_dev.jsonl" \
-    "$data_root/doc_pages_dev.jsonl" \
+    "$doc_pages_jsonl" \
+    "$doc_pages_jsonl" \
     "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
     4
 }
