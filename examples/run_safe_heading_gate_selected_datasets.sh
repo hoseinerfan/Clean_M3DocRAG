@@ -158,6 +158,9 @@ run_safe_gate() {
     --body-doc-pages-jsonl "$body_doc_pages" \
     --body-field markdown \
     --body-field text \
+    --body-field ocr_text \
+    --body-field page_text \
+    --body-field content \
     --body-min-score-advantage "$BODY_MIN_SCORE_ADVANTAGE" \
     --body-compare-base-top-k 4 \
     --body-compare-mode displaced_boundary \
@@ -174,6 +177,8 @@ run_safe_gate() {
 run_m3docvqa() {
   echo
   echo "== m3docvqa =="
+  unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR LOCAL_MODEL_DIR
+  unset M3DOCVQA_INTERNAL_ENV_LOADED
   # shellcheck disable=SC1091
   source "$REPO_ROOT/scripts/m3docvqa_internal_env.sh"
 
@@ -223,6 +228,7 @@ run_m3docvqa() {
 run_dude() {
   echo
   echo "== dude =="
+  unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR LOCAL_MODEL_DIR
   # shellcheck disable=SC1091
   source "$REPO_ROOT/dude/env_hpc.sh"
 
@@ -266,6 +272,7 @@ run_dude() {
 run_vidore() {
   echo
   echo "== vidore =="
+  unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR LOCAL_MODEL_DIR
   # shellcheck disable=SC1091
   source "$REPO_ROOT/vidore/env_hpc.sh"
 
