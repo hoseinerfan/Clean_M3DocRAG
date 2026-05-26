@@ -64,6 +64,39 @@ EXPORT_ARGS=(
 if [[ -n "${PDF_ROOT:-}" ]]; then
   EXPORT_ARGS+=(--pdf-root "$PDF_ROOT")
 fi
+if [[ -n "${IMAGE_ROOT:-}" ]]; then
+  EXPORT_ARGS+=(--image-root "$IMAGE_ROOT")
+fi
+if [[ "${OCR_IMAGE:-0}" == "1" ]]; then
+  EXPORT_ARGS+=(--ocr-image)
+  if [[ -n "${OCR_ENGINE:-}" ]]; then
+    EXPORT_ARGS+=(--ocr-engine "$OCR_ENGINE")
+  fi
+  if [[ -n "${OCR_BIN:-}" ]]; then
+    EXPORT_ARGS+=(--ocr-bin "$OCR_BIN")
+  fi
+  if [[ -n "${OCR_LANG:-}" ]]; then
+    EXPORT_ARGS+=(--ocr-lang "$OCR_LANG")
+  fi
+  if [[ -n "${OCR_PSM:-}" ]]; then
+    EXPORT_ARGS+=(--ocr-psm "$OCR_PSM")
+  fi
+  if [[ -n "${OCR_TIMEOUT:-}" ]]; then
+    EXPORT_ARGS+=(--ocr-timeout "$OCR_TIMEOUT")
+  fi
+  if [[ "${OCR_CONTINUE_ON_ERROR:-0}" == "1" ]]; then
+    EXPORT_ARGS+=(--ocr-continue-on-error)
+  fi
+  if [[ "${EASYOCR_GPU:-0}" == "1" ]]; then
+    EXPORT_ARGS+=(--easyocr-gpu)
+  fi
+  if [[ -n "${EASYOCR_MODEL_DIR:-}" ]]; then
+    EXPORT_ARGS+=(--easyocr-model-dir "$EASYOCR_MODEL_DIR")
+  fi
+  if [[ "${NO_EASYOCR_DOWNLOAD:-0}" == "1" ]]; then
+    EXPORT_ARGS+=(--no-easyocr-download)
+  fi
+fi
 if [[ -n "${PAGE_TEXT_FIELDS:-}" ]]; then
   for field in $PAGE_TEXT_FIELDS; do
     EXPORT_ARGS+=(--text-field "$field")
