@@ -68,6 +68,16 @@ def load_gold_rows(path: Path, qids: set[str]) -> dict[str, dict]:
     return rows
 
 
+def collect_gold_doc_ids(gold_rows: dict[str, dict]) -> set[str]:
+    doc_ids: set[str] = set()
+    for row in gold_rows.values():
+        for item in row.get("supporting_context", []):
+            doc_id = str(item.get("doc_id", "")).strip()
+            if doc_id:
+                doc_ids.add(doc_id)
+    return doc_ids
+
+
 def resolve_device(raw: str) -> torch.device:
     if raw != "auto":
         return torch.device(raw)
@@ -150,6 +160,22 @@ def main() -> None:
     term_ids = index_payload["term_ids"].to(torch.int64)
     term_weights = index_payload["term_weights"].to(torch.float32)
     page_count = len(page_uids)
+
+    gold_doc_id_set = collect_gold_doc_ids(gold_rows)
+    index_doc_id_set = set(doc_ids)
+    gold_doc_overlap_count = len(gold_doc_id_set & index_doc_id_set)
+    if gold_doc_id_set and gold_doc_overlap_count == 0:
+        sample_gold_doc_ids = sorted(gold_doc_id_set)[:10]
+        sample_index_doc_ids = sorted(index_doc_id_set)[:10]
+        raise ValueError(
+            "SPLADE index has zero overlap with gold document ids. "
+            "This usually means DATA_ROOT, DOC_PAGES_JSONL, PAGE_TEXT_JSONL, "
+            "or SPLADE_INDEX_PT points to a stale/different corpus. "
+            f"gold_doc_count={len(gold_doc_id_set)} "
+            f"index_doc_count={len(index_doc_id_set)} "
+            f"sample_gold_doc_ids={sample_gold_doc_ids} "
+            f"sample_index_doc_ids={sample_index_doc_ids}"
+        )
 
     postings: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
     posting_pages: dict[int, list[int]] = {}
@@ -305,6 +331,12 @@ def main() -> None:
         "top_pages": int(args.top_pages),
         "query_topk_terms": int(args.query_topk_terms),
         "query_min_weight": float(args.query_min_weight),
+        "gold_doc_count": len(gold_doc_id_set),
+        "index_doc_count": len(index_doc_id_set),
+        "gold_doc_overlap_count": gold_doc_overlap_count,
+        "gold_doc_overlap_fraction": (
+            gold_doc_overlap_count / len(gold_doc_id_set) if gold_doc_id_set else None
+        ),
         "reranked_top4_doc_count": top4_doc_count,
         "reranked_top20_doc_count": top20_doc_count,
         "reranked_doc_rank_median": median_or_none(

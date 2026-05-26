@@ -196,6 +196,8 @@ def main() -> None:
         "model_name_or_path": args.model_name_or_path,
         "page_text_jsonl": args.page_text_jsonl,
         "page_count": len(page_uids),
+        "doc_count": len(set(doc_ids)),
+        "sample_doc_ids": sorted(set(doc_ids))[:10],
         "nonempty_text_page_count": nonempty_text_page_count,
         "empty_text_page_count": len(page_rows) - nonempty_text_page_count,
         "max_pages": int(args.max_pages),
