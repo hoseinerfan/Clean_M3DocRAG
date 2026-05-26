@@ -600,6 +600,25 @@ doc_hit@4=1889
 improved_doc_rank_count=781
 ```
 
+The SPLADE/doc-RRF artifacts are:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/doc_rrf_plain_top224_splade/dude_splade_ret1000.prediction.json
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/doc_rrf_plain_top224_splade/dude_exact_dense_splade_doc_rrf.prediction.json
+```
+
+Observed SPLADE/doc-RRF:
+
+```text
+n_qids=2903
+page_recall@4=0.5311861292915375
+page_recall@20=0.6180139319477934
+doc_recall@4=0.6631071305545987
+doc_recall@20=0.7747158112297623
+page_hit@4=1558
+doc_hit@4=1925
+```
+
 Environment reset:
 
 ```bash
@@ -608,7 +627,7 @@ unset HF_HOME HF_DATASETS_CACHE HUGGINGFACE_HUB_CACHE HF_HUB_CACHE TRANSFORMERS_
 source dude/env_hpc.sh
 ```
 
-Next run SPLADE, then `denseheavy125_medium_both`. Full commands are in `dude/README.md` and `DATASET_WORKFLOWS.md`.
+Next run `denseheavy125_medium_both`. Full commands are in `dude/README.md` and `DATASET_WORKFLOWS.md`.
 
 ## SciEGQA Targeted Sweep Runner
 

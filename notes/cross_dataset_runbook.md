@@ -52,7 +52,7 @@ This corresponds to the row we call `denseheavy125_medium_both`. ViDoSeek has a 
 | ViDoSeek | Prepared, embedded, plain_top224, SPLADE, sweep, and Graph-PPR results exist. | None unless rerunning for reproducibility. |
 | OpenDocVQA | Full OCR-backed Graph-PPR completed. Full-dev no-support `pairwise_content_posterior` was negative: page hit@4 `26173 -> 22592`, net `-3581`. | Keep Graph-PPR as the full-dev result; use content posterior only as a hard-subset diagnostic/rescue component. |
 | MMLongBench DocQA | Prepared: 708 docs, 30,917 pages, 14,466 QAs, 19 missing gold pages; embedding job was submitted. | Check embedding completion, then index, dense retrieval, plain_top224, SPLADE, Graph-PPR. |
-| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. Dense baseline and plain_top224 retrieval are complete: page@4 `0.5720`, doc@4 `0.6507` after plain_top224. | Run SPLADE, then Graph-PPR. |
+| DUDE | Prepared with `Amazon_original`; OCR sanity passed: 4,020/4,086 nonempty pages, 66 empty, 0 missing images. Dense baseline, plain_top224, and SPLADE/doc-RRF are complete. SPLADE/doc-RRF improves doc@4 to `0.6631` but lowers page@4 to `0.5312`. | Run Graph-PPR. |
 
 ## Common Sanity Checks
 
@@ -761,18 +761,33 @@ doc_hit@4=1889
 improved_doc_rank_count=781
 ```
 
-Run SPLADE next:
+Observed SPLADE/doc-RRF:
+
+```text
+n_qids=2903
+page_recall@4=0.5311861292915375
+page_recall@20=0.6180139319477934
+doc_recall@4=0.6631071305545987
+doc_recall@20=0.7747158112297623
+page_hit@4=1558
+doc_hit@4=1925
+```
+
+Run Graph-PPR next:
 
 ```bash
 DATA_NAME=dude \
 DATA_ROOT="$LOCAL_DATA_DIR/dude" \
 DENSE_PRED="$LOCAL_OUTPUT_DIR/dude/plain_top224_ret1000_prediction.json" \
-OUT_DIR="$LOCAL_OUTPUT_DIR/dude/doc_rrf_plain_top224_splade" \
+SPARSE_PRED="$LOCAL_OUTPUT_DIR/dude/doc_rrf_plain_top224_splade/dude_splade_ret1000.prediction.json" \
+OUT_DIR="$LOCAL_OUTPUT_DIR/dude/graph_ppr_plain_top224_splade" \
+GRAPH_PROFILE=page_rank_probe \
+GRAPH_LABEL="dude_denseheavy125_medium_both" \
+FINAL_TOP_PAGES=1000 \
+PER_DOC_PAGE_LIMIT=0 \
 DENSE_WEIGHT=1.25 \
 SPARSE_WEIGHT=0.75 \
-RRF_K=10 \
-SPLADE_DEVICE=auto \
-bash scripts/run_external_doc_rrf_pipeline.sh
+bash scripts/run_external_graph_ppr_pipeline.sh
 ```
 
 Then follow the standard page-labeled pipeline with:
