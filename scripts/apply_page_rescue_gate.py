@@ -233,6 +233,16 @@ def parse_args() -> argparse.Namespace:
         help="Reject if a promoted page has no extractable headings when heading checks are active.",
     )
     parser.add_argument(
+        "--query-block-regex",
+        action="append",
+        default=[],
+        help=(
+            "Optional regex over the question. When any pattern matches and the candidate "
+            "would promote a page, reject the rescue. Repeatable. This is useful for "
+            "abstaining on query types where heading evidence is structurally unreliable."
+        ),
+    )
+    parser.add_argument(
         "--mode",
         choices=["swap_promoted", "use_candidate"],
         default="swap_promoted",
@@ -514,6 +524,16 @@ def heading_checks_enabled(args: argparse.Namespace, heading_catalog: dict[str, 
         or args.heading_min_score_advantage is not None
         or bool(args.heading_reject_missing_promoted)
     )
+
+
+def question_block_match(question: str, patterns: list[str]) -> str | None:
+    for pattern in patterns:
+        raw_pattern = str(pattern or "").strip()
+        if not raw_pattern:
+            continue
+        if re.search(raw_pattern, question or ""):
+            return raw_pattern
+    return None
 
 
 def heading_compare_pages(base_top_pages: list[str], uid: str, args: argparse.Namespace) -> list[str]:
@@ -965,6 +985,24 @@ def select_promotions(
     if not candidate_promotions:
         decision["selection_reason"] = "no_candidate_promotions"
         return decision
+    blocked_by_query = question_block_match(
+        str(base_row.get("question", "")),
+        list(args.query_block_regex or []),
+    )
+    if blocked_by_query is not None:
+        decision["selection_reason"] = "query_block_regex"
+        decision["query_block_regex"] = blocked_by_query
+        decision["rejected_promoted_pages"] = [
+            {
+                "page_uid": uid,
+                "candidate_rank": candidate_page_rank_by_uid.get(uid),
+                "base_rank": base_page_rank_by_uid.get(uid),
+                "reject_reason": "query_block_regex",
+                "query_block_regex": blocked_by_query,
+            }
+            for uid in candidate_promotions
+        ]
+        return decision
 
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
@@ -1090,6 +1128,7 @@ def build_output_row(
         "heading_compare_base_top_k": int(args.heading_compare_base_top_k),
         "heading_compare_mode": str(args.heading_compare_mode),
         "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
+        "query_block_regex": list(args.query_block_regex or []),
         "mode": str(args.mode),
         "insert_position": int(args.insert_position),
         "max_promotions": int(args.max_promotions),
@@ -1227,6 +1266,7 @@ def summarize_cases(
             "heading_compare_base_top_k": int(args.heading_compare_base_top_k),
             "heading_compare_mode": str(args.heading_compare_mode),
             "heading_reject_missing_promoted": bool(args.heading_reject_missing_promoted),
+            "query_block_regex": list(args.query_block_regex or []),
             "mode": str(args.mode),
             "insert_position": int(args.insert_position),
             "max_promotions": int(args.max_promotions),
