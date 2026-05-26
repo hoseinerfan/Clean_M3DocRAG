@@ -60,9 +60,10 @@ DATASETS: tuple[DatasetSpec, ...] = (
             ArtifactSpec(
                 "sparse_pred",
                 "M3DOCVQA_SPARSE_PRED",
-                ("*splade*.prediction.json",),
+                ("mmqa_dev_splade.prediction.json", "*splade*.prediction.json"),
                 required_terms=("mmqa", "splade"),
-                preferred_terms=("m3docvqa_splade_mmqa_dev",),
+                preferred_terms=("m3docvqa_splade_mmqa_dev", "mmqa_dev_splade.prediction.json"),
+                reject_terms=("graph_ppr", "sourceablate", "no_splade", "fulldev"),
             ),
             ArtifactSpec(
                 "page_text_jsonl",
