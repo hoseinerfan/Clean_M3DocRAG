@@ -480,14 +480,55 @@ def stats_to_dict(stats: ClusterStats, args: argparse.Namespace) -> dict[str, An
 
 
 def cluster_is_eligible(stats: ClusterStats, args: argparse.Namespace) -> bool:
+    return cluster_eligibility_reason(stats, args) == "eligible"
+
+
+def cluster_eligibility_reason(stats: ClusterStats, args: argparse.Namespace) -> str:
     if stats.n < int(args.min_cluster_n):
-        return False
+        return "cluster_n_below_min"
     page_score, doc_score = score_stats(stats, args)
     if page_score <= 0:
-        return False
+        return "page_score_nonpositive"
     if args.doc_policy == "nonnegative" and doc_score < 0:
-        return False
-    return True
+        return "doc_score_negative"
+    return "eligible"
+
+
+def summarize_examples_by_candidate(
+    examples_by_candidate: dict[str, list[ClusterExample]],
+) -> dict[str, Any]:
+    summary: dict[str, Any] = {}
+    for candidate_label, examples in sorted(examples_by_candidate.items()):
+        run_buckets: dict[str, list[ClusterExample]] = defaultdict(list)
+        for example in examples:
+            run_buckets[example.run_label].append(example)
+
+        def summarize_bucket(bucket: list[ClusterExample]) -> dict[str, Any]:
+            movement_counts: Counter[str] = Counter(example.movement for example in bucket)
+            doc_delta_counts: Counter[str] = Counter(
+                "doc_recovered"
+                if example.doc_delta > 0
+                else "doc_lost"
+                if example.doc_delta < 0
+                else "doc_unchanged"
+                for example in bucket
+            )
+            return {
+                "n": len(bucket),
+                "page_delta_sum": int(sum(example.page_delta for example in bucket)),
+                "doc_delta_sum": int(sum(example.doc_delta for example in bucket)),
+                "movement_counts": dict(sorted(movement_counts.items())),
+                "doc_delta_counts": dict(sorted(doc_delta_counts.items())),
+            }
+
+        summary[candidate_label] = {
+            "overall": summarize_bucket(examples),
+            "by_run": {
+                run_label: summarize_bucket(bucket)
+                for run_label, bucket in sorted(run_buckets.items())
+            },
+        }
+    return summary
 
 
 def load_all(args: argparse.Namespace) -> tuple[
@@ -606,9 +647,14 @@ def folds_for_examples(
 
 def model_to_report(model: ClusterModel, args: argparse.Namespace) -> dict[str, Any]:
     cluster_rows = []
+    eligibility_counts: Counter[str] = Counter()
     for cluster_id, stats in sorted(model.stats_by_cluster.items()):
+        eligibility_reason = cluster_eligibility_reason(stats, args)
+        eligibility_counts[eligibility_reason] += 1
         row = {"cluster": cluster_id}
         row.update(stats_to_dict(stats, args))
+        row["eligible"] = eligibility_reason == "eligible"
+        row["eligibility_reason"] = eligibility_reason
         cluster_rows.append(row)
     cluster_rows.sort(key=lambda row: (row["page_delta_score"], row["n"]), reverse=True)
     return {
@@ -619,6 +665,8 @@ def model_to_report(model: ClusterModel, args: argparse.Namespace) -> dict[str, 
         "feature_count": len(model.scaler.feature_names),
         "feature_names": model.scaler.feature_names,
         "bic_by_k": {str(k): value for k, value in model.bic_by_k.items()},
+        "eligible_cluster_count": int(eligibility_counts.get("eligible", 0)),
+        "cluster_eligibility_counts": dict(sorted(eligibility_counts.items())),
         "clusters": cluster_rows,
     }
 
@@ -642,6 +690,7 @@ def run_router(
     selected_meta_by_run: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     fold_reports: list[dict[str, Any]] = []
     model_reports_by_fold: dict[str, dict[str, Any]] = {}
+    routing_diagnostics_by_fold: dict[str, Any] = {}
 
     for fold_label, heldout_keys in folds:
         models: dict[str, ClusterModel] = {}
@@ -661,6 +710,8 @@ def run_router(
 
         routed_fold: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
         selected_fold: dict[str, dict[str, str]] = defaultdict(dict)
+        reason_counts_by_run: dict[str, Counter[str]] = defaultdict(Counter)
+        candidate_reason_counts_by_run: dict[str, dict[str, Counter[str]]] = defaultdict(lambda: defaultdict(Counter))
         for run_label, gold in gold_by_run.items():
             base = base_by_run[run_label]
             for qid in sorted(set(gold) & set(base)):
@@ -677,14 +728,22 @@ def run_router(
                 }
                 for candidate_label, candidate in candidates_by_run.get(run_label, {}).items():
                     if qid not in candidate:
+                        candidate_reason_counts_by_run[run_label][candidate_label]["candidate_missing_qid"] += 1
                         continue
                     model = models.get(candidate_label)
                     example = example_lookup.get((candidate_label, run_label, qid))
                     if model is None or example is None:
+                        reason = "no_model" if model is None else "no_example"
+                        candidate_reason_counts_by_run[run_label][candidate_label][reason] += 1
                         continue
                     cluster_id = cluster_id_for_example(model, example)
                     stats = model.stats_by_cluster.get(cluster_id)
-                    if stats is None or not cluster_is_eligible(stats, args):
+                    if stats is None:
+                        candidate_reason_counts_by_run[run_label][candidate_label]["no_cluster_stats"] += 1
+                        continue
+                    eligibility_reason = cluster_eligibility_reason(stats, args)
+                    candidate_reason_counts_by_run[run_label][candidate_label][eligibility_reason] += 1
+                    if eligibility_reason != "eligible":
                         continue
                     page_score, _doc_score = score_stats(stats, args)
                     if page_score > best_score:
@@ -697,6 +756,9 @@ def run_router(
                             "cluster_stats": stats_to_dict(stats, args),
                         }
                 selected_fold[run_label][qid] = best_label
+                reason_counts_by_run[run_label][
+                    f"selected_{best_label}" if best_label != BASE_LABEL else "selected_base"
+                ] += 1
                 selected_meta_by_run[run_label][qid] = best_meta
                 routed_fold[run_label][qid] = (
                     base[qid]
@@ -717,6 +779,19 @@ def run_router(
             routed_by_run[run_label].update(routed)
             selected_by_run[run_label].update(selected_fold[run_label])
         fold_reports.append({"fold": fold_label, "runs": run_summaries})
+        routing_diagnostics_by_fold[fold_label] = {
+            "selection_reason_counts_by_run": {
+                run_label: dict(sorted(counter.items()))
+                for run_label, counter in sorted(reason_counts_by_run.items())
+            },
+            "candidate_reason_counts_by_run": {
+                run_label: {
+                    candidate_label: dict(sorted(counter.items()))
+                    for candidate_label, counter in sorted(candidate_counters.items())
+                }
+                for run_label, candidate_counters in sorted(candidate_reason_counts_by_run.items())
+            },
+        }
 
     final_summaries = {}
     for run_label, routed in routed_by_run.items():
@@ -731,6 +806,7 @@ def run_router(
     return {
         "folds": fold_reports,
         "models": model_reports_by_fold,
+        "routing_diagnostics": routing_diagnostics_by_fold,
         "final_summaries": final_summaries,
         "routed_predictions": routed_by_run,
         "selected": selected_by_run,
@@ -753,6 +829,29 @@ def render_md(report: dict[str, Any]) -> str:
     lines.append("")
     lines.append("Excluded non-observable case-field patterns: " + ", ".join(f"`{x}`" for x in NON_OBSERVABLE_CASE_PATTERNS) + ".")
     lines.append("")
+    candidate_input_summaries = report.get("candidate_input_summaries", {})
+    if candidate_input_summaries:
+        lines.append("## Candidate Input Signal")
+        lines.append("")
+        headers = ["candidate", "scope", "n", "page_delta", "doc_delta", "movement", "doc_delta_counts"]
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("| " + " | ".join(["---"] * len(headers)) + " |")
+        for candidate_label, candidate_summary in sorted(candidate_input_summaries.items()):
+            for scope, row in [("overall", candidate_summary.get("overall", {}))] + [
+                (f"run:{run_label}", run_summary)
+                for run_label, run_summary in sorted(candidate_summary.get("by_run", {}).items())
+            ]:
+                values = [
+                    candidate_label,
+                    scope,
+                    row.get("n", 0),
+                    row.get("page_delta_sum", 0),
+                    row.get("doc_delta_sum", 0),
+                    json.dumps(row.get("movement_counts", {}), sort_keys=True),
+                    json.dumps(row.get("doc_delta_counts", {}), sort_keys=True),
+                ]
+                lines.append("| " + " | ".join(str(value) for value in values) + " |")
+        lines.append("")
     lines.append("## Final Cross-Validated Summary")
     lines.append("")
     headers = ["run", "n", f"base_hit@{hit_k}", f"routed_hit@{hit_k}", "recovered", "lost", "net", "selections"]
@@ -776,6 +875,16 @@ def render_md(report: dict[str, Any]) -> str:
     for fold_label, models in sorted(report["models"].items()):
         lines.append(f"### {fold_label}")
         lines.append("")
+        fold_diagnostics = report.get("routing_diagnostics", {}).get(fold_label, {})
+        if fold_diagnostics:
+            lines.append(
+                "Selection counts: "
+                + json.dumps(
+                    fold_diagnostics.get("selection_reason_counts_by_run", {}),
+                    sort_keys=True,
+                )
+            )
+            lines.append("")
         if not models:
             lines.append("No trainable candidate models.")
             lines.append("")
@@ -785,7 +894,12 @@ def render_md(report: dict[str, Any]) -> str:
             lines.append("")
             lines.append(
                 f"selected_k: `{model_report['selected_k']}`, train_n: `{model_report['train_n']}`, "
-                f"feature_count: `{model_report['feature_count']}`"
+                f"feature_count: `{model_report['feature_count']}`, "
+                f"eligible_clusters: `{model_report.get('eligible_cluster_count', 0)}`"
+            )
+            lines.append(
+                "cluster eligibility: "
+                + json.dumps(model_report.get("cluster_eligibility_counts", {}), sort_keys=True)
             )
             lines.append("")
             cluster_headers = [
@@ -796,6 +910,8 @@ def render_md(report: dict[str, Any]) -> str:
                 "page_score",
                 "doc_mean",
                 "doc_score",
+                "eligible",
+                "reason",
                 "movement",
             ]
             lines.append("| " + " | ".join(cluster_headers) + " |")
@@ -809,6 +925,8 @@ def render_md(report: dict[str, Any]) -> str:
                     f"{row['page_delta_score']:.4f}",
                     f"{row['doc_delta_mean']:.4f}",
                     f"{row['doc_delta_score']:.4f}",
+                    row.get("eligible", False),
+                    row.get("eligibility_reason", ""),
                     json.dumps(row["movement_counts"], sort_keys=True),
                 ]
                 lines.append("| " + " | ".join(str(value) for value in values) + " |")
@@ -829,7 +947,9 @@ def main() -> None:
     serializable_report = {
         "folds": report["folds"],
         "models": report["models"],
+        "routing_diagnostics": report["routing_diagnostics"],
         "final_summaries": report["final_summaries"],
+        "candidate_input_summaries": summarize_examples_by_candidate(examples_by_candidate),
         "hit_k": int(args.hit_k),
         "cv_mode": str(args.cv_mode),
         "run_weighting": str(args.run_weighting),
