@@ -22,6 +22,10 @@ Purpose: keep a short, updateable MMQA scoreboard with the exact tables, configs
   - page-preserving Graph-PPR for datasets with exact gold page labels
   - current single general profile: `denseheavy125_medium_both`
   - use this same frozen config in the tables; if a dataset has no recorded value for this config yet, write `N/A`
+- `Safe Heading/Bodyguard Gate`
+  - precision-oriented rescue layer on top of heading-augmented graph views
+  - accepts only narrow rank-window page promotions with multi-view heading support, displaced-boundary heading comparison, layout-query abstention, and body-evidence guard
+  - report as a conservative post-processing gate, not as a global reranker
 
 ## Table A: Doc Hit@k
 
@@ -114,7 +118,33 @@ Interpretation:
 - MMLongBench DocQA now has a converted page-labeled split, but retrieval numbers are not available until embeddings, dense retrieval, `plain_top224`, SPLADE, and Graph-PPR finish.
 - DUDE is prepared and now has dense baseline, `plain_top224`, SPLADE/doc-RRF, and Graph-PPR results. Graph-PPR is best on DUDE at page@4/page@20 and doc@4/doc@20.
 
-## Table D: Dataset Run Status
+## Table D: Safe Heading/Bodyguard Gate
+
+These numbers are page hit counts at `k=4`, not average recall. The gate is intentionally conservative; zero-loss behavior is more important than large acceptance.
+
+| Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
+| SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
+| ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
+
+Safe-gate artifacts:
+
+- MMDocIR summary:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json`
+- SciEGQA-Bench summary:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json`
+- ViDoSeek summary:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json`
+
+Pending safe-gate evaluation targets:
+
+```bash
+DATASETS="m3docvqa dude vidore" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+## Table E: Dataset Run Status
 
 | Dataset | Prepared? | `plain_top224` | SPLADE text source | Graph-PPR page-labeled result | Next needed action |
 | --- | --- | --- | --- | --- | --- |

@@ -647,6 +647,44 @@ source dude/env_hpc.sh
 
 DUDE is complete through the frozen `denseheavy125_medium_both` page-labeled Graph-PPR config.
 
+## Safe Heading/Bodyguard Gate Status
+
+Current method name: **Boundary-Aware Multi-View Heading Rescue Gate**.
+
+Use this as a conservative post-processing/rescue layer, not as the final global reranker. It only swaps a promoted page into the top 4 when:
+
+- the candidate promotes a page from a narrow rescue window;
+- the promoted document is already in the base top-4 documents;
+- multiple heading views support the promoted page;
+- the promoted page beats the displaced rank-boundary page by heading score;
+- the promoted page passes a body-evidence guard;
+- the query is not a layout-sensitive row/column/right/left query.
+
+Validated safe-gate results so far:
+
+| Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
+| SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
+| ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
+
+Artifact paths:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json
+```
+
+Runner for next targets:
+
+```bash
+DATASETS="m3docvqa dude vidore" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+Next evaluation targets are M3DocVQA, DUDE, and ViDoRe. The runner expects `plain_top224` and SPLADE predictions to exist first; if any prerequisite is missing, it prints the missing path and stops.
+
 ## SciEGQA Targeted Sweep Runner
 
 A ready-to-run SciEGQA sweep is available:

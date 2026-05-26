@@ -609,6 +609,33 @@ Short label: `denseheavy125_medium_both`.
 
 Use `denseheavy125_medium_both` as the current frozen single page-labeled config. ViDoSeek's best individual row is `denseheavy150_m3best_pagepreserve`, but the `1.25/0.75 + medium_both` setting is the best common setting across SciEGQA, MMDocIR, ViDoRe V3, and OpenDocVQA and remains close on ViDoSeek. Do not claim universal superiority at every metric; report page@1 separately and keep `plain_top224` as the required baseline.
 
+## Safe Heading/Bodyguard Rescue Gate
+
+This is the frozen precision-oriented rescue layer on top of the heading-augmented graph views. It is not a global reranker. It only accepts narrow rank-window promotions when the promoted page is supported by multiple heading views, beats the displaced boundary page by heading score, and passes a body-evidence guard. It also abstains on layout-sensitive queries such as row/column/right/left questions.
+
+Current validated runs:
+
+| Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects | summary artifact |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json` |
+| SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
+| ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json` |
+
+Interpretation:
+
+- MMDocIR is the strongest positive-control result: the raw heading candidate is slightly worse than base at page hit@4, but the gate extracts 3 additional hits with zero losses.
+- SciEGQA-Bench is a useful negative control: the raw heading candidate improves page hit@4, but the safe gate abstains enough to preserve the baseline with zero losses.
+- ViDoSeek shows that the body guard and page-0 abstention remove the observed losses while preserving a positive net gain.
+
+Runner for additional datasets:
+
+```bash
+DATASETS="m3docvqa dude vidore" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+This helper currently targets M3DocVQA, DUDE, and ViDoRe after their `plain_top224` and SPLADE artifacts exist. It writes per-dataset `*_safe_gate_bodyguard.summary.json`, `.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory.
+
 Limitation report / failure taxonomy audit for the frozen graph outputs:
 
 ```bash
