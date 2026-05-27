@@ -667,6 +667,7 @@ Validated safe-gate results so far:
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
+| ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
 | ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 |
 
@@ -676,6 +677,7 @@ Artifact paths:
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/heading_breadcrumb_text_source_ablation/vidore_safe_gate_bodyguard.summary.json
 ```
@@ -686,6 +688,13 @@ ViDoRe V3 note: the text-source Markdown variant preparation produced `0` outlin
 `0` heuristic heading lines, and `0` strict heuristic heading lines. Consequently, the full,
 heuristic-only, and strict heading graph outputs are identical to the no-heading control; the gate
 accepts `0` promotions because there is no heading signal to verify.
+
+ViDoSeek PyMuPDF4LLM note: the exact-page backend comparison completed despite recoverable MuPDF
+syntax/JPEG warnings; its extraction summary reports `backend_error_doc_count=0` and
+`unmatched_doc_count=0`. It produces fewer heading pages than native (`3,346` versus `4,342`),
+and its direct full-heading output is weaker at page hit@4 (`1,019` versus `1,033`), but the
+bodyguard/page-0 gate still returns the same safe `1,029` hits (`+6`, `0` lost). Treat this as
+evidence that the gate is robust to an alternative Markdown extractor, not as an extractor gain.
 
 Runner for reproducing or extending the M3DocVQA diagnostic:
 
@@ -768,24 +777,17 @@ run, the PyMuPDF4LLM proxy was negative (`43` to `42`, `1` recovered and `2` los
 native proxy only if that synthetic diagnostic is still needed; the exact-page ViDoSeek test is
 the more meaningful next comparison.
 
-The next backend test should use an exact-page dataset rather than another M3DocVQA proxy. The
-selected-dataset runner now supports `PDF_MARKDOWN_BACKEND=pymupdf4llm DATASETS="vidoseek"` and
-`DATASETS="sciegqa"`. Start with ViDoSeek because its native safe gate is positive and loss-free
-(`+6` at page hit@4) and its `5,349` pages keep extraction inexpensive. The ViDoSeek runner
-preserves the frozen page-0 abstention rule and writes:
+The first exact-page backend test has completed on ViDoSeek. The selected-dataset runner also
+supports `PDF_MARKDOWN_BACKEND=pymupdf4llm DATASETS="sciegqa"` if a second exact-page extraction
+transfer check is needed. ViDoSeek's completed artifact is:
 
 ```text
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json
 ```
 
-```bash
-PDF_MARKDOWN_FORCE_REBUILD=1 \
-PDF_MARKDOWN_BACKEND=pymupdf4llm \
-SAFE_GATE_PROFILE=boundary \
-RUN_GOLD_RANK_AUDIT=1 \
-DATASETS="vidoseek" \
-bash examples/run_safe_heading_gate_selected_datasets.sh
-```
+Use SciEGQA next rather than repeating ViDoSeek; its native result is a zero-loss abstention
+despite a beneficial ungated heading candidate, so it tests whether the guard behaves consistently
+with an alternative extractor.
 
 Alternative M3DocVQA Markdown extraction experiment:
 

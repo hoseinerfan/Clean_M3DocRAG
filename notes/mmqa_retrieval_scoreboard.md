@@ -128,6 +128,7 @@ These numbers are page hit counts at `k=4`, not average recall. The gate is inte
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
+| ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
 | ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 |
 
@@ -139,6 +140,8 @@ Safe-gate artifacts:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json`
 - ViDoSeek summary:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json`
+- ViDoSeek PyMuPDF4LLM summary:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json`
 - DUDE summary:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json`
 - ViDoRe V3 summary:
@@ -211,15 +214,22 @@ computed before this aligned native rerun and is stale. The PyMuPDF4LLM proxy ru
 within its own run (`43` to `42`, `1` recovered and `2` lost), but a new native proxy run is
 required before making any paired proxy comparison.
 
+ViDoSeek provides the exact-page backend check that M3DocVQA cannot. PyMuPDF4LLM conversion
+completed with `0` failed or unmatched documents, but produces fewer heading pages than native
+Markdown (`3,346` versus `4,342`) and a weaker direct full-heading candidate at page hit@4
+(`1,019` versus `1,033`). Its gated result ties native at `1,029` page hits with `6` recovered
+and `0` lost. This is a successful robustness check for the gate, not evidence that
+PyMuPDF4LLM should replace the native extraction backend.
+
 ## Table E: Dataset Run Status
 
 | Dataset | Prepared? | `plain_top224` | SPLADE text source | Graph-PPR page-labeled result | Next needed action |
 | --- | --- | --- | --- | --- | --- |
 | M3DocVQA/MMQA | yes | yes | exported MMQA page text | aligned native/PyMuPDF4LLM document-only comparison complete; no true page labels | use downstream VQA for promotion utility; use ViDoSeek/SciEGQA for exact-page backend testing |
 | MMDocIR | yes | yes | manifest/PDF text | yes | none |
-| SciEGQA-Bench | yes | yes | PDF text | yes | none |
+| SciEGQA-Bench | yes | yes | PDF text | yes | run PyMuPDF4LLM exact-page backend ablation if another extraction transfer check is needed |
 | ViDoRe V3 | yes | yes | manifest/PDF text | yes | none for heading gate; text-derived Markdown has zero headings, so current gate is a recorded no-op |
-| ViDoSeek | yes | yes | PDF text | yes | none |
+| ViDoSeek | yes | yes | PDF text | native and PyMuPDF4LLM exact-page safe-gate results complete | retain native Markdown as primary; PyMuPDF4LLM ties gated output with weaker direct headings |
 | OpenDocVQA | yes | yes | OCR-backed page text | yes | keep Graph-PPR as full-dev result; unconditional `pairwise_content_posterior` was negative |
 | MMLongBench DocQA | yes | no | `page_text_list` in manifest | no | wait for embeddings, then run dense retrieval, `plain_top224`, SPLADE, and Graph-PPR |
 | DUDE | yes | yes | DUDE OCR in manifest | yes | none |

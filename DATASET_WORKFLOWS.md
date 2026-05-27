@@ -620,6 +620,7 @@ Current validated runs:
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json` |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json` |
+| ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json` |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json` |
 | ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/heading_breadcrumb_text_source_ablation/vidore_safe_gate_bodyguard.summary.json` |
 
@@ -628,6 +629,10 @@ Interpretation:
 - MMDocIR is the strongest positive-control result: the raw heading candidate is slightly worse than base at page hit@4, but the gate extracts 3 additional hits with zero losses.
 - SciEGQA-Bench is a useful negative control: the raw heading candidate improves page hit@4, but the safe gate abstains enough to preserve the baseline with zero losses.
 - ViDoSeek shows that the body guard and page-0 abstention remove the observed losses while preserving a positive net gain.
+- ViDoSeek PyMuPDF4LLM is a completed exact-page backend ablation. It recovers the same `+6`
+  zero-loss final result as native Markdown, but its direct candidate is weaker (`1019` rather
+  than `1033` page hits at `@4`) and it accepts more promotions (`51` rather than `45`).
+  Native Markdown remains the primary ViDoSeek source.
 - DUDE is a negative/neutral transfer case: the unconstrained gate lost one page hit because a cross-document annual-report heading looked better than a near-empty gold cover page. Requiring promoted documents to be base doc rank 1 makes the gate safely abstain (`0` net, `0` lost).
 - ViDoRe V3 is a heading-unavailable transfer case: `doc_pages_dev` text produced `0` outline/heuristic/strict heading lines, so full/heuristic/strict graph views were identical to the no-heading control and the safe gate had no heading evidence to accept promotions.
 
@@ -749,29 +754,18 @@ proxy is negative within its own run (`43` to `42` synthetic page hits at `@4`, 
 
 Page-labeled PyMuPDF4LLM comparison:
 
-Use ViDoSeek first. It has exact gold pages, a positive native safe-gate result (`+6`, `0` lost),
-and only `5,349` pages. The runner keeps the ViDoSeek page-0 abstention rule and writes the
-alternative extraction/results under a separate `_pymupdf4llm_source_ablation` directory.
+The ViDoSeek exact-page test has completed successfully. MuPDF emitted malformed-content warnings
+during conversion, but the export summary reports `backend_error_doc_count=0` and
+`unmatched_doc_count=0`.
 
-```bash
-cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
-git pull --rebase origin codex/mmdocir-hpc-workflow
-source hpc_vital_paths.generated.env
-"$PWD/env/bin/python" -m pip install --force-reinstall "pymupdf4llm==0.3.4"
+| ViDoSeek Markdown source | heading pages | raw heading lines | strict heading lines | direct full page hit@4 | direct strict page hit@4 | gated page hit@4 | recovered | lost | net |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| native PyMuPDF | 4,342 | 12,362 | 9,734 | 1,033 | 1,034 | 1,029 | 6 | 0 | +6 |
+| `pymupdf4llm==0.3.4` | 3,346 | 4,958 | 3,865 | 1,019 | 1,020 | 1,029 | 6 | 0 | +6 |
 
-PDF_MARKDOWN_FORCE_REBUILD=1 \
-PDF_MARKDOWN_BACKEND=pymupdf4llm \
-SAFE_GATE_PROFILE=boundary \
-RUN_GOLD_RANK_AUDIT=1 \
-DATASETS="vidoseek" \
-bash examples/run_safe_heading_gate_selected_datasets.sh
-```
-
-Expected ViDoSeek summary:
-
-```text
-/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json
-```
+PyMuPDF4LLM produces substantially fewer heading-bearing pages and weaker direct heading
+rankings, then reaches the same final result only after the conservative gate. It is therefore
+not an improvement over native Markdown on ViDoSeek.
 
 SciEGQA-Bench is a useful second exact-page test because the native safe gate was a safe
 abstention (`0` net, `0` lost) even though the unguarded heading candidate improved:
