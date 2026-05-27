@@ -12,6 +12,7 @@ set -euo pipefail
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir vidoseek sciegqa dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   NATIVE_CODEGUARD_ABLATION=1 SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   HIT_K=8 SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir" bash examples/run_safe_heading_gate_selected_datasets.sh
+#   HIT_K=8 SAFE_GATE_PROFILE=evidenceguard_ppr RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir sciegqa vidoseek dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   VIDOSEEK_REJECT_PROMOTED_PAGE_IDX=0 DATASETS="vidoseek" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   DUDE_PROMOTED_DOC_MAX_BASE_RANK=1 DATASETS="dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #
@@ -34,6 +35,7 @@ HIT_K="${HIT_K:-4}"
 INSERT_POSITION="${INSERT_POSITION:-$HIT_K}"
 MAX_PROMOTIONS="${MAX_PROMOTIONS:-1}"
 RUN_GOLD_RANK_AUDIT="${RUN_GOLD_RANK_AUDIT:-0}"
+REQUIRE_PROMOTED_DOC_IN_BASE_TOPK="${REQUIRE_PROMOTED_DOC_IN_BASE_TOPK:-}"
 REJECT_PROMOTED_PAGE_IDX="${REJECT_PROMOTED_PAGE_IDX:-}"
 HPC_PATH_ENV="${HPC_PATH_ENV:-}"
 PDF_MARKDOWN_BACKEND="${PDF_MARKDOWN_BACKEND:-native}"
@@ -93,6 +95,17 @@ case "$SAFE_GATE_PROFILE" in
     MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-$MIN_CONSERVATIVE_OVERLAP}"
     SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-$HIT_K}"
     MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-$SUPPORT_PREDICTION_COUNT}"
+    REQUIRE_PROMOTED_DOC_IN_BASE_TOPK="${REQUIRE_PROMOTED_DOC_IN_BASE_TOPK:-0}"
+    ;;
+  evidenceguard_ppr|boundary_topkdoc)
+    SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-evidenceguard_ppr_top${HIT_K}}"
+    CANDIDATE_RANK_MAX="${CANDIDATE_RANK_MAX:-$HIT_K}"
+    RESCUE_RANK_MIN="${RESCUE_RANK_MIN:-$BOUNDARY_RANK}"
+    RESCUE_RANK_MAX="${RESCUE_RANK_MAX:-$BOUNDARY_RANK}"
+    MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-$MIN_CONSERVATIVE_OVERLAP}"
+    SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-$HIT_K}"
+    MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-$SUPPORT_PREDICTION_COUNT}"
+    REQUIRE_PROMOTED_DOC_IN_BASE_TOPK="${REQUIRE_PROMOTED_DOC_IN_BASE_TOPK:-1}"
     ;;
   window20)
     SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-safe_window20_gate_bodyguard${HIT_K_OUTPUT_SUFFIX}}"
@@ -102,6 +115,7 @@ case "$SAFE_GATE_PROFILE" in
     MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-3}"
     SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-20}"
     MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-$SUPPORT_PREDICTION_COUNT}"
+    REQUIRE_PROMOTED_DOC_IN_BASE_TOPK="${REQUIRE_PROMOTED_DOC_IN_BASE_TOPK:-0}"
     ;;
   *)
     echo "unknown_SAFE_GATE_PROFILE: $SAFE_GATE_PROFILE" >&2
@@ -296,6 +310,9 @@ run_safe_gate() {
   for page_idx in $reject_promoted_page_idx; do
     extra_args+=(--reject-promoted-page-idx "$page_idx")
   done
+  if [[ "$REQUIRE_PROMOTED_DOC_IN_BASE_TOPK" == "1" ]]; then
+    extra_args+=(--require-promoted-doc-in-base-topk)
+  fi
 
   "$PYTHON_BIN" "$REPO_ROOT/scripts/apply_page_rescue_gate.py" \
     --base-prediction "$base_pred" \
@@ -757,7 +774,7 @@ run_vidore() {
     "$HIT_K"
 }
 
-echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND native_codeguard_ablation=$NATIVE_CODEGUARD_ABLATION output_suffix=$SAFE_GATE_OUTPUT_SUFFIX hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} min_page_overlap=$MIN_PAGE_OVERLAP support_page_rank_max=$SUPPORT_PAGE_RANK_MAX min_support_page_votes=$MIN_SUPPORT_PAGE_VOTES support_views=${SUPPORT_PREDICTION_LABELS[*]}"
+echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND native_codeguard_ablation=$NATIVE_CODEGUARD_ABLATION output_suffix=$SAFE_GATE_OUTPUT_SUFFIX hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} min_page_overlap=$MIN_PAGE_OVERLAP support_page_rank_max=$SUPPORT_PAGE_RANK_MAX min_support_page_votes=$MIN_SUPPORT_PAGE_VOTES support_views=${SUPPORT_PREDICTION_LABELS[*]} require_promoted_doc_in_base_topk=$REQUIRE_PROMOTED_DOC_IN_BASE_TOPK"
 echo "| dataset | accepted | base page@$HIT_K | candidate page@$HIT_K | gated page@$HIT_K | recovered | lost | net | body rejects |"
 echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
 

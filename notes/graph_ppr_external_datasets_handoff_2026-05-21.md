@@ -838,6 +838,23 @@ sed -n '1,260p' \
 The main report aggregates the actual boundary gate plus any completed policy variants. It also
 writes focused lost/recovered side-by-side Markdown under `output/safe_gate_top8_case_audit/`.
 
+Fixed final profile after selecting the true top-`k` document guard from policy ablations:
+
+```bash
+for k in 4 6 8 10; do
+  HIT_K=$k \
+  SAFE_GATE_PROFILE=evidenceguard_ppr \
+  RUN_GOLD_RANK_AUDIT=1 \
+  DATASETS="mmdocir sciegqa vidoseek dude" \
+  bash examples/run_safe_heading_gate_selected_datasets.sh \
+    2>&1 | tee evidenceguard_ppr_top${k}_run.log
+done
+```
+
+`SAFE_GATE_PROFILE=evidenceguard_ppr` is EvidenceGuard-PPR(`k`): rank `k+1` may be rescued into
+top-`k`, overlap must be at least `k-1`, all configured support views must vote for the promoted
+page inside top-`k`, and the promoted page's document must already be represented in base top-`k`.
+
 Completed native code-noise ablation (rejected):
 
 ```bash

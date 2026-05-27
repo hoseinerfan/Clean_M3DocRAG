@@ -670,6 +670,12 @@ document-rank cap does not require a
 page from the same document inside the base top-`k`; the policy ablation below tests that stricter
 alternative explicitly.
 
+The selected fixed method is `SAFE_GATE_PROFILE=evidenceguard_ppr`, i.e. EvidenceGuard-PPR(`k`).
+It uses the same cutoff-relative boundary rules and additionally requires true base top-`k`
+document membership: the promoted page's document must already have at least one page in the
+base top-`k`. This is the non-dataset-specific guard selected by the policy ablations. It writes
+distinct final-method artifacts with an `evidenceguard_ppr_top{k}` suffix.
+
 | `HIT_K` | candidate slot limit | allowed base rescue rank | minimum top-k overlap | default output suffix |
 |---:|---:|---:|---:|---|
 | 4 | 4 | 5 | 3 | `safe_gate_bodyguard` |
@@ -679,6 +685,19 @@ alternative explicitly.
 
 Non-default cutoffs receive a `_top{k}` output suffix so a top-8 experiment does not overwrite the
 validated top-4 artifacts.
+
+Run the fixed EvidenceGuard-PPR(`k`) profile:
+
+```bash
+for k in 4 6 8 10; do
+  HIT_K=$k \
+  SAFE_GATE_PROFILE=evidenceguard_ppr \
+  RUN_GOLD_RANK_AUDIT=1 \
+  DATASETS="mmdocir sciegqa vidoseek dude" \
+  bash examples/run_safe_heading_gate_selected_datasets.sh \
+    2>&1 | tee evidenceguard_ppr_top${k}_run.log
+done
+```
 
 Recorded safe-gate runs (selected results plus labeled audit/ablation rows):
 

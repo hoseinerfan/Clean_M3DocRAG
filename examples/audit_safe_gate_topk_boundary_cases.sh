@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Audit completed top-k boundary safe-gate outputs and any matching policy variants.
+# Audit completed top-k EvidenceGuard/boundary safe-gate outputs and matching policy variants.
 #
 # This reads existing *.summary.json / *.cases.json files only. It does not run
 # graph reranking, PDF Markdown extraction, or the gate itself.
@@ -27,7 +27,7 @@ DATASETS="${DATASETS:-mmdocir sciegqa vidoseek dude}"
 PDF_MARKDOWN_BACKEND="${PDF_MARKDOWN_BACKEND:-native}"
 POLICY_RUN_LABEL="${POLICY_RUN_LABEL:-${PDF_MARKDOWN_BACKEND}_boundary_top${HIT_K}}"
 POLICY_VARIANTS="${POLICY_VARIANTS:-control no_doc_rank_cap require_topk_doc relax_overlap relax_support combined_relaxed}"
-SIDE_BY_SIDE_VARIANTS="${SIDE_BY_SIDE_VARIANTS:-boundary policy_require_topk_doc}"
+SIDE_BY_SIDE_VARIANTS="${SIDE_BY_SIDE_VARIANTS:-evidenceguard_ppr boundary policy_require_topk_doc}"
 CASE_LIMIT="${CASE_LIMIT:-8}"
 MARKDOWN_CHARS="${MARKDOWN_CHARS:-1400}"
 REPORT_ROOT="${REPORT_ROOT:-$REPO_ROOT/output/safe_gate_top${HIT_K}_case_audit}"
@@ -98,6 +98,7 @@ add_dataset() {
   local gold="$3"
   local out_dir="$4"
 
+  add_entry "$dataset" evidenceguard_ppr "$gold" "$out_dir" "${tag}_evidenceguard_ppr_top${HIT_K}"
   add_entry "$dataset" boundary "$gold" "$out_dir" "${tag}_safe_gate_bodyguard${SAFE_GATE_SUFFIX}"
 
   local variant
