@@ -660,6 +660,20 @@ outcome as follows:
 
 This is the precision-oriented rescue layer on top of the heading-augmented graph views. It is not a global reranker. It only accepts narrow rank-window promotions when the promoted page is supported by multiple heading views, beats the displaced boundary page by heading score, and passes a body-evidence guard. It also abstains on layout-sensitive queries such as row/column/right/left questions. The default runner now uses this common gate across datasets; the previous ViDoSeek page-0 block and DUDE document-rank-1 constraint remain available only as explicit audit/reproduction switches.
 
+The `boundary` profile is cutoff-relative. For `HIT_K=k`, the candidate may introduce at most
+one page into top-`k`, and that page must have been base rank `k+1`. The default agreement guards
+also scale with the cutoff: at least `k-1` base pages remain in candidate top-`k`, support votes
+are checked within candidate top-`k`, and the promoted document must already occur in the base
+top-`k` documents.
+
+| `HIT_K` | candidate slot limit | allowed base rescue rank | minimum top-k overlap | default output suffix |
+|---:|---:|---:|---:|---|
+| 4 | 4 | 5 | 3 | `safe_gate_bodyguard` |
+| 8 | 8 | 9 | 7 | `safe_gate_bodyguard_top8` |
+
+Non-default cutoffs receive a `_top{k}` output suffix so a top-8 experiment does not overwrite the
+validated top-4 artifacts.
+
 Current validated runs:
 
 | Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects | summary artifact |
@@ -722,7 +736,9 @@ the rank-5 boundary to the base rank `5-20` window:
 - same displaced-boundary heading/body comparison
 - same multi-view support, layout-query block, optional promoted page-index block, and doc-rank gate
 
-The default profile remains `boundary`, so the validated frozen artifacts above stay reproducible.
+The default `HIT_K=4 SAFE_GATE_PROFILE=boundary` configuration remains unchanged, so the
+validated frozen artifacts above stay reproducible. Higher cutoffs use the adaptive boundary rule
+described above; `window20` remains the exploratory absolute rank-window profile.
 Set `RUN_GOLD_RANK_AUDIT=1` to also write `*.gold_rank_positions.json` and
 `*.gold_rank_positions.md` next to each output. The audit now includes first gold document ranks,
 page/doc rank bands, and a page-rank-band by doc-rank-band matrix so rank `6-20` opportunities can

@@ -687,10 +687,13 @@ DUDE is complete through the frozen `denseheavy125_medium_both` page-labeled Gra
 
 Current pipeline name: **EvidenceGuard-PPR**. Gate component: **Conservative Boundary Rescue Gate**.
 
-Use this as a conservative post-processing/rescue layer, not as the final global reranker. It only swaps a promoted page into the top 4 when:
+Use this as a conservative post-processing/rescue layer, not as the final global reranker. With
+`HIT_K=k`, it only swaps a promoted page into the top-`k` when:
 
 - the candidate promotes a page from a narrow rescue window;
-- the promoted document is already in the base top-4 documents;
+- under the `boundary` profile, that page was base rank `k+1`;
+- the candidate retains at least `k-1` base top-`k` pages;
+- the promoted document is already in the base top-`k` documents;
 - multiple heading views support the promoted page;
 - the promoted page beats the displaced rank-boundary page by heading score;
 - the promoted page passes a body-evidence guard;
@@ -699,6 +702,10 @@ Use this as a conservative post-processing/rescue layer, not as the final global
 As of the common EvidenceGuard-PPR definition, no dataset-specific page-index or document-rank
 exception is enabled by default. The ViDoSeek page-0 block and DUDE doc-rank-1 constraint below
 are retained as reproducible audit variants only.
+
+The validated results below use `HIT_K=4`, where boundary rescue means only base rank `5` can be
+promoted. For a top-8 experiment, set `HIT_K=8`; boundary rescue then permits only base rank `9`,
+requires seven retained top-8 pages, and writes `*_safe_gate_bodyguard_top8.*` artifacts.
 
 Validated safe-gate results so far:
 
@@ -766,7 +773,18 @@ bash examples/run_safe_heading_gate_selected_datasets.sh
 
 This keeps the same heading/body/layout/doc-rank safety checks but scans candidate ranks through
 20 and only promotes pages whose base rank is in `5-20`. The default profile remains `boundary`
-for reproducing the validated rank-5 artifacts. With `RUN_GOLD_RANK_AUDIT=1`, each dataset also
+with `HIT_K=4` for reproducing the validated rank-5 artifacts. The `boundary` profile adapts to a
+different cutoff, for example:
+
+```bash
+HIT_K=8 \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="mmdocir sciegqa vidoseek dude" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+With `RUN_GOLD_RANK_AUDIT=1`, each dataset also
 gets a `*.gold_rank_positions.md` report containing first gold page/doc ranks and a page-rank-band
 by doc-rank-band matrix.
 

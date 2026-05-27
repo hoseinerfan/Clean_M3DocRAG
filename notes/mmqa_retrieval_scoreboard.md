@@ -26,7 +26,8 @@ Purpose: keep a short, updateable MMQA scoreboard with the exact tables, configs
   - precision-oriented rescue layer on top of heading-augmented graph views
   - accepts only narrow rank-window page promotions with multi-view heading support, displaced-boundary heading comparison, layout-query abstention, and body-evidence guard
   - report as a conservative post-processing gate, not as a global reranker
-  - default runner profile is `boundary`; use `SAFE_GATE_PROFILE=window20` to scan candidate ranks/base ranks through 20 with the same guards
+  - default runner profile is cutoff-relative `boundary`: for `HIT_K=k`, it may rescue only base rank `k+1` into top-`k`; all recorded results below use `HIT_K=4`
+  - use `SAFE_GATE_PROFILE=window20` for the exploratory fixed rank `5-20` scan used with the recorded top-4 studies
 
 ## Table A: Doc Hit@k
 
@@ -175,6 +176,18 @@ The window profile writes `*_safe_window20_gate_bodyguard*.summary.json` plus op
 `*.gold_rank_positions.{json,md}` audits. The audit now reports first gold document ranks and
 page/doc rank-band matrices, which is the main check for whether rank `6-20` misses are
 same-document/page-local opportunities or document-retrieval failures.
+
+Adaptive boundary example:
+
+```bash
+HIT_K=8 \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="mmdocir" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+This writes `*_safe_gate_bodyguard_top8.*` and can promote only a base rank-9 page into top 8.
 
 Current M3DocVQA safe-gate input paths:
 

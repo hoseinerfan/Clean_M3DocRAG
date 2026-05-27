@@ -11,6 +11,7 @@ set -euo pipefail
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=window20 DATASETS="m3docvqa" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir vidoseek sciegqa dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   NATIVE_CODEGUARD_ABLATION=1 SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir" bash examples/run_safe_heading_gate_selected_datasets.sh
+#   HIT_K=8 SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   VIDOSEEK_REJECT_PROMOTED_PAGE_IDX=0 DATASETS="vidoseek" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   DUDE_PROMOTED_DOC_MAX_BASE_RANK=1 DATASETS="dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #
@@ -69,18 +70,30 @@ if [[ "$NATIVE_CODEGUARD_ABLATION" == "1" && "$PDF_MARKDOWN_BACKEND" != "native"
   exit 2
 fi
 
+if ! [[ "$HIT_K" =~ ^[1-9][0-9]*$ ]]; then
+  echo "invalid_HIT_K: $HIT_K (expected a positive integer)" >&2
+  exit 2
+fi
+
+BOUNDARY_RANK=$((HIT_K + 1))
+MIN_CONSERVATIVE_OVERLAP=$((HIT_K - 1))
+HIT_K_OUTPUT_SUFFIX=""
+if [[ "$HIT_K" != "4" ]]; then
+  HIT_K_OUTPUT_SUFFIX="_top${HIT_K}"
+fi
+
 case "$SAFE_GATE_PROFILE" in
   boundary)
-    SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-safe_gate_bodyguard}"
-    CANDIDATE_RANK_MAX="${CANDIDATE_RANK_MAX:-4}"
-    RESCUE_RANK_MIN="${RESCUE_RANK_MIN:-5}"
-    RESCUE_RANK_MAX="${RESCUE_RANK_MAX:-5}"
-    MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-3}"
-    SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-4}"
+    SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-safe_gate_bodyguard${HIT_K_OUTPUT_SUFFIX}}"
+    CANDIDATE_RANK_MAX="${CANDIDATE_RANK_MAX:-$HIT_K}"
+    RESCUE_RANK_MIN="${RESCUE_RANK_MIN:-$BOUNDARY_RANK}"
+    RESCUE_RANK_MAX="${RESCUE_RANK_MAX:-$BOUNDARY_RANK}"
+    MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-$MIN_CONSERVATIVE_OVERLAP}"
+    SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-$HIT_K}"
     MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-2}"
     ;;
   window20)
-    SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-safe_window20_gate_bodyguard}"
+    SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-safe_window20_gate_bodyguard${HIT_K_OUTPUT_SUFFIX}}"
     CANDIDATE_RANK_MAX="${CANDIDATE_RANK_MAX:-20}"
     RESCUE_RANK_MIN="${RESCUE_RANK_MIN:-5}"
     RESCUE_RANK_MAX="${RESCUE_RANK_MAX:-20}"
@@ -96,7 +109,7 @@ esac
 
 HEADING_COMPARE_BASE_TOP_K="${HEADING_COMPARE_BASE_TOP_K:-$HIT_K}"
 BODY_COMPARE_BASE_TOP_K="${BODY_COMPARE_BASE_TOP_K:-$HIT_K}"
-GOLD_RANK_AUDIT_BOUNDARY_RANK="${GOLD_RANK_AUDIT_BOUNDARY_RANK:-$((HIT_K + 1))}"
+GOLD_RANK_AUDIT_BOUNDARY_RANK="${GOLD_RANK_AUDIT_BOUNDARY_RANK:-$BOUNDARY_RANK}"
 
 require_file() {
   local label="$1"
@@ -271,7 +284,7 @@ run_safe_gate() {
   local heading_doc_pages="$8"
   local body_doc_pages="$9"
   local output_stem="${10}"
-  local promoted_doc_max_base_rank="${11:-4}"
+  local promoted_doc_max_base_rank="${11:-$HIT_K}"
   local reject_promoted_page_idx="${12:-$REJECT_PROMOTED_PAGE_IDX}"
   local output_prediction="$out_dir/${output_stem}.prediction.json"
   local output_summary="$out_dir/${output_stem}.summary.json"
@@ -325,7 +338,7 @@ run_safe_gate() {
     "$PYTHON_BIN" "$REPO_ROOT/scripts/analyze_m3docvqa_retrieval.py" \
       --pred "$output_prediction" \
       --gold "$gold" \
-      --recall-k 1 2 4 5 10 20 \
+      --recall-k 1 2 "$HIT_K" "$BOUNDARY_RANK" 10 20 \
       --summary-only
   elif [[ "$RUN_GOLD_RANK_AUDIT" == "1" ]]; then
     "$PYTHON_BIN" "$REPO_ROOT/scripts/audit_gold_rank_positions.py" \
@@ -421,7 +434,7 @@ run_m3docvqa() {
     "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
     "${tag}_${gate_suffix}" \
-    4
+    "$HIT_K"
 }
 
 run_dude() {
@@ -468,7 +481,7 @@ run_dude() {
     gate_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
   fi
 
-  local promoted_doc_max_base_rank="${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-4}"
+  local promoted_doc_max_base_rank="${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-$HIT_K}"
   local default_dude_suffix="$gate_suffix"
   if [[ -n "${DUDE_PROMOTED_DOC_MAX_BASE_RANK+x}" ]]; then
     default_dude_suffix="${gate_suffix}_docrank${promoted_doc_max_base_rank}"
@@ -560,7 +573,7 @@ run_mmdocir() {
     "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
     "${tag}_${gate_suffix}" \
-    4
+    "$HIT_K"
 }
 
 run_sciegqa() {
@@ -616,7 +629,7 @@ run_sciegqa() {
     "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
     "${tag}_${gate_suffix}" \
-    4
+    "$HIT_K"
 }
 
 run_vidoseek() {
@@ -681,7 +694,7 @@ run_vidoseek() {
     "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
     "${tag}_${gate_suffix}" \
-    4 \
+    "$HIT_K" \
     "$rejected_promoted_page_idx"
 }
 
@@ -739,10 +752,10 @@ run_vidore() {
     "$heading_evidence_jsonl" \
     "$doc_pages_jsonl" \
     "${tag}_${gate_suffix}" \
-    4
+    "$HIT_K"
 }
 
-echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND native_codeguard_ablation=$NATIVE_CODEGUARD_ABLATION hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} support_page_rank_max=$SUPPORT_PAGE_RANK_MAX"
+echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND native_codeguard_ablation=$NATIVE_CODEGUARD_ABLATION output_suffix=$SAFE_GATE_OUTPUT_SUFFIX hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} min_page_overlap=$MIN_PAGE_OVERLAP support_page_rank_max=$SUPPORT_PAGE_RANK_MAX"
 echo "| dataset | accepted | base page@$HIT_K | candidate page@$HIT_K | gated page@$HIT_K | recovered | lost | net | body rejects |"
 echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
 
