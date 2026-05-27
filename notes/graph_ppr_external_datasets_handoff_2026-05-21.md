@@ -693,11 +693,15 @@ Use this as a conservative post-processing/rescue layer, not as the final global
 - the candidate promotes a page from a narrow rescue window;
 - under the `boundary` profile, that page was base rank `k+1`;
 - the candidate retains at least `k-1` base top-`k` pages;
-- the promoted document is already in the base top-`k` documents;
+- the promoted document is among the first `k` distinct documents encountered in the base ranking;
 - multiple heading views support the promoted page;
 - the promoted page beats the displaced rank-boundary page by heading score;
 - the promoted page passes a body-evidence guard;
 - the query is not a layout-sensitive row/column/right/left query.
+
+The default document rule is a document-rank cap; it is not strict membership in the documents
+represented by pages inside the base top-`k` window. The gate-policy ablation below includes
+`require_topk_doc` to test that stricter interpretation.
 
 As of the common EvidenceGuard-PPR definition, no dataset-specific page-index or document-rank
 exception is enabled by default. The ViDoSeek page-0 block and DUDE doc-rank-1 constraint below
@@ -795,6 +799,28 @@ bash examples/run_safe_heading_gate_selected_datasets.sh
 With `RUN_GOLD_RANK_AUDIT=1`, each dataset also
 gets a `*.gold_rank_positions.md` report containing first gold page/doc ranks and a page-rank-band
 by doc-rank-band matrix.
+
+Gate-policy ablation using the completed top-8 graph predictions:
+
+```bash
+HIT_K=8 \
+PDF_MARKDOWN_BACKEND=native \
+DATASETS="mmdocir sciegqa vidoseek dude" \
+bash examples/run_safe_gate_policy_ablation_selected_datasets.sh \
+  2>&1 | tee safe_gate_policy_native_boundary_top8_run.log
+
+sed -n '1,240p' \
+  output/safe_gate_policy_ablation/native_boundary_top8_policy_ablation.md
+```
+
+This wrapper reuses existing graph-view predictions and changes only the gate policy. It compares
+the conservative document-rank-cap control against: no document-rank cap, true base-top-`k`
+document membership, one fewer required overlapping page, one rather than two support votes, and
+the combined relaxed policy. Every variant is written
+under a distinct `*_safe_gate_policy_native_boundary_top8_<variant>.*` stem, so it does not
+overwrite the selected `*_safe_gate_bodyguard_top8.*` output. Interpret any gains jointly at page
+and document level; a relaxed policy with new page losses is not a replacement for the
+conservative gate without case-level justification.
 
 Completed native code-noise ablation (rejected):
 

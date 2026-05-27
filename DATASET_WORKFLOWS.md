@@ -663,8 +663,10 @@ This is the precision-oriented rescue layer on top of the heading-augmented grap
 The `boundary` profile is cutoff-relative. For `HIT_K=k`, the candidate may introduce at most
 one page into top-`k`, and that page must have been base rank `k+1`. The default agreement guards
 also scale with the cutoff: at least `k-1` base pages remain in candidate top-`k`, support votes
-are checked within candidate top-`k`, and the promoted document must already occur in the base
-top-`k` documents.
+are checked within candidate top-`k`, and the promoted document must be among the first `k`
+distinct documents encountered in the base ranking. That document-rank cap does not require a
+page from the same document inside the base top-`k`; the policy ablation below tests that stricter
+alternative explicitly.
 
 | `HIT_K` | candidate slot limit | allowed base rescue rank | minimum top-k overlap | default output suffix |
 |---:|---:|---:|---:|---|
@@ -747,6 +749,28 @@ Set `RUN_GOLD_RANK_AUDIT=1` to also write `*.gold_rank_positions.json` and
 `*.gold_rank_positions.md` next to each output. The audit now includes first gold document ranks,
 page/doc rank bands, and a page-rank-band by doc-rank-band matrix so rank `6-20` opportunities can
 be separated from document-retrieval failures.
+
+Gate-policy ablation after a completed adaptive boundary run:
+
+```bash
+HIT_K=8 \
+PDF_MARKDOWN_BACKEND=native \
+DATASETS="mmdocir sciegqa vidoseek dude" \
+bash examples/run_safe_gate_policy_ablation_selected_datasets.sh \
+  2>&1 | tee safe_gate_policy_native_boundary_top8_run.log
+
+sed -n '1,240p' \
+  output/safe_gate_policy_ablation/native_boundary_top8_policy_ablation.md
+```
+
+This is a gate-only ablation: it reads the completed no-heading/full-heading/heuristic/strict
+prediction artifacts and does not regenerate Markdown or rerun Graph-PPR. It writes separate
+`*_safe_gate_policy_native_boundary_top8_<variant>.*` outputs. The six variants are `control`,
+`no_doc_rank_cap`, `require_topk_doc`, `relax_overlap`, `relax_support`, and
+`combined_relaxed`. `control` retains the existing distinct-document rank cap, while
+`require_topk_doc` is the true same-window document-membership diagnostic. Use the
+control-versus-variant page and document hit deltas together with the overlap/document/support/body
+rejection counts to decide which constraint is useful.
 
 Completed native code-noise ablation (rejected):
 

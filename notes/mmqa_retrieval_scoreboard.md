@@ -196,6 +196,20 @@ bash examples/run_safe_heading_gate_selected_datasets.sh
 
 This writes `*_safe_gate_bodyguard_top8.*` and can promote only a base rank-9 page into top 8.
 
+Pending top-8 gate-policy ablation, after the native adaptive boundary run completes:
+
+```bash
+HIT_K=8 \
+PDF_MARKDOWN_BACKEND=native \
+DATASETS="mmdocir sciegqa vidoseek dude" \
+bash examples/run_safe_gate_policy_ablation_selected_datasets.sh
+```
+
+This reads the existing graph predictions and produces
+`output/safe_gate_policy_ablation/native_boundary_top8_policy_ablation.md`, comparing the control
+document-rank cap against disabled and strict top-k-document variants plus relaxed agreement,
+without overwriting the primary gate output.
+
 Current M3DocVQA safe-gate input paths:
 
 ```text

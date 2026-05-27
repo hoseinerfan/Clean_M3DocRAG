@@ -121,6 +121,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--require-promoted-doc-in-base-topk",
+        action="store_true",
+        help=(
+            "Require the promoted page's document to already be represented by a page "
+            "inside the base top-k window. This is stricter than a base document-rank cap."
+        ),
+    )
+    parser.add_argument(
         "--max-base-score-margin",
         type=float,
         default=None,
@@ -1060,6 +1068,9 @@ def reject_promotion_reason(
             return "promoted_doc_missing_from_base_pool", detail
         if doc_rank > int(args.promoted_doc_max_base_rank):
             return "promoted_doc_after_allowed_rank", detail
+    if bool(args.require_promoted_doc_in_base_topk):
+        if doc_id not in set(docs_from_page_uids(base_top_pages)):
+            return "promoted_doc_not_in_base_topk", detail
     if args.min_candidate_score_margin is not None:
         if margin is None:
             return "candidate_score_margin_missing", detail
@@ -1379,6 +1390,7 @@ def build_output_row(
         "min_page_overlap": int(args.min_page_overlap),
         "min_doc_overlap": int(args.min_doc_overlap),
         "promoted_doc_max_base_rank": int(args.promoted_doc_max_base_rank),
+        "require_promoted_doc_in_base_topk": bool(args.require_promoted_doc_in_base_topk),
         "max_base_score_margin": args.max_base_score_margin,
         "min_candidate_score_margin": args.min_candidate_score_margin,
         "support_page_rank_max": int(args.support_page_rank_max),
@@ -1553,6 +1565,7 @@ def summarize_cases(
             "min_page_overlap": int(args.min_page_overlap),
             "min_doc_overlap": int(args.min_doc_overlap),
             "promoted_doc_max_base_rank": int(args.promoted_doc_max_base_rank),
+            "require_promoted_doc_in_base_topk": bool(args.require_promoted_doc_in_base_topk),
             "max_base_score_margin": args.max_base_score_margin,
             "min_candidate_score_margin": args.min_candidate_score_margin,
             "support_page_rank_max": int(args.support_page_rank_max),
