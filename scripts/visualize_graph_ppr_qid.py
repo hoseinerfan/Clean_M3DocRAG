@@ -51,7 +51,12 @@ def parse_args() -> argparse.Namespace:
         default=8,
         help="Dense/SPLADE source pages to include before doc filtering.",
     )
-    parser.add_argument("--max-docs", type=int, default=8)
+    parser.add_argument(
+        "--max-docs",
+        type=int,
+        default=8,
+        help="Maximum document columns to draw. Use 0 to disable the doc cap.",
+    )
     parser.add_argument("--same-doc-window", type=int, default=1)
     parser.add_argument("--output-svg", required=True)
     parser.add_argument("--output-html", default="")
@@ -186,6 +191,14 @@ def rank_maps(pages: list[dict[str, Any]]) -> tuple[dict[str, int], dict[str, in
         if doc_id not in doc_ranks:
             doc_ranks[doc_id] = len(doc_ranks) + 1
     return page_ranks, doc_ranks, scores
+
+
+def count_gold_pages(pages: list[dict[str, Any]], gold_pages: set[str]) -> int:
+    return sum(1 for page in pages if str(page["uid"]) in gold_pages)
+
+
+def count_gold_doc_pages(pages: list[dict[str, Any]], gold_docs: set[str]) -> int:
+    return sum(1 for page in pages if str(page["doc_id"]) in gold_docs)
 
 
 def gold_doc_ids(row: dict[str, Any] | None) -> set[str]:
@@ -428,9 +441,13 @@ def build_visual_payload(
             min(best_dense, best_sparse),
             doc_id,
         )
-    selected_docs = [
+    ordered_selected_docs = [
         doc_id for doc_id, _priority in sorted(doc_priority.items(), key=lambda item: item[1])
-    ][: max(1, max_docs)]
+    ]
+    if int(max_docs) > 0:
+        selected_docs = ordered_selected_docs[: int(max_docs)]
+    else:
+        selected_docs = ordered_selected_docs
     selected_doc_set = set(selected_docs)
 
     pages: dict[str, dict[str, Any]] = {}
@@ -478,6 +495,41 @@ def build_visual_payload(
             }
         )
 
+    visualized_pages = [page for doc in docs for page in doc["pages"]]
+    visualized_graph_pages = [page for page in visualized_pages if page.get("graph_rank") is not None]
+    visualized_dense_pages = [page for page in visualized_pages if page.get("dense_rank") is not None]
+    visualized_sparse_pages = [page for page in visualized_pages if page.get("sparse_rank") is not None]
+    stats = {
+        "graph_retrieved_page_count": len(graph_pages_all),
+        "graph_retrieved_doc_count": len(graph_doc_ranks),
+        "graph_retrieved_gold_page_count": count_gold_pages(graph_pages_all, gold_pages),
+        "graph_retrieved_gold_doc_page_count": count_gold_doc_pages(graph_pages_all, gold_docs),
+        "dense_retrieved_page_count": len(dense_pages_all),
+        "dense_retrieved_doc_count": len(dense_doc_ranks),
+        "dense_retrieved_gold_page_count": count_gold_pages(dense_pages_all, gold_pages),
+        "dense_retrieved_gold_doc_page_count": count_gold_doc_pages(dense_pages_all, gold_docs),
+        "sparse_retrieved_page_count": len(sparse_pages_all),
+        "sparse_retrieved_doc_count": len(sparse_doc_ranks),
+        "sparse_retrieved_gold_page_count": count_gold_pages(sparse_pages_all, gold_pages),
+        "sparse_retrieved_gold_doc_page_count": count_gold_doc_pages(sparse_pages_all, gold_docs),
+        "gold_doc_count": len(gold_docs),
+        "gold_page_count": len(gold_pages),
+        "visualized_page_count": len(visualized_pages),
+        "visualized_doc_count": len(docs),
+        "visualized_graph_page_count": len(visualized_graph_pages),
+        "visualized_dense_page_count": len(visualized_dense_pages),
+        "visualized_sparse_page_count": len(visualized_sparse_pages),
+        "visualized_gold_page_count": sum(1 for page in visualized_pages if page["is_gold_page"]),
+        "visualized_gold_doc_page_count": sum(1 for page in visualized_pages if page["is_gold_doc"]),
+        "hidden_graph_retrieved_page_count": max(
+            0,
+            len(graph_pages_all) - len(visualized_graph_pages),
+        ),
+        "graph_top_pages_requested": int(graph_top_pages),
+        "source_top_pages_requested": int(source_top_pages),
+        "max_docs_requested": int(max_docs),
+    }
+
     question = str(graph_row.get("question") or (gold_row or {}).get("question", ""))
     return {
         "qid": qid,
@@ -489,6 +541,7 @@ def build_visual_payload(
         "sparse_target_rank": sparse_target_rank,
         "gold_doc_ids": sorted(gold_docs),
         "gold_page_uids": sorted(gold_pages),
+        "stats": stats,
         "docs": docs,
     }
 
@@ -535,7 +588,16 @@ def render_svg(payload: dict[str, Any], same_doc_window: int) -> str:
         f"splade={fmt_rank(payload.get('sparse_target_rank'))}"
     )
     pieces.append(f'<text x="{margin}" y="{y + 8}" class="body muted">{html.escape(rank_line)}</text>')
-    legend_y = y + 34
+    stats = payload.get("stats", {})
+    count_line = (
+        f"graph pages={stats.get('graph_retrieved_page_count', 0)} "
+        f"(gold pages={stats.get('graph_retrieved_gold_page_count', 0)}, "
+        f"gold-doc pages={stats.get('graph_retrieved_gold_doc_page_count', 0)}); "
+        f"visualized={stats.get('visualized_page_count', 0)} pages / "
+        f"{stats.get('visualized_doc_count', 0)} docs"
+    )
+    pieces.append(f'<text x="{margin}" y="{y + 26}" class="body muted">{html.escape(count_line)}</text>')
+    legend_y = y + 54
     legend = [
         ("#ffe7a3", "gold page/doc"),
         ("#d7f4df", "graph top page"),
@@ -657,6 +719,30 @@ def render_svg(payload: dict[str, Any], same_doc_window: int) -> str:
 
 
 def render_html(payload: dict[str, Any], svg_text: str) -> str:
+    stats = payload.get("stats", {})
+    stat_rows = []
+    for key in [
+        "graph_retrieved_page_count",
+        "graph_retrieved_doc_count",
+        "graph_retrieved_gold_page_count",
+        "graph_retrieved_gold_doc_page_count",
+        "dense_retrieved_page_count",
+        "dense_retrieved_doc_count",
+        "dense_retrieved_gold_page_count",
+        "dense_retrieved_gold_doc_page_count",
+        "sparse_retrieved_page_count",
+        "sparse_retrieved_doc_count",
+        "sparse_retrieved_gold_page_count",
+        "sparse_retrieved_gold_doc_page_count",
+        "gold_doc_count",
+        "gold_page_count",
+        "visualized_page_count",
+        "visualized_doc_count",
+        "hidden_graph_retrieved_page_count",
+    ]:
+        stat_rows.append(
+            f"<tr><td>{html.escape(key)}</td><td>{html.escape(str(stats.get(key, '')))}</td></tr>"
+        )
     rows = []
     for doc in payload["docs"]:
         for page in doc["pages"]:
@@ -685,6 +771,13 @@ def render_html(payload: dict[str, Any], svg_text: str) -> str:
 </head>
 <body>
 {svg_text}
+<h2>Counts</h2>
+<table>
+  <tbody>
+    {''.join(stat_rows)}
+  </tbody>
+</table>
+<h2>Visualized Pages</h2>
 <table>
   <thead>
     <tr><th>page_uid</th><th>gold</th><th>graph</th><th>dense</th><th>SPLADE</th><th>graph score</th></tr>
@@ -803,6 +896,20 @@ def main() -> None:
         f"graph={fmt_rank(payload.get('graph_target_rank'))} "
         f"dense={fmt_rank(payload.get('dense_target_rank'))} "
         f"splade={fmt_rank(payload.get('sparse_target_rank'))}"
+    )
+    stats = payload.get("stats", {})
+    print(
+        "retrieved_counts: "
+        f"graph_pages={stats.get('graph_retrieved_page_count')} "
+        f"graph_docs={stats.get('graph_retrieved_doc_count')} "
+        f"graph_gold_pages={stats.get('graph_retrieved_gold_page_count')} "
+        f"graph_gold_doc_pages={stats.get('graph_retrieved_gold_doc_page_count')}"
+    )
+    print(
+        "visualized_counts: "
+        f"pages={stats.get('visualized_page_count')} "
+        f"docs={stats.get('visualized_doc_count')} "
+        f"hidden_graph_pages={stats.get('hidden_graph_retrieved_page_count')}"
     )
     print(f"saved_svg: {svg_path}")
     if args.output_html:
