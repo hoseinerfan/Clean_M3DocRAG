@@ -201,6 +201,19 @@ def count_gold_doc_pages(pages: list[dict[str, Any]], gold_docs: set[str]) -> in
     return sum(1 for page in pages if str(page["doc_id"]) in gold_docs)
 
 
+def count_gold_uids(uids: set[str], gold_pages: set[str]) -> int:
+    return sum(1 for uid in uids if uid in gold_pages)
+
+
+def count_gold_doc_uids(uids: set[str], gold_docs: set[str]) -> int:
+    count = 0
+    for uid in uids:
+        doc_id, _page_idx = parse_page_uid(uid)
+        if doc_id in gold_docs:
+            count += 1
+    return count
+
+
 def gold_doc_ids(row: dict[str, Any] | None) -> set[str]:
     if row is None:
         return set()
@@ -427,6 +440,8 @@ def build_visual_payload(
     for page in sparse_pages_all[: max(0, source_top_pages)]:
         selected_uids.add(str(page["uid"]))
     selected_uids |= gold_pages
+    source_union_uids = set(dense_page_ranks) | set(sparse_page_ranks)
+    source_union_doc_ids = {parse_page_uid(uid)[0] for uid in source_union_uids}
 
     doc_priority: dict[str, tuple[Any, ...]] = {}
     for uid in selected_uids:
@@ -512,6 +527,10 @@ def build_visual_payload(
         "sparse_retrieved_doc_count": len(sparse_doc_ranks),
         "sparse_retrieved_gold_page_count": count_gold_pages(sparse_pages_all, gold_pages),
         "sparse_retrieved_gold_doc_page_count": count_gold_doc_pages(sparse_pages_all, gold_docs),
+        "source_union_page_count": len(source_union_uids),
+        "source_union_doc_count": len(source_union_doc_ids),
+        "source_union_gold_page_count": count_gold_uids(source_union_uids, gold_pages),
+        "source_union_gold_doc_page_count": count_gold_doc_uids(source_union_uids, gold_docs),
         "gold_doc_count": len(gold_docs),
         "gold_page_count": len(gold_pages),
         "visualized_page_count": len(visualized_pages),
@@ -734,6 +753,10 @@ def render_html(payload: dict[str, Any], svg_text: str) -> str:
         "sparse_retrieved_doc_count",
         "sparse_retrieved_gold_page_count",
         "sparse_retrieved_gold_doc_page_count",
+        "source_union_page_count",
+        "source_union_doc_count",
+        "source_union_gold_page_count",
+        "source_union_gold_doc_page_count",
         "gold_doc_count",
         "gold_page_count",
         "visualized_page_count",
@@ -904,6 +927,13 @@ def main() -> None:
         f"graph_docs={stats.get('graph_retrieved_doc_count')} "
         f"graph_gold_pages={stats.get('graph_retrieved_gold_page_count')} "
         f"graph_gold_doc_pages={stats.get('graph_retrieved_gold_doc_page_count')}"
+    )
+    print(
+        "source_union_counts: "
+        f"pages={stats.get('source_union_page_count')} "
+        f"docs={stats.get('source_union_doc_count')} "
+        f"gold_pages={stats.get('source_union_gold_page_count')} "
+        f"gold_doc_pages={stats.get('source_union_gold_doc_page_count')}"
     )
     print(
         "visualized_counts: "
