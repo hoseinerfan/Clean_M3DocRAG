@@ -52,6 +52,7 @@ class SafeGateCaseDiagnosticsTests(unittest.TestCase):
                                 "accepted": True,
                                 "movement_vs_base": "lost",
                                 "candidate_movement_vs_base": "unchanged",
+                                "gold_page_uids": ["d_page8"],
                                 "base_first_gold_page_rank": 8,
                                 "candidate_first_gold_page_rank": 9,
                                 "output_first_gold_page_rank": 9,
@@ -71,6 +72,7 @@ class SafeGateCaseDiagnosticsTests(unittest.TestCase):
                                 "accepted": True,
                                 "movement_vs_base": "recovered",
                                 "candidate_movement_vs_base": "recovered",
+                                "gold_page_uids": ["d_page9"],
                                 "base_first_gold_page_rank": 9,
                                 "candidate_first_gold_page_rank": 8,
                                 "output_first_gold_page_rank": 8,
@@ -87,7 +89,8 @@ class SafeGateCaseDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(entry["net"], 0)
         self.assertEqual(entry["accepted_movements"]["lost"], 1)
-        self.assertIn("| boundary | 1 | 2 | 10 | 11 | 10 | 1 | 1 | 0 | 0 |", markdown)
+        self.assertEqual(entry["boundary_opportunities"], 1)
+        self.assertIn("| boundary | 1 | 2 | NA | 10 | 11 | 10 | 1 | 1 | 1 | 0 | 0 |", markdown)
         self.assertIn("q-lost", markdown)
         self.assertIn("q-recovered", markdown)
 

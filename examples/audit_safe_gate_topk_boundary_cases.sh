@@ -65,6 +65,20 @@ contains_word() {
 
 summary_args=()
 side_by_side_specs=()
+baseline_args=()
+
+add_baseline_prediction() {
+  local dataset="$1"
+  local prediction="$2"
+  if [[ -z "$prediction" ]]; then
+    return 0
+  fi
+  if [[ ! -f "$prediction" ]]; then
+    echo "skip_${dataset}_missing_baseline_prediction: $prediction" >&2
+    return 0
+  fi
+  baseline_args+=(--baseline-prediction "$dataset" "$prediction")
+}
 
 add_entry() {
   local dataset="$1"
@@ -113,24 +127,28 @@ for dataset in $DATASETS; do
     mmdocir|mm-docir)
       require_value MMDocIR_WORK_ROOT
       require_value MMDOCIR_GOLD
+      add_baseline_prediction MMDocIR "${MMDOCIR_DENSE_PRED:-}"
       add_dataset MMDocIR mmdocir "$MMDOCIR_GOLD" \
         "$MMDocIR_WORK_ROOT/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation"
       ;;
     sciegqa|sci-egqa)
       require_value SciEGQA_WORK_ROOT
       require_value SCIEGQA_GOLD
+      add_baseline_prediction SciEGQA "${SCIEGQA_DENSE_PRED:-}"
       add_dataset SciEGQA sciegqa "$SCIEGQA_GOLD" \
         "$SciEGQA_WORK_ROOT/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation"
       ;;
     vidoseek)
       require_value VIDOSEEK_WORK_ROOT
       require_value VIDOSEEK_GOLD
+      add_baseline_prediction ViDoSeek "${VIDOSEEK_DENSE_PRED:-}"
       add_dataset ViDoSeek vidoseek "$VIDOSEEK_GOLD" \
         "$VIDOSEEK_WORK_ROOT/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation"
       ;;
     dude)
       require_value DUDE_WORK_ROOT
       require_value DUDE_GOLD
+      add_baseline_prediction DUDE "${DUDE_DENSE_PRED:-}"
       add_dataset DUDE dude "$DUDE_GOLD" \
         "$DUDE_WORK_ROOT/output/dude/heading_breadcrumb_pdf_markdown_source_ablation"
       ;;
@@ -148,6 +166,7 @@ fi
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/summarize_safe_gate_case_diagnostics.py" \
   "${summary_args[@]}" \
+  "${baseline_args[@]}" \
   --topn "$CASE_LIMIT" \
   --output-md "$REPORT_ROOT/safe_gate_top${HIT_K}_case_diagnostics.md" \
   --output-json "$REPORT_ROOT/safe_gate_top${HIT_K}_case_diagnostics.json"
