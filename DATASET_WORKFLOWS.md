@@ -772,6 +772,22 @@ prediction artifacts and does not regenerate Markdown or rerun Graph-PPR. It wri
 control-versus-variant page and document hit deltas together with the overlap/document/support/body
 rejection counts to decide which constraint is useful.
 
+Top-k case audit after the boundary and policy runs:
+
+```bash
+HIT_K=8 \
+DATASETS="mmdocir sciegqa vidoseek dude" \
+bash examples/audit_safe_gate_topk_boundary_cases.sh
+
+sed -n '1,260p' \
+  output/safe_gate_top8_case_audit/safe_gate_top8_case_diagnostics.md
+```
+
+This audit reads completed `*.summary.json` and `*.cases.json` files. It aggregates net movement
+by variant, lists lost/recovered qids with promoted-page ranks and support votes, and writes
+side-by-side Markdown for the selected variants. By default it renders the actual boundary gate
+and `policy_require_topk_doc`; set `SIDE_BY_SIDE_VARIANTS` to inspect more variants.
+
 Completed native code-noise ablation (rejected):
 
 ```bash

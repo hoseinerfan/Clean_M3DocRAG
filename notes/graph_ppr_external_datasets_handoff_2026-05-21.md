@@ -822,6 +822,20 @@ overwrite the selected `*_safe_gate_bodyguard_top8.*` output. Interpret any gain
 and document level; a relaxed policy with new page losses is not a replacement for the
 conservative gate without case-level justification.
 
+Case-level top-k audit after boundary and policy runs:
+
+```bash
+HIT_K=8 \
+DATASETS="mmdocir sciegqa vidoseek dude" \
+bash examples/audit_safe_gate_topk_boundary_cases.sh
+
+sed -n '1,260p' \
+  output/safe_gate_top8_case_audit/safe_gate_top8_case_diagnostics.md
+```
+
+The main report aggregates the actual boundary gate plus any completed policy variants. It also
+writes focused lost/recovered side-by-side Markdown under `output/safe_gate_top8_case_audit/`.
+
 Completed native code-noise ablation (rejected):
 
 ```bash

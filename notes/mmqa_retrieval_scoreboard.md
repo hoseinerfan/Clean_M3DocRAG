@@ -210,6 +210,17 @@ This reads the existing graph predictions and produces
 document-rank cap against disabled and strict top-k-document variants plus relaxed agreement,
 without overwriting the primary gate output.
 
+After the boundary and policy runs, audit the case-level failures and recoveries:
+
+```bash
+HIT_K=8 \
+DATASETS="mmdocir sciegqa vidoseek dude" \
+bash examples/audit_safe_gate_topk_boundary_cases.sh
+```
+
+Paste `output/safe_gate_top8_case_audit/safe_gate_top8_case_diagnostics.md` rather than the full
+logs.
+
 Current M3DocVQA safe-gate input paths:
 
 ```text
