@@ -127,6 +127,7 @@ These numbers are page hit counts at `k=4`, not average recall. The gate is inte
 | Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
+| MMDocIR (`native codeguard` ablation; rejected) | 26 | 1114 | 1117 | 1114 | 1 | 1 | 0 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 |
 | ViDoSeek (`page-0-block` audit) | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
@@ -138,6 +139,8 @@ Safe-gate artifacts:
 
 - MMDocIR summary:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json`
+- MMDocIR native codeguard ablation summary:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_safe_gate_bodyguard_codeguard.summary.json`
 - SciEGQA-Bench summary:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json`
 - SciEGQA-Bench PyMuPDF4LLM summary:
@@ -155,6 +158,10 @@ ViDoRe note: the text-derived Markdown variants contain `0` raw outline headings
 heuristic headings, so the heading-augmented graph views are identical to the no-heading control.
 This is a valid no-op transfer result for the heading gate, not evidence that heading rescue failed
 when headings are present.
+
+MMDocIR native codeguard note: codeguard removed `69` heuristic heading lines on `101` code-dense
+pages, but its gate output fell to `1114` page hits at `@4` with `1` recovered and `1` lost.
+It is a negative ablation and is not part of EvidenceGuard-PPR.
 
 Pending safe-gate evaluation targets:
 

@@ -674,11 +674,12 @@ top-`k` documents.
 Non-default cutoffs receive a `_top{k}` output suffix so a top-8 experiment does not overwrite the
 validated top-4 artifacts.
 
-Current validated runs:
+Recorded safe-gate runs (selected results plus labeled audit/ablation rows):
 
 | Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects | summary artifact |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json` |
+| MMDocIR (`native codeguard` ablation; rejected) | 26 | 1114 | 1117 | 1114 | 1 | 1 | 0 | 25 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_safe_gate_bodyguard_codeguard.summary.json` |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
 | SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
 | ViDoSeek (`page-0-block` audit) | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json` |
@@ -689,6 +690,9 @@ Current validated runs:
 Interpretation:
 
 - MMDocIR is the strongest positive-control result: the raw heading candidate is slightly worse than base at page hit@4, but the gate extracts 3 additional hits with zero losses.
+- The MMDocIR native codeguard ablation is rejected: it suppressed code-like heading evidence but
+  changed the gate result to `1` recovered and `1` lost, eliminating the selected method's
+  zero-loss `+3` gain.
 - SciEGQA-Bench is a useful negative control: the raw heading candidate improves page hit@4, but the safe gate abstains enough to preserve the baseline with zero losses.
 - SciEGQA-Bench PyMuPDF4LLM is a positive extraction ablation: the direct alternative heading
   candidate ties the no-heading control at page hit@4, while the safe gate accepts only `2`
@@ -744,7 +748,7 @@ Set `RUN_GOLD_RANK_AUDIT=1` to also write `*.gold_rank_positions.json` and
 page/doc rank bands, and a page-rank-band by doc-rank-band matrix so rank `6-20` opportunities can
 be separated from document-retrieval failures.
 
-Native code-noise ablation:
+Completed native code-noise ablation (rejected):
 
 ```bash
 NATIVE_CODEGUARD_ABLATION=1 \
@@ -754,15 +758,13 @@ DATASETS="mmdocir" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
-This unvalidated ablation writes `doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl` and
-uses its graph view as the strict support vote and heading-relevance safety view. The full native
-heading graph remains the candidate, and the full native Markdown remains the body guard, so the
-test removes structural approval for code-comment-like headings without reducing candidate recall.
-`strict_heading_codeguard` always preserves PDF outline headings and suppresses strict heuristic
-headings only on native pages detected as code-dense. The output suffix is
-`*_safe_gate_bodyguard_codeguard.*` for the `boundary` profile. Do not promote this variant into
-the validated table until it preserves the three MMDocIR recoveries with zero loss and reduces
-the observed MMDetection code-comment headings.
+This ablation writes `doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl` and uses its graph
+view as the strict support vote and heading-relevance safety view. It detected `101` code-dense
+pages and suppressed `69` heuristic heading lines, leaving `22,295` codeguard heuristic heading
+lines. The final MMDocIR boundary result was `26` accepted promotions, page hit@4 `1114`, `1`
+recovered, `1` lost, and net `0`. It therefore fails the admission requirement of retaining the
+native gate's zero-loss improvement (`1117`, `+3`, `0` lost). Keep native strict headings in
+EvidenceGuard-PPR; retain codeguard only as a recorded negative ablation.
 
 If paths drift across historical output roots, generate and source a canonical path manifest first:
 

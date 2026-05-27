@@ -707,11 +707,12 @@ The validated results below use `HIT_K=4`, where boundary rescue means only base
 promoted. For a top-8 experiment, set `HIT_K=8`; boundary rescue then permits only base rank `9`,
 requires seven retained top-8 pages, and writes `*_safe_gate_bodyguard_top8.*` artifacts.
 
-Validated safe-gate results so far:
+Recorded safe-gate results (selected results plus labeled audit/ablation rows):
 
 | Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
+| MMDocIR (`native codeguard` ablation; rejected) | 26 | 1114 | 1117 | 1114 | 1 | 1 | 0 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 |
 | ViDoSeek (`page-0-block` audit) | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
@@ -723,6 +724,7 @@ Artifact paths:
 
 ```text
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_safe_gate_bodyguard_codeguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/sciegqa_safe_gate_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json
@@ -750,6 +752,12 @@ base and has `backend_error_doc_count=0` and `unmatched_doc_count=0`. Full, heur
 strict direct heading views all tie control at `1,323` page hits at `@4`. The safe gate accepts
 only `2` promotions and improves to `1,324` (`1` recovered, `0` lost). Native headings did not
 yield a gated improvement on this dataset, so this is a small positive extractor-diversity case.
+
+MMDocIR native codeguard note: the completed ablation detected `101` code-dense pages and
+suppressed `69` heuristic heading lines, but its boundary gate accepts `26` promotions and returns
+page hit@4 `1114` with `1` recovered and `1` lost. This fails the required zero-loss criterion and
+is rejected; the selected MMDocIR result remains the native strict-heading gate at `1117`
+(`+3`, `0` lost).
 
 Runner for reproducing or extending the M3DocVQA diagnostic:
 
@@ -788,7 +796,7 @@ With `RUN_GOLD_RANK_AUDIT=1`, each dataset also
 gets a `*.gold_rank_positions.md` report containing first gold page/doc ranks and a page-rank-band
 by doc-rank-band matrix.
 
-Pending native code-noise ablation:
+Completed native code-noise ablation (rejected):
 
 ```bash
 NATIVE_CODEGUARD_ABLATION=1 \
@@ -803,9 +811,10 @@ headings and suppressing strict heuristic headings only on native pages whose bo
 code-dense. In the gate, the high-recall full native heading graph remains the candidate while
 the codeguard graph replaces the strict support and heading-score evidence view; full native text
 continues to provide body evidence. Output is written as
-`mmdocir_safe_gate_bodyguard_codeguard.*`. This is not yet a validated result: promote it only if
-MMDocIR preserves its current `+3` recoveries with `0` lost cases and the MMDetection
-code-comment-heading examples are suppressed.
+`mmdocir_safe_gate_bodyguard_codeguard.*`. The completed run reports
+`codeguard_code_dense_page_count=101`, `codeguard_suppressed_heuristic_heading_line_count=69`,
+and a final result of page hit@4 `1114` (`1` recovered, `1` lost, net `0`). It must not replace
+the native strict-heading gate.
 
 Current M3DocVQA path sanity from `scripts/discover_hpc_vital_paths.py`:
 
