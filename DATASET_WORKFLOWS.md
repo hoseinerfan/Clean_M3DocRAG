@@ -726,6 +726,26 @@ Set `RUN_GOLD_RANK_AUDIT=1` to also write `*.gold_rank_positions.json` and
 page/doc rank bands, and a page-rank-band by doc-rank-band matrix so rank `6-20` opportunities can
 be separated from document-retrieval failures.
 
+Native code-noise ablation:
+
+```bash
+NATIVE_CODEGUARD_ABLATION=1 \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="mmdocir" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+This unvalidated ablation writes `doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl` and
+uses its graph view as the strict support vote and heading-relevance safety view. The full native
+heading graph remains the candidate, and the full native Markdown remains the body guard, so the
+test removes structural approval for code-comment-like headings without reducing candidate recall.
+`strict_heading_codeguard` always preserves PDF outline headings and suppresses strict heuristic
+headings only on native pages detected as code-dense. The output suffix is
+`*_safe_gate_bodyguard_codeguard.*` for the `boundary` profile. Do not promote this variant into
+the validated table until it preserves the three MMDocIR recoveries with zero loss and reduces
+the observed MMDetection code-comment headings.
+
 If paths drift across historical output roots, generate and source a canonical path manifest first:
 
 ```bash

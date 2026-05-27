@@ -56,6 +56,15 @@ PAGE_FURNITURE_PATTERNS = [
     re.compile(r"^toyota motor corporation integrated report$", re.IGNORECASE),
 ]
 
+CODE_LIKE_LINE_PATTERNS = [
+    re.compile(r"^\s*[A-Za-z_][A-Za-z0-9_.]*\s*=\s*\S"),
+    re.compile(r"^\s*(?:class|def|from|import)\s+\S"),
+    re.compile(r"^\s*(?:if|elif|else|for|while|try|except|with|return)\b.*:?$"),
+    re.compile(r"^\s*[\])}]+[,]?\s*$"),
+]
+CODE_COMMENT_LINE_RE = re.compile(r"^\s*#\s+\S")
+CODE_FENCE_LINE_RE = re.compile(r"^\s*```")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -77,6 +86,7 @@ def parse_args() -> argparse.Namespace:
             "heading_only",
             "strict_heuristic_only",
             "strict_heading",
+            "strict_heading_codeguard",
         ],
         help="Variant to write. Repeatable. Defaults to all variants.",
     )
@@ -89,6 +99,18 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=3,
         help="Minimum alphabetic characters for retained heuristic heading labels.",
+    )
+    parser.add_argument(
+        "--codeguard-min-code-lines",
+        type=int,
+        default=4,
+        help="Minimum number of code-like body lines required to suppress heuristic headings.",
+    )
+    parser.add_argument(
+        "--codeguard-min-code-line-ratio",
+        type=float,
+        default=0.10,
+        help="Minimum fraction of nonempty body lines that must look like code.",
     )
     return parser.parse_args()
 
@@ -193,11 +215,72 @@ def filter_heuristic_lines(
     return kept, reasons
 
 
+def body_lines_for_codeguard(row: dict[str, Any]) -> list[str]:
+    lines = str(row.get("markdown", "") or "").splitlines()
+    prefix_heading_count = max(0, int(row.get("pdf_outline_heading_count", 0) or 0)) + max(
+        0, int(row.get("pdf_heuristic_heading_count", 0) or 0)
+    )
+    if prefix_heading_count <= 0:
+        return lines
+    remaining = prefix_heading_count
+    index = 0
+    while index < len(lines) and remaining > 0:
+        if MARKDOWN_HEADING_RE.match(lines[index]):
+            remaining -= 1
+        index += 1
+    return lines[index:] if remaining == 0 else lines
+
+
+def codeguard_page_detail(
+    row: dict[str, Any],
+    *,
+    min_code_lines: int,
+    min_code_line_ratio: float,
+) -> dict[str, Any]:
+    source = str(row.get("markdown_source", "") or "")
+    backend = str(row.get("markdown_backend", "") or "")
+    is_native = backend in {"", "native"} and not source.startswith("pymupdf4llm")
+    body_lines = body_lines_for_codeguard(row) if is_native else []
+    nonempty_lines = [line for line in body_lines if line.strip()]
+    code_line_count = sum(
+        any(pattern.search(line) for pattern in CODE_LIKE_LINE_PATTERNS)
+        for line in nonempty_lines
+    )
+    code_comment_line_count = sum(
+        bool(CODE_COMMENT_LINE_RE.search(line)) for line in nonempty_lines
+    )
+    fenced_line_count = sum(bool(CODE_FENCE_LINE_RE.search(line)) for line in nonempty_lines)
+    code_line_ratio = code_line_count / float(len(nonempty_lines) or 1)
+    code_dense = bool(
+        is_native
+        and (
+            fenced_line_count >= 2
+            or (
+                code_line_count >= max(1, int(min_code_lines))
+                and code_line_ratio >= float(min_code_line_ratio)
+                and (
+                    code_comment_line_count >= 2
+                    or code_line_count >= max(1, int(min_code_lines)) * 2
+                )
+            )
+        )
+    )
+    return {
+        "code_dense": code_dense,
+        "body_nonempty_line_count": len(nonempty_lines),
+        "code_line_count": code_line_count,
+        "code_comment_line_count": code_comment_line_count,
+        "fenced_line_count": fenced_line_count,
+        "code_line_ratio": code_line_ratio,
+    }
+
+
 def variant_markdown(
     variant: str,
     outline_lines: list[str],
     heuristic_lines: list[str],
     strict_heuristic_lines: list[str],
+    codeguard_heuristic_lines: list[str],
 ) -> str:
     if variant == "outline_only":
         return "\n".join(outline_lines).strip()
@@ -209,6 +292,8 @@ def variant_markdown(
         return "\n".join(strict_heuristic_lines).strip()
     if variant == "strict_heading":
         return "\n".join([*outline_lines, *strict_heuristic_lines]).strip()
+    if variant == "strict_heading_codeguard":
+        return "\n".join([*outline_lines, *codeguard_heuristic_lines]).strip()
     raise ValueError(f"Unknown variant: {variant}")
 
 
@@ -220,6 +305,7 @@ def main() -> None:
         "heading_only",
         "strict_heuristic_only",
         "strict_heading",
+        "strict_heading_codeguard",
     ]
     input_jsonl = Path(args.input_jsonl)
     output_dir = Path(args.output_dir)
@@ -239,6 +325,8 @@ def main() -> None:
         "strict_max_words": int(args.strict_max_words),
         "strict_max_chars": int(args.strict_max_chars),
         "strict_min_alpha_chars": int(args.strict_min_alpha_chars),
+        "codeguard_min_code_lines": int(args.codeguard_min_code_lines),
+        "codeguard_min_code_line_ratio": float(args.codeguard_min_code_line_ratio),
     }
     variant_counts = {
         variant: Counter() for variant in variants
@@ -249,6 +337,9 @@ def main() -> None:
     raw_outline_line_count = 0
     raw_heuristic_line_count = 0
     strict_heuristic_line_count = 0
+    codeguard_heuristic_line_count = 0
+    codeguard_code_dense_page_count = 0
+    codeguard_suppressed_heuristic_line_count = 0
 
     try:
         with input_jsonl.open("r", encoding="utf-8") as handle:
@@ -267,9 +358,19 @@ def main() -> None:
                     min_alpha_chars=int(args.strict_min_alpha_chars),
                 )
                 strict_reject_counts.update(reject_reasons)
+                codeguard_detail = codeguard_page_detail(
+                    row,
+                    min_code_lines=int(args.codeguard_min_code_lines),
+                    min_code_line_ratio=float(args.codeguard_min_code_line_ratio),
+                )
+                codeguard_lines = [] if codeguard_detail["code_dense"] else strict_lines
                 raw_outline_line_count += len(outline_lines)
                 raw_heuristic_line_count += len(heuristic_lines)
                 strict_heuristic_line_count += len(strict_lines)
+                codeguard_heuristic_line_count += len(codeguard_lines)
+                if codeguard_detail["code_dense"]:
+                    codeguard_code_dense_page_count += 1
+                    codeguard_suppressed_heuristic_line_count += len(strict_lines)
 
                 for variant in variants:
                     output_row = dict(row)
@@ -278,25 +379,38 @@ def main() -> None:
                         outline_lines,
                         heuristic_lines,
                         strict_lines,
+                        codeguard_lines,
                     )
                     output_row["markdown_variant"] = variant
                     output_row["markdown_original_source"] = row.get("markdown_source", "")
                     output_row["markdown_source"] = f"variant_{variant}"
                     output_row["pdf_variant_outline_heading_count"] = len(outline_lines)
+                    if variant == "strict_heading_codeguard":
+                        variant_heuristic_line_count = len(codeguard_lines)
+                    elif variant in {"strict_heuristic_only", "strict_heading"}:
+                        variant_heuristic_line_count = len(strict_lines)
+                    else:
+                        variant_heuristic_line_count = len(heuristic_lines)
                     output_row["pdf_variant_heuristic_heading_count"] = (
-                        len(strict_lines)
-                        if variant in {"strict_heuristic_only", "strict_heading"}
-                        else len(heuristic_lines)
+                        variant_heuristic_line_count
                     )
+                    if variant == "strict_heading_codeguard":
+                        output_row["pdf_variant_codeguard"] = codeguard_detail
                     if output_row["markdown"].strip():
                         variant_counts[variant]["nonempty_page_count"] += 1
-                    if outline_lines and variant in {"outline_only", "heading_only", "strict_heading"}:
+                    if outline_lines and variant in {
+                        "outline_only",
+                        "heading_only",
+                        "strict_heading",
+                        "strict_heading_codeguard",
+                    }:
                         variant_counts[variant]["outline_page_count"] += 1
                     if output_row["pdf_variant_heuristic_heading_count"] > 0 and variant in {
                         "heuristic_only",
                         "heading_only",
                         "strict_heuristic_only",
                         "strict_heading",
+                        "strict_heading_codeguard",
                     }:
                         variant_counts[variant]["heuristic_page_count"] += 1
                     handles[variant].write(json.dumps(output_row, ensure_ascii=False) + "\n")
@@ -312,6 +426,11 @@ def main() -> None:
             "raw_heuristic_heading_line_count": raw_heuristic_line_count,
             "strict_heuristic_heading_line_count": strict_heuristic_line_count,
             "strict_reject_counts": dict(sorted(strict_reject_counts.items())),
+            "codeguard_heuristic_heading_line_count": codeguard_heuristic_line_count,
+            "codeguard_code_dense_page_count": codeguard_code_dense_page_count,
+            "codeguard_suppressed_heuristic_heading_line_count": (
+                codeguard_suppressed_heuristic_line_count
+            ),
         }
     )
     for variant in variants:
@@ -325,6 +444,12 @@ def main() -> None:
     print(f"raw_outline_heading_line_count: {raw_outline_line_count}")
     print(f"raw_heuristic_heading_line_count: {raw_heuristic_line_count}")
     print(f"strict_heuristic_heading_line_count: {strict_heuristic_line_count}")
+    print(f"codeguard_heuristic_heading_line_count: {codeguard_heuristic_line_count}")
+    print(f"codeguard_code_dense_page_count: {codeguard_code_dense_page_count}")
+    print(
+        "codeguard_suppressed_heuristic_heading_line_count: "
+        f"{codeguard_suppressed_heuristic_line_count}"
+    )
 
 
 if __name__ == "__main__":

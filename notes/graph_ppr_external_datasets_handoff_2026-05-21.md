@@ -766,6 +766,25 @@ for reproducing the validated rank-5 artifacts. With `RUN_GOLD_RANK_AUDIT=1`, ea
 gets a `*.gold_rank_positions.md` report containing first gold page/doc ranks and a page-rank-band
 by doc-rank-band matrix.
 
+Pending native code-noise ablation:
+
+```bash
+NATIVE_CODEGUARD_ABLATION=1 \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="mmdocir" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+This produces `doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl`, preserving outline
+headings and suppressing strict heuristic headings only on native pages whose body is detected as
+code-dense. In the gate, the high-recall full native heading graph remains the candidate while
+the codeguard graph replaces the strict support and heading-score evidence view; full native text
+continues to provide body evidence. Output is written as
+`mmdocir_safe_gate_bodyguard_codeguard.*`. This is not yet a validated result: promote it only if
+MMDocIR preserves its current `+3` recoveries with `0` lost cases and the MMDetection
+code-comment-heading examples are suppressed.
+
 Current M3DocVQA path sanity from `scripts/discover_hpc_vital_paths.py`:
 
 ```text

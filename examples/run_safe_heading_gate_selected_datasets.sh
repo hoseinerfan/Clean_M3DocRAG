@@ -10,6 +10,7 @@ set -euo pipefail
 #   SAFE_GATE_PROFILE=window20 RUN_GOLD_RANK_AUDIT=1 DATASETS="dude vidore" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=window20 DATASETS="m3docvqa" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir vidoseek sciegqa dude" bash examples/run_safe_heading_gate_selected_datasets.sh
+#   NATIVE_CODEGUARD_ABLATION=1 SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir" bash examples/run_safe_heading_gate_selected_datasets.sh
 #
 # The script assumes the expensive dense/plain_top224 and SPLADE predictions already
 # exist. If any are missing it prints the expected path and exits before reranking.
@@ -35,6 +36,7 @@ HPC_PATH_ENV="${HPC_PATH_ENV:-}"
 PDF_MARKDOWN_BACKEND="${PDF_MARKDOWN_BACKEND:-native}"
 PDF_MARKDOWN_RUN_SUFFIX="${PDF_MARKDOWN_RUN_SUFFIX:-}"
 PDF_MARKDOWN_FORCE_REBUILD="${PDF_MARKDOWN_FORCE_REBUILD:-0}"
+NATIVE_CODEGUARD_ABLATION="${NATIVE_CODEGUARD_ABLATION:-0}"
 
 if [[ -n "$HPC_PATH_ENV" ]]; then
   # shellcheck disable=SC1090
@@ -55,6 +57,15 @@ case "$PDF_MARKDOWN_BACKEND" in
     exit 2
     ;;
 esac
+
+if [[ "$NATIVE_CODEGUARD_ABLATION" != "0" && "$NATIVE_CODEGUARD_ABLATION" != "1" ]]; then
+  echo "unknown_NATIVE_CODEGUARD_ABLATION: $NATIVE_CODEGUARD_ABLATION" >&2
+  exit 2
+fi
+if [[ "$NATIVE_CODEGUARD_ABLATION" == "1" && "$PDF_MARKDOWN_BACKEND" != "native" ]]; then
+  echo "NATIVE_CODEGUARD_ABLATION=1 requires PDF_MARKDOWN_BACKEND=native" >&2
+  exit 2
+fi
 
 case "$SAFE_GATE_PROFILE" in
   boundary)
@@ -387,6 +398,16 @@ run_m3docvqa() {
   run_graph_view "m3-docvqa" "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view "m3-docvqa" "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
 
+  local strict_support_pred="$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json"
+  local heading_evidence_jsonl="$pdf_markdown_jsonl"
+  local gate_suffix="$SAFE_GATE_OUTPUT_SUFFIX"
+  if [[ "$NATIVE_CODEGUARD_ABLATION" == "1" ]]; then
+    run_graph_view "m3-docvqa" "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl" "${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer" query_gated_shared
+    strict_support_pred="$out_dir/${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer.prediction.json"
+    heading_evidence_jsonl="$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl"
+    gate_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
+  fi
+
   run_safe_gate \
     m3docvqa \
     "$gold" \
@@ -394,10 +415,10 @@ run_m3docvqa() {
     "$out_dir/${tag}_heading_control_no_heading.prediction.json" \
     "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
-    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
+    "$strict_support_pred" \
+    "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
-    "$pdf_markdown_jsonl" \
-    "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
+    "${tag}_${gate_suffix}" \
     4
 }
 
@@ -435,7 +456,17 @@ run_dude() {
   run_graph_view dude "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view dude "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
 
-  local dude_suffix="${DUDE_SAFE_GATE_OUTPUT_SUFFIX:-${SAFE_GATE_OUTPUT_SUFFIX}_docrank${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}}"
+  local strict_support_pred="$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json"
+  local heading_evidence_jsonl="$pdf_markdown_jsonl"
+  local gate_suffix="$SAFE_GATE_OUTPUT_SUFFIX"
+  if [[ "$NATIVE_CODEGUARD_ABLATION" == "1" ]]; then
+    run_graph_view dude "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl" "${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer" query_gated_shared
+    strict_support_pred="$out_dir/${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer.prediction.json"
+    heading_evidence_jsonl="$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl"
+    gate_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
+  fi
+
+  local dude_suffix="${DUDE_SAFE_GATE_OUTPUT_SUFFIX:-${gate_suffix}_docrank${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}}"
   run_safe_gate \
     dude \
     "$gold" \
@@ -443,8 +474,8 @@ run_dude() {
     "$out_dir/${tag}_heading_control_no_heading.prediction.json" \
     "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
-    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
-    "$pdf_markdown_jsonl" \
+    "$strict_support_pred" \
+    "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
     "${tag}_${dude_suffix}" \
     "${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}"
@@ -501,6 +532,16 @@ run_mmdocir() {
   run_graph_view mmdocir "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view mmdocir "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
 
+  local strict_support_pred="$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json"
+  local heading_evidence_jsonl="$pdf_markdown_jsonl"
+  local gate_suffix="$SAFE_GATE_OUTPUT_SUFFIX"
+  if [[ "$NATIVE_CODEGUARD_ABLATION" == "1" ]]; then
+    run_graph_view mmdocir "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl" "${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer" query_gated_shared
+    strict_support_pred="$out_dir/${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer.prediction.json"
+    heading_evidence_jsonl="$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl"
+    gate_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
+  fi
+
   run_safe_gate \
     mmdocir \
     "$gold" \
@@ -508,10 +549,10 @@ run_mmdocir() {
     "$out_dir/${tag}_heading_control_no_heading.prediction.json" \
     "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
-    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
+    "$strict_support_pred" \
+    "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
-    "$pdf_markdown_jsonl" \
-    "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
+    "${tag}_${gate_suffix}" \
     4
 }
 
@@ -547,6 +588,16 @@ run_sciegqa() {
   run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
 
+  local strict_support_pred="$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json"
+  local heading_evidence_jsonl="$pdf_markdown_jsonl"
+  local gate_suffix="$SAFE_GATE_OUTPUT_SUFFIX"
+  if [[ "$NATIVE_CODEGUARD_ABLATION" == "1" ]]; then
+    run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl" "${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer" query_gated_shared
+    strict_support_pred="$out_dir/${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer.prediction.json"
+    heading_evidence_jsonl="$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl"
+    gate_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
+  fi
+
   run_safe_gate \
     sciegqa \
     "$gold" \
@@ -554,10 +605,10 @@ run_sciegqa() {
     "$out_dir/${tag}_heading_control_no_heading.prediction.json" \
     "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
-    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
+    "$strict_support_pred" \
+    "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
-    "$pdf_markdown_jsonl" \
-    "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
+    "${tag}_${gate_suffix}" \
     4
 }
 
@@ -578,7 +629,6 @@ run_vidoseek() {
   local variant_dir="$out_dir/pdf_markdown_variants"
   local dense_pred="${VIDOSEEK_DENSE_PRED:-$LOCAL_OUTPUT_DIR/vidoseek/plain_top224_ret1000_prediction.json}"
   local sparse_pred="${VIDOSEEK_SPARSE_PRED:-$LOCAL_OUTPUT_DIR/vidoseek/doc_rrf_plain_top224_splade/vidoseek_splade_ret1000.prediction.json}"
-  local gate_suffix="${VIDOSEEK_SAFE_GATE_OUTPUT_SUFFIX:-${SAFE_GATE_OUTPUT_SUFFIX}_no_page0}"
 
   require_file gold "$gold"
   require_file doc_pages "$doc_pages_jsonl"
@@ -593,6 +643,17 @@ run_vidoseek() {
   run_graph_view vidoseek "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view vidoseek "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
 
+  local strict_support_pred="$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json"
+  local heading_evidence_jsonl="$pdf_markdown_jsonl"
+  local gate_base_suffix="$SAFE_GATE_OUTPUT_SUFFIX"
+  if [[ "$NATIVE_CODEGUARD_ABLATION" == "1" ]]; then
+    run_graph_view vidoseek "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl" "${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer" query_gated_shared
+    strict_support_pred="$out_dir/${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer.prediction.json"
+    heading_evidence_jsonl="$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl"
+    gate_base_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
+  fi
+  local gate_suffix="${VIDOSEEK_SAFE_GATE_OUTPUT_SUFFIX:-${gate_base_suffix}_no_page0}"
+
   run_safe_gate \
     vidoseek \
     "$gold" \
@@ -600,8 +661,8 @@ run_vidoseek() {
     "$dense_pred" \
     "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
-    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
-    "$pdf_markdown_jsonl" \
+    "$strict_support_pred" \
+    "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
     "${tag}_${gate_suffix}" \
     4 \
@@ -641,6 +702,16 @@ run_vidore() {
   run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
 
+  local strict_support_pred="$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json"
+  local heading_evidence_jsonl="$doc_pages_jsonl"
+  local gate_suffix="$SAFE_GATE_OUTPUT_SUFFIX"
+  if [[ "$NATIVE_CODEGUARD_ABLATION" == "1" ]]; then
+    run_graph_view vidore-v3 "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl" "${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer" query_gated_shared
+    strict_support_pred="$out_dir/${tag}_heading_strict_heading_codeguard_wide_edgeonly_transfer.prediction.json"
+    heading_evidence_jsonl="$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl"
+    gate_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
+  fi
+
   run_safe_gate \
     vidore \
     "$gold" \
@@ -648,14 +719,14 @@ run_vidore() {
     "$out_dir/${tag}_heading_control_no_heading.prediction.json" \
     "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
-    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
+    "$strict_support_pred" \
+    "$heading_evidence_jsonl" \
     "$doc_pages_jsonl" \
-    "$doc_pages_jsonl" \
-    "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
+    "${tag}_${gate_suffix}" \
     4
 }
 
-echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} support_page_rank_max=$SUPPORT_PAGE_RANK_MAX"
+echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND native_codeguard_ablation=$NATIVE_CODEGUARD_ABLATION hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} support_page_rank_max=$SUPPORT_PAGE_RANK_MAX"
 echo "| dataset | accepted | base page@$HIT_K | candidate page@$HIT_K | gated page@$HIT_K | recovered | lost | net | body rejects |"
 echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
 
