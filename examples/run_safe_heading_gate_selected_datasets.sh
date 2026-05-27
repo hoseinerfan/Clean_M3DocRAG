@@ -40,6 +40,8 @@ PDF_MARKDOWN_BACKEND="${PDF_MARKDOWN_BACKEND:-native}"
 PDF_MARKDOWN_RUN_SUFFIX="${PDF_MARKDOWN_RUN_SUFFIX:-}"
 PDF_MARKDOWN_FORCE_REBUILD="${PDF_MARKDOWN_FORCE_REBUILD:-0}"
 NATIVE_CODEGUARD_ABLATION="${NATIVE_CODEGUARD_ABLATION:-0}"
+SUPPORT_PREDICTION_LABELS=(heuristic strict)
+SUPPORT_PREDICTION_COUNT="${#SUPPORT_PREDICTION_LABELS[@]}"
 
 if [[ -n "$HPC_PATH_ENV" ]]; then
   # shellcheck disable=SC1090
@@ -90,7 +92,7 @@ case "$SAFE_GATE_PROFILE" in
     RESCUE_RANK_MAX="${RESCUE_RANK_MAX:-$BOUNDARY_RANK}"
     MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-$MIN_CONSERVATIVE_OVERLAP}"
     SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-$HIT_K}"
-    MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-2}"
+    MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-$SUPPORT_PREDICTION_COUNT}"
     ;;
   window20)
     SAFE_GATE_OUTPUT_SUFFIX="${SAFE_GATE_OUTPUT_SUFFIX:-safe_window20_gate_bodyguard${HIT_K_OUTPUT_SUFFIX}}"
@@ -99,7 +101,7 @@ case "$SAFE_GATE_PROFILE" in
     RESCUE_RANK_MAX="${RESCUE_RANK_MAX:-20}"
     MIN_PAGE_OVERLAP="${MIN_PAGE_OVERLAP:-3}"
     SUPPORT_PAGE_RANK_MAX="${SUPPORT_PAGE_RANK_MAX:-20}"
-    MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-2}"
+    MIN_SUPPORT_PAGE_VOTES="${MIN_SUPPORT_PAGE_VOTES:-$SUPPORT_PREDICTION_COUNT}"
     ;;
   *)
     echo "unknown_SAFE_GATE_PROFILE: $SAFE_GATE_PROFILE" >&2
@@ -755,7 +757,7 @@ run_vidore() {
     "$HIT_K"
 }
 
-echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND native_codeguard_ablation=$NATIVE_CODEGUARD_ABLATION output_suffix=$SAFE_GATE_OUTPUT_SUFFIX hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} min_page_overlap=$MIN_PAGE_OVERLAP support_page_rank_max=$SUPPORT_PAGE_RANK_MAX"
+echo "safe_gate_profile=$SAFE_GATE_PROFILE pdf_markdown_backend=$PDF_MARKDOWN_BACKEND native_codeguard_ablation=$NATIVE_CODEGUARD_ABLATION output_suffix=$SAFE_GATE_OUTPUT_SUFFIX hit_k=$HIT_K candidate_rank_max=$CANDIDATE_RANK_MAX rescue_rank=${RESCUE_RANK_MIN}-${RESCUE_RANK_MAX} min_page_overlap=$MIN_PAGE_OVERLAP support_page_rank_max=$SUPPORT_PAGE_RANK_MAX min_support_page_votes=$MIN_SUPPORT_PAGE_VOTES support_views=${SUPPORT_PREDICTION_LABELS[*]}"
 echo "| dataset | accepted | base page@$HIT_K | candidate page@$HIT_K | gated page@$HIT_K | recovered | lost | net | body rejects |"
 echo "|---|---:|---:|---:|---:|---:|---:|---:|---:|"
 

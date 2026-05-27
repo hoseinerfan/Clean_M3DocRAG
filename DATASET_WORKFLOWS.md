@@ -663,15 +663,19 @@ This is the precision-oriented rescue layer on top of the heading-augmented grap
 The `boundary` profile is cutoff-relative. For `HIT_K=k`, the candidate may introduce at most
 one page into top-`k`, and that page must have been base rank `k+1`. The default agreement guards
 also scale with the cutoff: at least `k-1` base pages remain in candidate top-`k`, support votes
-are checked within candidate top-`k`, and the promoted document must be among the first `k`
-distinct documents encountered in the base ranking. That document-rank cap does not require a
+are checked within candidate top-`k`, and the support threshold defaults to all configured
+support views (`heuristic` and `strict` for the current PDF-heading gate). The promoted document
+must be among the first `k` distinct documents encountered in the base ranking. That
+document-rank cap does not require a
 page from the same document inside the base top-`k`; the policy ablation below tests that stricter
 alternative explicitly.
 
 | `HIT_K` | candidate slot limit | allowed base rescue rank | minimum top-k overlap | default output suffix |
 |---:|---:|---:|---:|---|
 | 4 | 4 | 5 | 3 | `safe_gate_bodyguard` |
+| 6 | 6 | 7 | 5 | `safe_gate_bodyguard_top6` |
 | 8 | 8 | 9 | 7 | `safe_gate_bodyguard_top8` |
+| 10 | 10 | 11 | 9 | `safe_gate_bodyguard_top10` |
 
 Non-default cutoffs receive a `_top{k}` output suffix so a top-8 experiment does not overwrite the
 validated top-4 artifacts.

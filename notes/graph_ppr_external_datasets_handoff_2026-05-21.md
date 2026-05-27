@@ -815,8 +815,10 @@ sed -n '1,240p' \
 
 This wrapper reuses existing graph-view predictions and changes only the gate policy. It compares
 the conservative document-rank-cap control against: no document-rank cap, true base-top-`k`
-document membership, one fewer required overlapping page, one rather than two support votes, and
-the combined relaxed policy. Every variant is written
+document membership, one fewer required overlapping page, one rather than all configured support
+views, and the combined relaxed policy. The control support threshold is derived from the
+configured support predictions (`heuristic` and `strict` for the current PDF-heading gate), so the
+default value is two because both independent support views must agree. Every variant is written
 under a distinct `*_safe_gate_policy_native_boundary_top8_<variant>.*` stem, so it does not
 overwrite the selected `*_safe_gate_bodyguard_top8.*` output. Interpret any gains jointly at page
 and document level; a relaxed policy with new page losses is not a replacement for the

@@ -31,6 +31,8 @@ RUN_GOLD_RANK_AUDIT="${RUN_GOLD_RANK_AUDIT:-0}"
 LAYOUT_QUERY_BLOCK="${LAYOUT_QUERY_BLOCK:-(?i)\b(row|column)\b|\b(immediately\s+)?(to\s+the\s+)?(right|left)\s+of\b}"
 HEADING_MIN_SCORE_ADVANTAGE="${HEADING_MIN_SCORE_ADVANTAGE:-0.01}"
 BODY_MIN_SCORE_ADVANTAGE="${BODY_MIN_SCORE_ADVANTAGE:-0.0}"
+SUPPORT_PREDICTION_LABELS=(heuristic strict)
+SUPPORT_PREDICTION_COUNT="${#SUPPORT_PREDICTION_LABELS[@]}"
 
 case "$PDF_MARKDOWN_BACKEND" in
   native)
@@ -52,6 +54,8 @@ fi
 BOUNDARY_RANK=$((HIT_K + 1))
 CONTROL_OVERLAP=$((HIT_K - 1))
 RELAXED_OVERLAP=$((CONTROL_OVERLAP > 0 ? CONTROL_OVERLAP - 1 : 0))
+CONTROL_SUPPORT_PAGE_VOTES="${CONTROL_SUPPORT_PAGE_VOTES:-$SUPPORT_PREDICTION_COUNT}"
+RELAXED_SUPPORT_PAGE_VOTES="${RELAXED_SUPPORT_PAGE_VOTES:-1}"
 RUN_LABEL="${SAFE_GATE_POLICY_RUN_LABEL:-${PDF_MARKDOWN_BACKEND}_boundary_top${HIT_K}}"
 REPORT_ROOT="${REPORT_ROOT:-$REPO_ROOT/output/safe_gate_policy_ablation}"
 REPORT_MD="${REPORT_MD:-$REPORT_ROOT/${RUN_LABEL}_policy_ablation.md}"
@@ -182,37 +186,37 @@ run_policy_set() {
     case "$variant" in
       control)
         overlap="$CONTROL_OVERLAP"
-        support_votes=2
+        support_votes="$CONTROL_SUPPORT_PAGE_VOTES"
         doc_max_rank="$HIT_K"
         require_topk_doc=0
         ;;
       no_doc_rank_cap)
         overlap="$CONTROL_OVERLAP"
-        support_votes=2
+        support_votes="$CONTROL_SUPPORT_PAGE_VOTES"
         doc_max_rank=0
         require_topk_doc=0
         ;;
       require_topk_doc)
         overlap="$CONTROL_OVERLAP"
-        support_votes=2
+        support_votes="$CONTROL_SUPPORT_PAGE_VOTES"
         doc_max_rank=0
         require_topk_doc=1
         ;;
       relax_overlap)
         overlap="$RELAXED_OVERLAP"
-        support_votes=2
+        support_votes="$CONTROL_SUPPORT_PAGE_VOTES"
         doc_max_rank="$HIT_K"
         require_topk_doc=0
         ;;
       relax_support)
         overlap="$CONTROL_OVERLAP"
-        support_votes=1
+        support_votes="$RELAXED_SUPPORT_PAGE_VOTES"
         doc_max_rank="$HIT_K"
         require_topk_doc=0
         ;;
       combined_relaxed)
         overlap="$RELAXED_OVERLAP"
-        support_votes=1
+        support_votes="$RELAXED_SUPPORT_PAGE_VOTES"
         doc_max_rank=0
         require_topk_doc=0
         ;;
@@ -229,7 +233,7 @@ run_policy_set() {
 }
 
 echo "safe_gate_policy_ablation backend=$PDF_MARKDOWN_BACKEND hit_k=$HIT_K boundary_rank=$BOUNDARY_RANK run_label=$RUN_LABEL"
-echo "reuses_graph_predictions=1 datasets=[$DATASETS] policies=[$POLICY_VARIANTS]"
+echo "reuses_graph_predictions=1 datasets=[$DATASETS] policies=[$POLICY_VARIANTS] support_views=${SUPPORT_PREDICTION_LABELS[*]} control_support_page_votes=$CONTROL_SUPPORT_PAGE_VOTES relaxed_support_page_votes=$RELAXED_SUPPORT_PAGE_VOTES"
 
 for dataset in $DATASETS; do
   case "$dataset" in
