@@ -749,24 +749,24 @@ export M3DOCVQA_HEADING_OUT="$PWD/output/m3docvqa_heading_breadcrumb_pdf_markdow
   --output-json "$M3DOCVQA_HEADING_OUT/m3docvqa_safe_window20_gate_bodyguard.imagelistq_page0_proxy.json"
 ```
 
-Completed M3DocVQA proxy results (`ImageListQ`, `n=141`):
+Completed aligned M3DocVQA document-level comparison:
 
-| Markdown source | heading pages | accepted | control synthetic hit@4 | gated synthetic hit@4 | recovered | lost | net | control doc hit@4 | gated doc hit@4 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| native PDF headings | 30,343 | 1,152 | 39 | 40 | 2 | 1 | +1 | 81 | 81 |
-| `pymupdf4llm==0.3.4` | 25,355 | 766 | 43 | 42 | 1 | 2 | -1 | 87 | 87 |
+| Markdown source | heading pages | safe accepted | no-heading doc hit@4 | full-heading doc hit@4 | strict-heading doc hit@4 | safe-gated doc hit@4 | safe doc net |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| native PDF headings, current rerun | 30,343 | 972 | 2,346 | 2,342 | 2,342 | 2,346 | 0 |
+| `pymupdf4llm==0.3.4` | 25,355 | 766 | 2,346 | 2,348 | 2,349 | 2,346 | 0 |
 
-Within the PyMuPDF4LLM full-dev run, direct strict-heading graph output raises document hit@4
-from `2,346` to `2,349`, but the safe gate intentionally preserves the no-heading document
-selection at `2,346`. There is no annotated page metric with which to judge its `766` accepted
-page promotions. Under the page-0 proxy, the native extraction is mildly positive but not
-loss-free, while PyMuPDF4LLM is negative at synthetic hit@4.
+The current native rerun resolves the earlier baseline mismatch: the no-heading controls now
+agree at document hit@4. Direct PyMuPDF4LLM strict-heading graph output is `+3` at document
+hit@4 over that control, while native strict headings are `-4`. The safe gate intentionally
+preserves the no-heading document selection in both runs. There is no annotated page metric with
+which to judge the accepted page promotions on M3DocVQA.
 
-Do not compare the native and PyMuPDF4LLM control columns as a clean extraction ablation yet. The
-no-heading controls already differ before page rescue, including full-dev document hit@4
-(`2,279` native versus `2,346` PyMuPDF4LLM). Since a no-heading output should be independent of
-heading extraction, rerun the native control and gate under the current graph inputs/code revision
-before attributing this difference to Markdown conversion.
+The prior native `ImageListQ` page-0 proxy (`39` to `40` synthetic hits at `@4`) predates the
+aligned native rerun and should not be compared against the PyMuPDF4LLM proxy. Within its own
+run, the PyMuPDF4LLM proxy was negative (`43` to `42`, `1` recovered and `2` lost). Recompute the
+native proxy only if that synthetic diagnostic is still needed; the exact-page ViDoSeek test is
+the more meaningful next comparison.
 
 The next backend test should use an exact-page dataset rather than another M3DocVQA proxy. The
 selected-dataset runner now supports `PDF_MARKDOWN_BACKEND=pymupdf4llm DATASETS="vidoseek"` and

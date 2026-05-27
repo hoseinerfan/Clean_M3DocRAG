@@ -730,18 +730,22 @@ export M3DOCVQA_HEADING_OUT="$PWD/output/m3docvqa_heading_breadcrumb_pdf_markdow
   --output-json "$M3DOCVQA_HEADING_OUT/m3docvqa_safe_window20_gate_bodyguard.imagelistq_page0_proxy.json"
 ```
 
-Completed page-0 proxy check (`ImageListQ`, `n=141`):
+Completed aligned M3DocVQA document-level comparison:
 
-| Markdown source | heading pages | accepted | control synthetic hit@4 | gated synthetic hit@4 | recovered | lost | net | control doc hit@4 | gated doc hit@4 |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| native PDF headings | 30,343 | 1,152 | 39 | 40 | 2 | 1 | +1 | 81 | 81 |
-| `pymupdf4llm==0.3.4` | 25,355 | 766 | 43 | 42 | 1 | 2 | -1 | 87 | 87 |
+| Markdown source | heading pages | safe accepted | no-heading doc hit@4 | full-heading doc hit@4 | strict-heading doc hit@4 | safe-gated doc hit@4 | safe doc net |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| native PDF headings, current rerun | 30,343 | 972 | 2,346 | 2,342 | 2,342 | 2,346 | 0 |
+| `pymupdf4llm==0.3.4` | 25,355 | 766 | 2,346 | 2,348 | 2,349 | 2,346 | 0 |
 
-This proxy gives weak positive direction for the native exporter and a negative direction for
-PyMuPDF4LLM, but neither is true page accuracy. The two no-heading controls also differ before
-the gate (full-dev document hit@4 is `2,279` for the existing native run and `2,346` for the
-PyMuPDF4LLM run). Rerun native with the same current graph inputs/code revision before treating
-absolute differences between those backends as an extraction-quality comparison.
+The aligned no-heading controls now match, resolving the earlier run-drift concern. On this
+document-only dataset, direct PyMuPDF4LLM heading graph output is slightly better than the native
+heading output; the safe gate retains the base document retrieval in both runs. This is not page
+rescue evidence because M3DocVQA lacks annotated pages.
+
+The previous native `ImageListQ` page-0 proxy was generated from the older, non-aligned native
+prediction tree and must be rerun before comparing it with PyMuPDF4LLM. The existing PyMuPDF4LLM
+proxy is negative within its own run (`43` to `42` synthetic page hits at `@4`, `1` recovered,
+`2` lost). Prefer the exact-page ViDoSeek experiment below for the backend decision.
 
 Page-labeled PyMuPDF4LLM comparison:
 

@@ -192,27 +192,30 @@ with the exact-page results in Table C.
 
 The structured Markdown comparison has now been run with pinned `pymupdf4llm==0.3.4`, without
 OCR or automatic ONNX Layout initialization. `PyMuPDF4LLM` extracts fewer heading-bearing pages
-than the native heuristic exporter (`25,355 / 44,294` versus `30,343 / 44,294`). On the 141-query
-`ImageListQ` page-0 proxy, the gate moves the native control from `39` to `40` synthetic hits at
-`@4` (`2` recovered, `1` lost), while it moves the PyMuPDF4LLM control from `43` to `42`
-(`1` recovered, `2` lost).
+than the native heuristic exporter (`25,355 / 44,294` versus `30,343 / 44,294`). After rerunning
+the native pipeline with the current graph inputs/code, the no-heading controls align at
+`doc hit@4 = 2,346`.
 
-| M3DocVQA proxy source | Heading pages | Accepted | Control synthetic hit@4 | Gated synthetic hit@4 | Recovered | Lost | Net | Control doc hit@4 | Gated doc hit@4 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| native | 30,343 | 1,152 | 39 | 40 | 2 | 1 | +1 | 81 | 81 |
-| `pymupdf4llm==0.3.4` | 25,355 | 766 | 43 | 42 | 1 | 2 | -1 | 87 | 87 |
+| M3DocVQA source | Heading pages | Safe accepted | No-heading doc hit@4 | Full-heading doc hit@4 | Strict-heading doc hit@4 | Safe-gated doc hit@4 | Safe doc net |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| native, aligned rerun | 30,343 | 972 | 2,346 | 2,342 | 2,342 | 2,346 | 0 |
+| `pymupdf4llm==0.3.4` | 25,355 | 766 | 2,346 | 2,348 | 2,349 | 2,346 | 0 |
 
-These proxy results do not establish page-level accuracy. In addition, the native and
-PyMuPDF4LLM no-heading controls differ before gating, including full-dev document hit@4
-(`2,279` versus `2,346`). A no-heading control should not change solely because the heading
-extractor changed; therefore, do not attribute absolute cross-backend differences to Markdown
-quality until the native control is rerun using the same current graph inputs and code revision.
+At document level, PyMuPDF4LLM headings are slightly better than the native headings for direct
+graph output (`+3` versus the aligned no-heading control for strict headings, while native strict
+headings are `-4`). The safe gate preserves the base document result in both runs, as intended.
+This still cannot establish page rescue quality because M3DocVQA has no page labels.
+
+The earlier native `ImageListQ` page-0 proxy result (`39` to `40` synthetic hits at `@4`) was
+computed before this aligned native rerun and is stale. The PyMuPDF4LLM proxy run was negative
+within its own run (`43` to `42`, `1` recovered and `2` lost), but a new native proxy run is
+required before making any paired proxy comparison.
 
 ## Table E: Dataset Run Status
 
 | Dataset | Prepared? | `plain_top224` | SPLADE text source | Graph-PPR page-labeled result | Next needed action |
 | --- | --- | --- | --- | --- | --- |
-| M3DocVQA/MMQA | yes | yes | exported MMQA page text | document-only safe-gate and `ImageListQ` page-0 proxy diagnostic complete; no true page labels | rerun current native no-heading control before making a backend-quality claim; use downstream VQA for promotion utility |
+| M3DocVQA/MMQA | yes | yes | exported MMQA page text | aligned native/PyMuPDF4LLM document-only comparison complete; no true page labels | use downstream VQA for promotion utility; use ViDoSeek/SciEGQA for exact-page backend testing |
 | MMDocIR | yes | yes | manifest/PDF text | yes | none |
 | SciEGQA-Bench | yes | yes | PDF text | yes | none |
 | ViDoRe V3 | yes | yes | manifest/PDF text | yes | none for heading gate; text-derived Markdown has zero headings, so current gate is a recorded no-op |
