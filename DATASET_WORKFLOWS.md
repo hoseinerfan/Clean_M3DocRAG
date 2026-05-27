@@ -615,6 +615,47 @@ graph-control branch. `*` For ViDoSeek, the gate starts from its no-heading cont
 (`1023 -> 1029` hits); it was not applied directly on top of the separately selected
 `denseheavy150_m3best_pagepreserve` best row (`page@4 = 0.9037`).
 
+## Graph Structural Attribution Ablation
+
+The page-preserving backbone ranks pages, but its graph signal mixes parent-document support and
+adjacent-page continuity. Run this ablation before claiming that its gains are page-local. It
+fixes the source fusion to the general backbone (`DENSE_WEIGHT=1.25`, `SPARSE_WEIGHT=0.75`) and
+changes only graph structure/final graph components:
+
+| variant | page-doc transitions | adjacent-page transitions | explicit final doc component | question answered |
+|---|---:|---:|---:|---|
+| `seed_only` | off | off | off | dense/SPLADE page-seed reference |
+| `adjacent_only` | off | on | off | can page-local continuity help without document support? |
+| `doc_edges_page_score_only` | on | off | off | does document diffusion already alter page ranking? |
+| `doc_prior_only` | on | off | on | how much comes from document support alone? |
+| `full_no_explicit_doc_score` | on | on | off | do both edge types suffice without direct document boost? |
+| `current_full_graph` | on | on | on | frozen `denseheavy125_medium_both` structure |
+
+The default selected-dataset runner covers the five exact-page datasets with available dense and
+SPLADE artifacts: MMDocIR, SciEGQA, ViDoSeek, ViDoRe V3, and DUDE. OpenDocVQA is supported as
+an opt-in extension, but is not included by default because its sparse graph input is OCR-backed.
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+git pull --rebase origin codex/mmdocir-hpc-workflow
+source hpc_vital_paths.generated.env
+
+DATASETS="mmdocir sciegqa vidoseek vidore dude" \
+bash examples/run_graph_structure_ablation_selected_datasets.sh
+```
+
+The wrapper writes each dataset's six predictions/summaries under
+`output/<dataset>/graph_structure_ablation/` and writes a combined table to
+`graph_structure_ablation_results.md`. Paste that compact report back for interpretation. Read the
+outcome as follows:
+
+- if `doc_prior_only` captures most of the `current_full_graph` gain, the backbone is primarily
+  document-support reranking with page output;
+- if `adjacent_only` increases page metrics without comparable document gains, local page
+  continuity has independent evidence;
+- if `full_no_explicit_doc_score` matches `current_full_graph`, the explicit parent-document final
+  term can be weakened or removed for a cleaner page-level claim.
+
 ## Safe Heading/Bodyguard Rescue Gate
 
 This is the frozen precision-oriented rescue layer on top of the heading-augmented graph views. It is not a global reranker. It only accepts narrow rank-window promotions when the promoted page is supported by multiple heading views, beats the displaced boundary page by heading score, and passes a body-evidence guard. It also abstains on layout-sensitive queries such as row/column/right/left questions.

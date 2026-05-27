@@ -76,6 +76,36 @@ Current claim:
 - MMLongBench DocQA is now prepared as the next page-labeled stress test. It should use the same page-preserving default first, because `ans_page_list` provides exact zero-based page labels.
 - DUDE is scaffolded as the MP-DocVQA replacement target. It should also use the page-preserving default first, after validating the converter's `answer_page_base` sanity summary.
 
+## Structural Attribution Ablation For The Backbone Claim
+
+The final page score includes both propagated page mass and propagated parent-document mass.
+Consequently, page-ranked output does not by itself establish that the graph contributes
+page-local evidence. A dedicated structural ablation is now available:
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+git pull --rebase origin codex/mmdocir-hpc-workflow
+source hpc_vital_paths.generated.env
+
+DATASETS="mmdocir sciegqa vidoseek vidore dude" \
+bash examples/run_graph_structure_ablation_selected_datasets.sh
+```
+
+The runner keeps the `denseheavy125_medium_both` dense/SPLADE weights fixed and generates:
+
+| variant | active graph contribution |
+|---|---|
+| `seed_only` | none; page-seed reference |
+| `adjacent_only` | immediate same-document page neighbors only |
+| `doc_edges_page_score_only` | page-document propagation, but no explicit final document score |
+| `doc_prior_only` | page-document propagation plus final document score, with no adjacency |
+| `full_no_explicit_doc_score` | current transitions without final document score |
+| `current_full_graph` | current full backbone |
+
+The consolidated output is `graph_structure_ablation_results.md`. It reports page/doc recall and
+deltas against `seed_only`. This is the experiment required to decide whether to describe the
+backbone as page-local graph evidence or more narrowly as document-aware page reranking.
+
 ## 2026-05-23 Addendum: Graph Augmentation Status
 
 Recent experiments added three new graph-augmentation directions: PDF hyperlink edges for M3DocVQA/MMQA, query-anchor/financial evidence audits for MMDocIR, and LayoutLMv3 page-embedding kNN edges for MMDocIR.
