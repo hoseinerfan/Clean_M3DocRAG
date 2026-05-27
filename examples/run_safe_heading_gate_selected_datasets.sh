@@ -9,7 +9,7 @@ set -euo pipefail
 #   DATASETS="dude" BODY_MIN_SCORE_ADVANTAGE=0.0 bash examples/run_safe_heading_gate_selected_datasets.sh
 #   SAFE_GATE_PROFILE=window20 RUN_GOLD_RANK_AUDIT=1 DATASETS="dude vidore" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=window20 DATASETS="m3docvqa" bash examples/run_safe_heading_gate_selected_datasets.sh
-#   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="vidoseek sciegqa dude" bash examples/run_safe_heading_gate_selected_datasets.sh
+#   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir vidoseek sciegqa dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #
 # The script assumes the expensive dense/plain_top224 and SPLADE predictions already
 # exist. If any are missing it prints the expected path and exits before reranking.
@@ -103,6 +103,39 @@ first_existing_file() {
     fi
   done
   return 1
+}
+
+recorded_pdf_root() {
+  local summary_json="$1"
+  local markdown_jsonl="$2"
+  "$PYTHON_BIN" - "$summary_json" "$markdown_jsonl" <<'PY'
+import json
+import os
+import sys
+from pathlib import Path
+
+summary_path = Path(sys.argv[1])
+markdown_path = Path(sys.argv[2])
+if summary_path.is_file():
+    with summary_path.open("r", encoding="utf-8") as handle:
+        summary = json.load(handle)
+    for root in summary.get("pdf_roots") or []:
+        if str(root).strip():
+            print(str(root).strip())
+            raise SystemExit(0)
+
+paths = []
+if markdown_path.is_file():
+    with markdown_path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            row = json.loads(line)
+            pdf_path = str(row.get("pdf_path") or "").strip()
+            if pdf_path:
+                paths.append(pdf_path)
+if paths:
+    root = Path(os.path.commonpath(paths))
+    print(str(root.parent if root.is_file() else root))
+PY
 }
 
 print_summary_row() {
@@ -417,6 +450,71 @@ run_dude() {
     "${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}"
 }
 
+run_mmdocir() {
+  echo
+  echo "== mmdocir =="
+  unset LOCAL_DATA_DIR LOCAL_EMBEDDINGS_DIR LOCAL_OUTPUT_DIR LOCAL_MODEL_DIR
+  # shellcheck disable=SC1091
+  source "$REPO_ROOT/mmdocir/env_hpc.sh"
+
+  local data_root="$LOCAL_DATA_DIR/mm-docir"
+  local gold="${MMDOCIR_GOLD:-$data_root/MMQA_dev.jsonl}"
+  local doc_pages_jsonl="${MMDOCIR_DOC_PAGES:-$data_root/doc_pages_dev.jsonl}"
+  local native_pdf_markdown_jsonl="${MMDOCIR_PDF_MD_JSONL:-$LOCAL_OUTPUT_DIR/mmdocir/pdf_markdown/doc_pages_dev_with_pdf_markdown.jsonl}"
+  local native_summary="${MMDOCIR_NATIVE_PDF_MD_SUMMARY:-$(dirname "$native_pdf_markdown_jsonl")/pdf_markdown_summary.json}"
+  local out_dir="$LOCAL_OUTPUT_DIR/mmdocir/heading_breadcrumb_pdf_markdown${PDF_MARKDOWN_RUN_SUFFIX}_source_ablation"
+  local pdf_root="${MMDOCIR_PDF_ROOT:-}"
+  local pdf_markdown_jsonl="$out_dir/doc_pages_dev_with_pdf_markdown.jsonl"
+  local pdf_markdown_summary="$out_dir/pdf_markdown_summary.json"
+  local variant_dir="$out_dir/pdf_markdown_variants"
+  local dense_pred="${MMDOCIR_DENSE_PRED:-$LOCAL_OUTPUT_DIR/mmdocir/plain_top224_ret1000_prediction.json}"
+  local sparse_pred="${MMDOCIR_SPARSE_PRED:-$LOCAL_OUTPUT_DIR/mmdocir/doc_rrf_exact_dense_splade/mmdocir_splade_ret1000.prediction.json}"
+
+  require_file gold "$gold"
+  require_file doc_pages "$doc_pages_jsonl"
+  require_file dense_pred "$dense_pred"
+  require_file sparse_pred "$sparse_pred"
+
+  if [[ -z "$pdf_root" ]]; then
+    pdf_root="$(recorded_pdf_root "$native_summary" "$native_pdf_markdown_jsonl")"
+    if [[ -n "$pdf_root" ]]; then
+      echo "mmdocir_pdf_root_from_native_provenance: $pdf_root"
+    fi
+  fi
+  if [[ -z "$pdf_root" ]]; then
+    echo "missing_mmdocir_pdf_root: set MMDOCIR_PDF_ROOT to the directory containing the source PDFs." >&2
+    echo "hint: inspect native provenance at $native_summary or $native_pdf_markdown_jsonl." >&2
+    return 1
+  fi
+  if [[ ! -d "$pdf_root" ]]; then
+    echo "missing_mmdocir_pdf_root_directory: $pdf_root" >&2
+    echo "Set MMDOCIR_PDF_ROOT to the available source-PDF directory before rerunning." >&2
+    return 1
+  fi
+  mkdir -p "$out_dir"
+
+  prepare_pdf_markdown "$doc_pages_jsonl" "$pdf_root" "$pdf_markdown_jsonl" "$pdf_markdown_summary" "$variant_dir"
+
+  local tag="mmdocir"
+  run_graph_view mmdocir "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$pdf_markdown_jsonl" "${tag}_heading_control_no_heading" none
+  run_graph_view mmdocir "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$pdf_markdown_jsonl" "${tag}_heading_full_wide_edgeonly_transfer" query_gated_shared
+  run_graph_view mmdocir "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
+  run_graph_view mmdocir "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
+
+  run_safe_gate \
+    mmdocir \
+    "$gold" \
+    "$out_dir" \
+    "$out_dir/${tag}_heading_control_no_heading.prediction.json" \
+    "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
+    "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
+    "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
+    "$pdf_markdown_jsonl" \
+    "$pdf_markdown_jsonl" \
+    "${tag}_${SAFE_GATE_OUTPUT_SUFFIX}" \
+    4
+}
+
 run_sciegqa() {
   echo
   echo "== sciegqa =="
@@ -568,6 +666,9 @@ for dataset in $DATASETS; do
       ;;
     dude)
       run_dude
+      ;;
+    mmdocir|mm-docir)
+      run_mmdocir
       ;;
     sciegqa|sci-egqa)
       run_sciegqa

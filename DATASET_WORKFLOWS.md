@@ -783,9 +783,38 @@ useful page rescue that native headings did not admit. This provides exact-page 
 extractor diversity can matter to the gated method, although the gain is small.
 
 DUDE is already supported by the same runner with `DATASETS="dude"`. MMDocIR remains the
-strongest positive native result, but its prepared Hugging Face artifact provides rendered pages
-rather than a declared source-PDF root. Run a PyMuPDF4LLM MMDocIR comparison only after identifying
-and recording a reproducible PDF source path.
+strongest positive native result. Although its prepared Hugging Face artifact provides rendered
+pages rather than a declared source-PDF root, the completed native PDF-Markdown export records the
+PDF root in `pdf_markdown_summary.json` and matched PDF paths in its JSONL output. The
+selected-dataset runner now recovers that provenance automatically for `DATASETS="mmdocir"`; set
+`MMDOCIR_PDF_ROOT` explicitly if the recorded directory has moved.
+
+MMDocIR PyMuPDF4LLM exact-page comparison:
+
+```bash
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+source hpc_vital_paths.generated.env
+
+PDF_MARKDOWN_FORCE_REBUILD=1 \
+PDF_MARKDOWN_BACKEND=pymupdf4llm \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="mmdocir" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
+
+If the runner reports `missing_mmdocir_pdf_root_directory`, recover or locate the PDF directory
+and rerun with:
+
+```bash
+MMDOCIR_PDF_ROOT=/path/to/mmdocir/source/pdfs \
+PDF_MARKDOWN_FORCE_REBUILD=1 \
+PDF_MARKDOWN_BACKEND=pymupdf4llm \
+SAFE_GATE_PROFILE=boundary \
+RUN_GOLD_RANK_AUDIT=1 \
+DATASETS="mmdocir" \
+bash examples/run_safe_heading_gate_selected_datasets.sh
+```
 
 Alternative PDF-to-Markdown quality check:
 
