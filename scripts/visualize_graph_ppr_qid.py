@@ -515,10 +515,10 @@ def build_visual_payload(
     visualized_dense_pages = [page for page in visualized_pages if page.get("dense_rank") is not None]
     visualized_sparse_pages = [page for page in visualized_pages if page.get("sparse_rank") is not None]
     stats = {
-        "graph_retrieved_page_count": len(graph_pages_all),
-        "graph_retrieved_doc_count": len(graph_doc_ranks),
-        "graph_retrieved_gold_page_count": count_gold_pages(graph_pages_all, gold_pages),
-        "graph_retrieved_gold_doc_page_count": count_gold_doc_pages(graph_pages_all, gold_docs),
+        "graph_output_page_count": len(graph_pages_all),
+        "graph_output_doc_count": len(graph_doc_ranks),
+        "graph_output_gold_page_count": count_gold_pages(graph_pages_all, gold_pages),
+        "graph_output_gold_doc_page_count": count_gold_doc_pages(graph_pages_all, gold_docs),
         "dense_retrieved_page_count": len(dense_pages_all),
         "dense_retrieved_doc_count": len(dense_doc_ranks),
         "dense_retrieved_gold_page_count": count_gold_pages(dense_pages_all, gold_pages),
@@ -531,6 +531,9 @@ def build_visual_payload(
         "source_union_doc_count": len(source_union_doc_ids),
         "source_union_gold_page_count": count_gold_uids(source_union_uids, gold_pages),
         "source_union_gold_doc_page_count": count_gold_doc_uids(source_union_uids, gold_docs),
+        "source_union_page_to_doc_edge_count": len(source_union_uids),
+        "source_union_doc_to_page_edge_count": len(source_union_uids),
+        "source_union_page_doc_directed_edge_count": 2 * len(source_union_uids),
         "gold_doc_count": len(gold_docs),
         "gold_page_count": len(gold_pages),
         "visualized_page_count": len(visualized_pages),
@@ -540,9 +543,14 @@ def build_visual_payload(
         "visualized_sparse_page_count": len(visualized_sparse_pages),
         "visualized_gold_page_count": sum(1 for page in visualized_pages if page["is_gold_page"]),
         "visualized_gold_doc_page_count": sum(1 for page in visualized_pages if page["is_gold_doc"]),
-        "hidden_graph_retrieved_page_count": max(
+        "hidden_graph_output_page_count": max(
             0,
             len(graph_pages_all) - len(visualized_graph_pages),
+        ),
+        "hidden_source_union_page_count": max(
+            0,
+            len(source_union_uids)
+            - len({page["uid"] for page in visualized_pages if page.get("dense_rank") or page.get("sparse_rank")}),
         ),
         "graph_top_pages_requested": int(graph_top_pages),
         "source_top_pages_requested": int(source_top_pages),
@@ -609,9 +617,10 @@ def render_svg(payload: dict[str, Any], same_doc_window: int) -> str:
     pieces.append(f'<text x="{margin}" y="{y + 8}" class="body muted">{html.escape(rank_line)}</text>')
     stats = payload.get("stats", {})
     count_line = (
-        f"graph pages={stats.get('graph_retrieved_page_count', 0)} "
-        f"(gold pages={stats.get('graph_retrieved_gold_page_count', 0)}, "
-        f"gold-doc pages={stats.get('graph_retrieved_gold_doc_page_count', 0)}); "
+        f"candidate page nodes={stats.get('source_union_page_count', 0)}; "
+        f"graph output pages={stats.get('graph_output_page_count', 0)} "
+        f"(gold pages={stats.get('graph_output_gold_page_count', 0)}, "
+        f"gold-doc pages={stats.get('graph_output_gold_doc_page_count', 0)}); "
         f"visualized={stats.get('visualized_page_count', 0)} pages / "
         f"{stats.get('visualized_doc_count', 0)} docs"
     )
@@ -741,10 +750,10 @@ def render_html(payload: dict[str, Any], svg_text: str) -> str:
     stats = payload.get("stats", {})
     stat_rows = []
     for key in [
-        "graph_retrieved_page_count",
-        "graph_retrieved_doc_count",
-        "graph_retrieved_gold_page_count",
-        "graph_retrieved_gold_doc_page_count",
+        "graph_output_page_count",
+        "graph_output_doc_count",
+        "graph_output_gold_page_count",
+        "graph_output_gold_doc_page_count",
         "dense_retrieved_page_count",
         "dense_retrieved_doc_count",
         "dense_retrieved_gold_page_count",
@@ -757,11 +766,15 @@ def render_html(payload: dict[str, Any], svg_text: str) -> str:
         "source_union_doc_count",
         "source_union_gold_page_count",
         "source_union_gold_doc_page_count",
+        "source_union_page_to_doc_edge_count",
+        "source_union_doc_to_page_edge_count",
+        "source_union_page_doc_directed_edge_count",
         "gold_doc_count",
         "gold_page_count",
         "visualized_page_count",
         "visualized_doc_count",
-        "hidden_graph_retrieved_page_count",
+        "hidden_graph_output_page_count",
+        "hidden_source_union_page_count",
     ]:
         stat_rows.append(
             f"<tr><td>{html.escape(key)}</td><td>{html.escape(str(stats.get(key, '')))}</td></tr>"
@@ -922,24 +935,26 @@ def main() -> None:
     )
     stats = payload.get("stats", {})
     print(
-        "retrieved_counts: "
-        f"graph_pages={stats.get('graph_retrieved_page_count')} "
-        f"graph_docs={stats.get('graph_retrieved_doc_count')} "
-        f"graph_gold_pages={stats.get('graph_retrieved_gold_page_count')} "
-        f"graph_gold_doc_pages={stats.get('graph_retrieved_gold_doc_page_count')}"
+        "graph_output_counts: "
+        f"pages={stats.get('graph_output_page_count')} "
+        f"docs={stats.get('graph_output_doc_count')} "
+        f"gold_pages={stats.get('graph_output_gold_page_count')} "
+        f"gold_doc_pages={stats.get('graph_output_gold_doc_page_count')}"
     )
     print(
         "source_union_counts: "
         f"pages={stats.get('source_union_page_count')} "
         f"docs={stats.get('source_union_doc_count')} "
         f"gold_pages={stats.get('source_union_gold_page_count')} "
-        f"gold_doc_pages={stats.get('source_union_gold_doc_page_count')}"
+        f"gold_doc_pages={stats.get('source_union_gold_doc_page_count')} "
+        f"page_doc_directed_edges={stats.get('source_union_page_doc_directed_edge_count')}"
     )
     print(
         "visualized_counts: "
         f"pages={stats.get('visualized_page_count')} "
         f"docs={stats.get('visualized_doc_count')} "
-        f"hidden_graph_pages={stats.get('hidden_graph_retrieved_page_count')}"
+        f"hidden_graph_output_pages={stats.get('hidden_graph_output_page_count')} "
+        f"hidden_source_union_pages={stats.get('hidden_source_union_page_count')}"
     )
     print(f"saved_svg: {svg_path}")
     if args.output_html:
