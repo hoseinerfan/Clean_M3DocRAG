@@ -619,6 +619,7 @@ Current validated runs:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---|
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json` |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
+| SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json` |
 | ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json` |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json` |
@@ -628,6 +629,9 @@ Interpretation:
 
 - MMDocIR is the strongest positive-control result: the raw heading candidate is slightly worse than base at page hit@4, but the gate extracts 3 additional hits with zero losses.
 - SciEGQA-Bench is a useful negative control: the raw heading candidate improves page hit@4, but the safe gate abstains enough to preserve the baseline with zero losses.
+- SciEGQA-Bench PyMuPDF4LLM is a positive extraction ablation: the direct alternative heading
+  candidate ties the no-heading control at page hit@4, while the safe gate accepts only `2`
+  promotions and obtains `+1` with zero loss.
 - ViDoSeek shows that the body guard and page-0 abstention remove the observed losses while preserving a positive net gain.
 - ViDoSeek PyMuPDF4LLM is a completed exact-page backend ablation. It recovers the same `+6`
   zero-loss final result as native Markdown, but its direct candidate is weaker (`1019` rather
@@ -767,17 +771,16 @@ PyMuPDF4LLM produces substantially fewer heading-bearing pages and weaker direct
 rankings, then reaches the same final result only after the conservative gate. It is therefore
 not an improvement over native Markdown on ViDoSeek.
 
-SciEGQA-Bench is a useful second exact-page test because the native safe gate was a safe
-abstention (`0` net, `0` lost) even though the unguarded heading candidate improved:
+The SciEGQA-Bench exact-page backend test has also completed:
 
-```bash
-PDF_MARKDOWN_FORCE_REBUILD=1 \
-PDF_MARKDOWN_BACKEND=pymupdf4llm \
-SAFE_GATE_PROFILE=boundary \
-RUN_GOLD_RANK_AUDIT=1 \
-DATASETS="sciegqa" \
-bash examples/run_safe_heading_gate_selected_datasets.sh
-```
+| SciEGQA Markdown source | heading pages | raw heading lines | strict heading lines | direct full page hit@4 | direct strict page hit@4 | gated page hit@4 | accepted | recovered | lost | net |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| native PyMuPDF | not recorded here | not recorded here | not recorded here | 1,328 | not recorded here | 1,323 | 28 | 0 | 0 | 0 |
+| `pymupdf4llm==0.3.4` | 337 | 505 | 389 | 1,323 | 1,323 | 1,324 | 2 | 1 | 0 | +1 |
+
+PyMuPDF4LLM creates a much smaller promotion set on SciEGQA and the bodyguard identifies one
+useful page rescue that native headings did not admit. This provides exact-page evidence that
+extractor diversity can matter to the gated method, although the gain is small.
 
 DUDE is already supported by the same runner with `DATASETS="dude"`. MMDocIR remains the
 strongest positive native result, but its prepared Hugging Face artifact provides rendered pages

@@ -666,6 +666,7 @@ Validated safe-gate results so far:
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
+| SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
 | ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
@@ -676,6 +677,7 @@ Artifact paths:
 ```text
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/sciegqa_safe_gate_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json
@@ -695,6 +697,12 @@ syntax/JPEG warnings; its extraction summary reports `backend_error_doc_count=0`
 and its direct full-heading output is weaker at page hit@4 (`1,019` versus `1,033`), but the
 bodyguard/page-0 gate still returns the same safe `1,029` hits (`+6`, `0` lost). Treat this as
 evidence that the gate is robust to an alternative Markdown extractor, not as an extractor gain.
+
+SciEGQA PyMuPDF4LLM note: the corrected exact-page run uses the no-heading graph control as its
+base and has `backend_error_doc_count=0` and `unmatched_doc_count=0`. Full, heuristic-only, and
+strict direct heading views all tie control at `1,323` page hits at `@4`. The safe gate accepts
+only `2` promotions and improves to `1,324` (`1` recovered, `0` lost). Native headings did not
+yield a gated improvement on this dataset, so this is a small positive extractor-diversity case.
 
 Runner for reproducing or extending the M3DocVQA diagnostic:
 
@@ -777,17 +785,21 @@ run, the PyMuPDF4LLM proxy was negative (`43` to `42`, `1` recovered and `2` los
 native proxy only if that synthetic diagnostic is still needed; the exact-page ViDoSeek test is
 the more meaningful next comparison.
 
-The first exact-page backend test has completed on ViDoSeek. The selected-dataset runner also
-supports `PDF_MARKDOWN_BACKEND=pymupdf4llm DATASETS="sciegqa"` if a second exact-page extraction
-transfer check is needed. ViDoSeek's completed artifact is:
+Exact-page backend tests are complete on ViDoSeek and SciEGQA. ViDoSeek's completed artifact is:
 
 ```text
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json
 ```
 
-Use SciEGQA next rather than repeating ViDoSeek; its native result is a zero-loss abstention
-despite a beneficial ungated heading candidate, so it tests whether the guard behaves consistently
-with an alternative extractor.
+SciEGQA's completed artifact is:
+
+```text
+/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/sciegqa_safe_gate_bodyguard.summary.json
+```
+
+Together, these results show that PyMuPDF4LLM does not dominate native extraction: it ties native
+after gating on ViDoSeek and provides a small `+1` gated gain on SciEGQA. Keep native extraction
+as the default backend, and report PyMuPDF4LLM as an extractor-diversity ablation.
 
 Alternative M3DocVQA Markdown extraction experiment:
 

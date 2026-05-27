@@ -127,6 +127,7 @@ These numbers are page hit counts at `k=4`, not average recall. The gate is inte
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
+| SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 |
 | ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
 | ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 |
 | DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
@@ -138,6 +139,8 @@ Safe-gate artifacts:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json`
 - SciEGQA-Bench summary:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json`
+- SciEGQA-Bench PyMuPDF4LLM summary:
+  - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/sciegqa_safe_gate_bodyguard.summary.json`
 - ViDoSeek summary:
   - `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json`
 - ViDoSeek PyMuPDF4LLM summary:
@@ -221,13 +224,19 @@ Markdown (`3,346` versus `4,342`) and a weaker direct full-heading candidate at 
 and `0` lost. This is a successful robustness check for the gate, not evidence that
 PyMuPDF4LLM should replace the native extraction backend.
 
+SciEGQA provides a complementary exact-page result. PyMuPDF4LLM conversion completed with `337`
+heading pages and no failed or unmatched documents. Its direct candidate ties the no-heading
+control at `1,323` page hits at `@4`, but the gate accepts `2` promotions and raises the output
+to `1,324` with `1` recovery and `0` losses. This is a small positive extractor-diversity
+result; it does not establish PyMuPDF4LLM as a globally better heading source.
+
 ## Table E: Dataset Run Status
 
 | Dataset | Prepared? | `plain_top224` | SPLADE text source | Graph-PPR page-labeled result | Next needed action |
 | --- | --- | --- | --- | --- | --- |
 | M3DocVQA/MMQA | yes | yes | exported MMQA page text | aligned native/PyMuPDF4LLM document-only comparison complete; no true page labels | use downstream VQA for promotion utility; use ViDoSeek/SciEGQA for exact-page backend testing |
 | MMDocIR | yes | yes | manifest/PDF text | yes | none |
-| SciEGQA-Bench | yes | yes | PDF text | yes | run PyMuPDF4LLM exact-page backend ablation if another extraction transfer check is needed |
+| SciEGQA-Bench | yes | yes | PDF text | native and PyMuPDF4LLM exact-page safe-gate results complete | PyMuPDF4LLM yields a small guarded `+1` with zero loss |
 | ViDoRe V3 | yes | yes | manifest/PDF text | yes | none for heading gate; text-derived Markdown has zero headings, so current gate is a recorded no-op |
 | ViDoSeek | yes | yes | PDF text | native and PyMuPDF4LLM exact-page safe-gate results complete | retain native Markdown as primary; PyMuPDF4LLM ties gated output with weaker direct headings |
 | OpenDocVQA | yes | yes | OCR-backed page text | yes | keep Graph-PPR as full-dev result; unconditional `pairwise_content_posterior` was negative |
