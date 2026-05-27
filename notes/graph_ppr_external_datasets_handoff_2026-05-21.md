@@ -685,7 +685,7 @@ DUDE is complete through the frozen `denseheavy125_medium_both` page-labeled Gra
 
 ## Safe Heading/Bodyguard Gate Status
 
-Current method name: **Boundary-Aware Multi-View Heading Rescue Gate**.
+Current pipeline name: **EvidenceGuard-PPR**. Gate component: **Conservative Boundary Rescue Gate**.
 
 Use this as a conservative post-processing/rescue layer, not as the final global reranker. It only swaps a promoted page into the top 4 when:
 
@@ -696,6 +696,10 @@ Use this as a conservative post-processing/rescue layer, not as the final global
 - the promoted page passes a body-evidence guard;
 - the query is not a layout-sensitive row/column/right/left query.
 
+As of the common EvidenceGuard-PPR definition, no dataset-specific page-index or document-rank
+exception is enabled by default. The ViDoSeek page-0 block and DUDE doc-rank-1 constraint below
+are retained as reproducible audit variants only.
+
 Validated safe-gate results so far:
 
 | Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects |
@@ -703,9 +707,9 @@ Validated safe-gate results so far:
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 |
-| ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
-| ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 |
-| DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
+| ViDoSeek (`page-0-block` audit) | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
+| ViDoSeek (`pymupdf4llm==0.3.4`, `page-0-block` audit) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 |
+| DUDE (`doc-rank-1` audit) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
 | ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 |
 
 Artifact paths:
@@ -720,7 +724,7 @@ Artifact paths:
 /mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/heading_breadcrumb_text_source_ablation/vidore_safe_gate_bodyguard.summary.json
 ```
 
-DUDE note: the broad doc-top4 gate had one cross-document loss on a generic annual-report/year query. The `doc-rank-1` variant removes that loss and makes DUDE a neutral abstention result.
+DUDE note: the broad doc-top4 gate had one cross-document loss on a generic annual-report/year query. The `doc-rank-1` audit removes that loss and makes DUDE a neutral abstention result, but it is not enabled in the default method.
 
 ViDoRe V3 note: the text-source Markdown variant preparation produced `0` outline heading lines,
 `0` heuristic heading lines, and `0` strict heuristic heading lines. Consequently, the full,
@@ -731,8 +735,8 @@ ViDoSeek PyMuPDF4LLM note: the exact-page backend comparison completed despite r
 syntax/JPEG warnings; its extraction summary reports `backend_error_doc_count=0` and
 `unmatched_doc_count=0`. It produces fewer heading pages than native (`3,346` versus `4,342`),
 and its direct full-heading output is weaker at page hit@4 (`1,019` versus `1,033`), but the
-bodyguard/page-0 gate still returns the same safe `1,029` hits (`+6`, `0` lost). Treat this as
-evidence that the gate is robust to an alternative Markdown extractor, not as an extractor gain.
+bodyguard/page-0 audit still returns the same safe `1,029` hits (`+6`, `0` lost). Treat this as
+evidence from the constrained audit, not as the default method or as an extractor gain.
 
 SciEGQA PyMuPDF4LLM note: the corrected exact-page run uses the no-heading graph control as its
 base and has `backend_error_doc_count=0` and `unmatched_doc_count=0`. Full, heuristic-only, and

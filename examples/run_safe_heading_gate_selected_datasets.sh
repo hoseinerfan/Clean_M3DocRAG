@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Run the frozen heading/bodyguard rescue gate on selected datasets.
+# Run the heading/bodyguard rescue gate on selected datasets.
 #
 # Usage examples on HPC:
 #   bash examples/run_safe_heading_gate_selected_datasets.sh
@@ -11,6 +11,8 @@ set -euo pipefail
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=window20 DATASETS="m3docvqa" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   PDF_MARKDOWN_BACKEND=pymupdf4llm SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir vidoseek sciegqa dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #   NATIVE_CODEGUARD_ABLATION=1 SAFE_GATE_PROFILE=boundary RUN_GOLD_RANK_AUDIT=1 DATASETS="mmdocir" bash examples/run_safe_heading_gate_selected_datasets.sh
+#   VIDOSEEK_REJECT_PROMOTED_PAGE_IDX=0 DATASETS="vidoseek" bash examples/run_safe_heading_gate_selected_datasets.sh
+#   DUDE_PROMOTED_DOC_MAX_BASE_RANK=1 DATASETS="dude" bash examples/run_safe_heading_gate_selected_datasets.sh
 #
 # The script assumes the expensive dense/plain_top224 and SPLADE predictions already
 # exist. If any are missing it prints the expected path and exits before reranking.
@@ -466,7 +468,12 @@ run_dude() {
     gate_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
   fi
 
-  local dude_suffix="${DUDE_SAFE_GATE_OUTPUT_SUFFIX:-${gate_suffix}_docrank${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}}"
+  local promoted_doc_max_base_rank="${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-4}"
+  local default_dude_suffix="$gate_suffix"
+  if [[ -n "${DUDE_PROMOTED_DOC_MAX_BASE_RANK+x}" ]]; then
+    default_dude_suffix="${gate_suffix}_docrank${promoted_doc_max_base_rank}"
+  fi
+  local dude_suffix="${DUDE_SAFE_GATE_OUTPUT_SUFFIX:-$default_dude_suffix}"
   run_safe_gate \
     dude \
     "$gold" \
@@ -478,7 +485,7 @@ run_dude() {
     "$heading_evidence_jsonl" \
     "$pdf_markdown_jsonl" \
     "${tag}_${dude_suffix}" \
-    "${DUDE_PROMOTED_DOC_MAX_BASE_RANK:-1}"
+    "$promoted_doc_max_base_rank"
 }
 
 run_mmdocir() {
@@ -652,7 +659,16 @@ run_vidoseek() {
     heading_evidence_jsonl="$variant_dir/doc_pages_dev_pdf_markdown.strict_heading_codeguard.jsonl"
     gate_base_suffix="${SAFE_GATE_OUTPUT_SUFFIX}_codeguard"
   fi
-  local gate_suffix="${VIDOSEEK_SAFE_GATE_OUTPUT_SUFFIX:-${gate_base_suffix}_no_page0}"
+  local rejected_promoted_page_idx="${VIDOSEEK_REJECT_PROMOTED_PAGE_IDX:-}"
+  local default_gate_suffix="$gate_base_suffix"
+  if [[ -n "$rejected_promoted_page_idx" ]]; then
+    if [[ "$rejected_promoted_page_idx" == "0" ]]; then
+      default_gate_suffix="${gate_base_suffix}_no_page0"
+    else
+      default_gate_suffix="${gate_base_suffix}_reject_pageidx"
+    fi
+  fi
+  local gate_suffix="${VIDOSEEK_SAFE_GATE_OUTPUT_SUFFIX:-$default_gate_suffix}"
 
   run_safe_gate \
     vidoseek \
@@ -666,7 +682,7 @@ run_vidoseek() {
     "$pdf_markdown_jsonl" \
     "${tag}_${gate_suffix}" \
     4 \
-    "${VIDOSEEK_REJECT_PROMOTED_PAGE_IDX:-0}"
+    "$rejected_promoted_page_idx"
 }
 
 run_vidore() {

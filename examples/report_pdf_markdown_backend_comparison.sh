@@ -6,6 +6,7 @@ set -euo pipefail
 # Usage on HPC:
 #   DATASETS="vidoseek sciegqa mmdocir" bash examples/report_pdf_markdown_backend_comparison.sh
 #   REPORT_ROOT=/path/to/reports DATASETS="dude" bash examples/report_pdf_markdown_backend_comparison.sh
+#   VIDOSEEK_NATIVE_SAFE_SUMMARY=/path/to/historical_no_page0.summary.json DATASETS="vidoseek" bash examples/report_pdf_markdown_backend_comparison.sh
 #
 # This script reads completed artifacts. Run the PyMuPDF4LLM gate pipeline first
 # for any dataset that has no `_pymupdf4llm_source_ablation` output directory yet.
@@ -19,17 +20,6 @@ fi
 DATASETS="${DATASETS:-vidoseek sciegqa mmdocir}"
 REPORT_ROOT="${REPORT_ROOT:-$REPO_ROOT/output/pdf_markdown_backend_comparison}"
 mkdir -p "$REPORT_ROOT"
-
-first_existing_file() {
-  local path
-  for path in "$@"; do
-    if [[ -f "$path" ]]; then
-      printf '%s\n' "$path"
-      return 0
-    fi
-  done
-  return 1
-}
 
 compare_pair() {
   local dataset="$1"
@@ -128,13 +118,8 @@ report_vidoseek() {
   local native_jsonl="${VIDOSEEK_PDF_MD_JSONL:-$LOCAL_OUTPUT_DIR/vidoseek/pdf_markdown/doc_pages_dev_with_pdf_markdown.jsonl}"
   local native_out="$LOCAL_OUTPUT_DIR/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation"
   local alternate_out="$LOCAL_OUTPUT_DIR/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation"
-  local native_safe
-  native_safe="$(
-    first_existing_file \
-      "$native_out/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json" \
-      "$native_out/vidoseek_safe_gate_bodyguard_no_page0.summary.json" \
-      || true
-  )"
+  local native_safe="${VIDOSEEK_NATIVE_SAFE_SUMMARY:-$native_out/vidoseek_safe_gate_bodyguard.summary.json}"
+  local alternate_safe="${VIDOSEEK_ALTERNATE_SAFE_SUMMARY:-$alternate_out/vidoseek_safe_gate_bodyguard.summary.json}"
   compare_pair \
     vidoseek \
     "$native_jsonl" \
@@ -148,7 +133,7 @@ report_vidoseek() {
     "$native_out/vidoseek_heading_strict_heading_wide_edgeonly_transfer.summary.json" \
     "$alternate_out/vidoseek_heading_strict_heading_wide_edgeonly_transfer.summary.json" \
     "$native_safe" \
-    "$alternate_out/vidoseek_safe_gate_bodyguard_no_page0.summary.json"
+    "$alternate_safe"
 }
 
 report_dude() {
@@ -157,6 +142,8 @@ report_dude() {
   source "$REPO_ROOT/dude/env_hpc.sh"
   local native_out="$LOCAL_OUTPUT_DIR/dude/heading_breadcrumb_pdf_markdown_source_ablation"
   local alternate_out="$LOCAL_OUTPUT_DIR/dude/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation"
+  local native_safe="${DUDE_NATIVE_SAFE_SUMMARY:-$native_out/dude_safe_gate_bodyguard.summary.json}"
+  local alternate_safe="${DUDE_ALTERNATE_SAFE_SUMMARY:-$alternate_out/dude_safe_gate_bodyguard.summary.json}"
   compare_pair \
     dude \
     "$native_out/doc_pages_dev_with_pdf_markdown.jsonl" \
@@ -169,8 +156,8 @@ report_dude() {
     "$alternate_out/dude_heading_full_wide_edgeonly_transfer.summary.json" \
     "$native_out/dude_heading_strict_heading_wide_edgeonly_transfer.summary.json" \
     "$alternate_out/dude_heading_strict_heading_wide_edgeonly_transfer.summary.json" \
-    "$native_out/dude_safe_gate_bodyguard_docrank1.summary.json" \
-    "$alternate_out/dude_safe_gate_bodyguard_docrank1.summary.json"
+    "$native_safe" \
+    "$alternate_safe"
 }
 
 for dataset in $DATASETS; do

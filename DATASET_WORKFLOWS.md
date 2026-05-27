@@ -658,7 +658,7 @@ outcome as follows:
 
 ## Safe Heading/Bodyguard Rescue Gate
 
-This is the frozen precision-oriented rescue layer on top of the heading-augmented graph views. It is not a global reranker. It only accepts narrow rank-window promotions when the promoted page is supported by multiple heading views, beats the displaced boundary page by heading score, and passes a body-evidence guard. It also abstains on layout-sensitive queries such as row/column/right/left questions.
+This is the precision-oriented rescue layer on top of the heading-augmented graph views. It is not a global reranker. It only accepts narrow rank-window promotions when the promoted page is supported by multiple heading views, beats the displaced boundary page by heading score, and passes a body-evidence guard. It also abstains on layout-sensitive queries such as row/column/right/left questions. The default runner now uses this common gate across datasets; the previous ViDoSeek page-0 block and DUDE document-rank-1 constraint remain available only as explicit audit/reproduction switches.
 
 Current validated runs:
 
@@ -667,9 +667,9 @@ Current validated runs:
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMDocIR_M3DocRAG/output/mmdocir/heading_breadcrumb_pdf_markdown_source_ablation/mmdocir_heuristic_strict_safe_gate_bodyguard.summary.json` |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
 | SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/SciEGQA_M3DocRAG/output/sciegqa/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/sciegqa_safe_gate_bodyguard.summary.json` |
-| ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json` |
-| ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json` |
-| DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json` |
+| ViDoSeek (`page-0-block` audit) | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_source_ablation/vidoseek_strict_support_gate_layoutblock_no_page0_bodyguard.summary.json` |
+| ViDoSeek (`pymupdf4llm==0.3.4`, `page-0-block` audit) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoSeek_M3DocRAG/output/vidoseek/heading_breadcrumb_pdf_markdown_pymupdf4llm_source_ablation/vidoseek_safe_gate_bodyguard_no_page0.summary.json` |
+| DUDE (`doc-rank-1` audit) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG/output/dude/heading_breadcrumb_pdf_markdown_source_ablation/dude_safe_gate_bodyguard_docrank1.summary.json` |
 | ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/heading_breadcrumb_text_source_ablation/vidore_safe_gate_bodyguard.summary.json` |
 
 Interpretation:
@@ -679,12 +679,12 @@ Interpretation:
 - SciEGQA-Bench PyMuPDF4LLM is a positive extraction ablation: the direct alternative heading
   candidate ties the no-heading control at page hit@4, while the safe gate accepts only `2`
   promotions and obtains `+1` with zero loss.
-- ViDoSeek shows that the body guard and page-0 abstention remove the observed losses while preserving a positive net gain.
+- The recorded ViDoSeek row shows that an additional page-0 abstention removed observed losses while preserving a positive net gain; it is now an audit variant rather than part of default EvidenceGuard-PPR.
 - ViDoSeek PyMuPDF4LLM is a completed exact-page backend ablation. It recovers the same `+6`
   zero-loss final result as native Markdown, but its direct candidate is weaker (`1019` rather
   than `1033` page hits at `@4`) and it accepts more promotions (`51` rather than `45`).
   Native Markdown remains the primary ViDoSeek source.
-- DUDE is a negative/neutral transfer case: the unconstrained gate lost one page hit because a cross-document annual-report heading looked better than a near-empty gold cover page. Requiring promoted documents to be base doc rank 1 makes the gate safely abstain (`0` net, `0` lost).
+- DUDE is a negative/neutral transfer case: the common gate previously lost one page hit because a cross-document annual-report heading looked better than a near-empty gold cover page. The recorded doc-rank-1 audit safely abstains (`0` net, `0` lost), but the restriction is no longer part of the default method.
 - ViDoRe V3 is a heading-unavailable transfer case: `doc_pages_dev` text produced `0` outline/heuristic/strict heading lines, so full/heuristic/strict graph views were identical to the no-heading control and the safe gate had no heading evidence to accept promotions.
 
 Runner for additional datasets:
@@ -699,7 +699,9 @@ exist. All three have now been run: DUDE and ViDoRe are recorded above, while M3
 reported only as a document-level sanity check and optional synthetic page-0 diagnostic because
 its gold lacks page labels. It writes per-dataset `*_safe_gate_bodyguard.summary.json`,
 `.prediction.json`, and `.cases.json` files under the dataset heading-ablation output directory.
-DUDE uses the stricter `dude_safe_gate_bodyguard_docrank1.*` output by default.
+To reproduce the removed dataset-specific audits, set
+`VIDOSEEK_REJECT_PROMOTED_PAGE_IDX=0` or `DUDE_PROMOTED_DOC_MAX_BASE_RANK=1`;
+those runs write `*_no_page0.*` and `*_docrank1.*` artifacts rather than the common default output.
 
 Rank-window rescue profile:
 

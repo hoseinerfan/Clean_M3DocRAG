@@ -121,16 +121,16 @@ Interpretation:
 
 ## Table D: Safe Heading/Bodyguard Gate
 
-These numbers are page hit counts at `k=4`, not average recall. The gate is intentionally conservative; zero-loss behavior is more important than large acceptance.
+These numbers are page hit counts at `k=4`, not average recall. The gate is intentionally conservative; zero-loss behavior is more important than large acceptance. ViDoSeek and DUDE rows marked as audits were produced with dataset-specific restrictions that are no longer enabled by default in EvidenceGuard-PPR.
 
 | Dataset | accepted | base page hit@4 | candidate page hit@4 | gated page hit@4 | recovered | lost | net | body rejects |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | MMDocIR | 38 | 1114 | 1113 | 1117 | 3 | 0 | +3 | 25 |
 | SciEGQA-Bench | 28 | 1323 | 1328 | 1323 | 0 | 0 | 0 | 23 |
 | SciEGQA-Bench (`pymupdf4llm==0.3.4`) | 2 | 1323 | 1323 | 1324 | 1 | 0 | +1 | 5 |
-| ViDoSeek | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
-| ViDoSeek (`pymupdf4llm==0.3.4`) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 |
-| DUDE (`doc-rank-1` gate) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
+| ViDoSeek (`page-0-block` audit) | 45 | 1023 | 1033 | 1029 | 6 | 0 | +6 | 30 |
+| ViDoSeek (`pymupdf4llm==0.3.4`, `page-0-block` audit) | 51 | 1023 | 1019 | 1029 | 6 | 0 | +6 | 16 |
+| DUDE (`doc-rank-1` audit) | 6 | 1733 | 1730 | 1733 | 0 | 0 | 0 | 1 |
 | ViDoRe V3 (`text-heading` no-op) | 0 | 9383 | 9383 | 9383 | 0 | 0 | 0 | 0 |
 
 Safe-gate artifacts:
