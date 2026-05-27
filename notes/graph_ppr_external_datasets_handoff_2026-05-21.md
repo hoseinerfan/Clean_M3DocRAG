@@ -53,12 +53,18 @@ Short label: `denseheavy125_medium_both`.
 
 This is better than the M3DocVQA `doc_shortlist_best` transfer and is better than `plain_top224` at practical page-retrieval depths on all four checked page-labeled datasets. ViDoSeek remains a high-saturation case; its best individual sweep row is `denseheavy150_m3best_pagepreserve`, but `denseheavy125_medium_both` is close and still beats `plain_top224` at page@4/page@20.
 
-| Dataset | best sweep row by page@4 | page@1 | page@4 | page@20 | doc@4 | doc@20 | Interpretation |
-|---|---|---:|---:|---:|---:|---:|---|
-| SciEGQA | `denseheavy125_medium_both` | 0.5508 *(plain 0.5228)* | 0.8152 *(plain 0.7394)* | 0.9248 *(plain 0.8758)* | 0.9291 *(plain 0.9070)* | 0.9871 *(plain 0.9772)* | broad win except page@20/doc@20 still close to other graph variants |
-| MMDocIR | `denseheavy125_medium_both` | 0.4596 *(plain 0.4136)* | 0.6719 *(plain 0.6075)* | 0.7889 *(plain 0.7480)* | 0.8160 *(plain 0.8058)* | 0.8938 *(plain 0.8890)* | clear page@1/@4/@20 win |
-| ViDoRe V3 | `denseheavy125_medium_both` | 0.3902 *(plain 0.1730)* | 0.6465 *(plain 0.3312)* | 0.8227 *(plain 0.5431)* | 0.9099 *(plain 0.8854)* | 0.9788 *(plain 0.9809)* | large page gain; tiny doc@20 loss |
-| ViDoSeek | `denseheavy150_m3best_pagepreserve` | 0.6909 *(plain 0.6830)* | 0.9037 *(plain 0.8958)* | 0.9982 *(plain 0.9842)* | 0.9991 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; best row uses heavier graph weights |
+| Dataset | best sweep row by page@4 | page@1 | page@4 | conservative boundary gate page hit@4 | page@20 | doc@4 | doc@20 | Interpretation |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| SciEGQA | `denseheavy125_medium_both` | 0.5508 *(plain 0.5228)* | 0.8152 *(plain 0.7394)* | 0.8152 *(1323 / 1623; native, no net change)* | 0.9248 *(plain 0.8758)* | 0.9291 *(plain 0.9070)* | 0.9871 *(plain 0.9772)* | broad win except page@20/doc@20 still close to other graph variants |
+| MMDocIR | `denseheavy125_medium_both` | 0.4596 *(plain 0.4136)* | 0.6719 *(plain 0.6075)* | 0.6737 *(1117 / 1658; +3, 0 lost)* | 0.7889 *(plain 0.7480)* | 0.8160 *(plain 0.8058)* | 0.8938 *(plain 0.8890)* | clear page@1/@4/@20 win |
+| ViDoRe V3 | `denseheavy125_medium_both` | 0.3902 *(plain 0.1730)* | 0.6465 *(plain 0.3312)* | 0.6465 *(9383 / 14514; heading no-op)* | 0.8227 *(plain 0.5431)* | 0.9099 *(plain 0.8854)* | 0.9788 *(plain 0.9809)* | large page gain; tiny doc@20 loss |
+| ViDoSeek | `denseheavy150_m3best_pagepreserve` | 0.6909 *(plain 0.6830)* | 0.9037 *(plain 0.8958)* | 0.9011* *(1029 / 1142; +6, 0 lost)* | 0.9982 *(plain 0.9842)* | 0.9991 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; best row uses heavier graph weights |
+
+The conservative-boundary column reports measured final top-4 page-hit output after native
+heading/bodyguard rescue. It is limited to `@4`, because the gate is a precision layer at the
+rank boundary rather than a replacement whole-list reranker. `*` The ViDoSeek result was run on
+its no-heading control branch (`1023 -> 1029` hits), not directly on top of the separately
+selected `denseheavy150_m3best_pagepreserve` row.
 
 Current claim:
 

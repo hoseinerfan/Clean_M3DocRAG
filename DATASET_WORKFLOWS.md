@@ -599,15 +599,21 @@ FINAL_PPR_DOC_WEIGHT=0.25
 
 Short label: `denseheavy125_medium_both`.
 
-| Dataset | qids | best sweep row by page@4 | page@1 | page@4 | page@20 | doc@4 | doc@20 | note |
-|---|---:|---|---:|---:|---:|---:|---:|---|
-| SciEGQA-Bench | 1623 | `denseheavy125_medium_both` | 0.5508 *(plain 0.5228)* | 0.8152 *(plain 0.7394)* | 0.9248 *(plain 0.8758)* | 0.9291 *(plain 0.9070)* | 0.9871 *(plain 0.9772)* | broad page/doc win |
-| MMDocIR | 1658 | `denseheavy125_medium_both` | 0.4596 *(plain 0.4136)* | 0.6719 *(plain 0.6075)* | 0.7889 *(plain 0.7480)* | 0.8160 *(plain 0.8058)* | 0.8938 *(plain 0.8890)* | clear page@1/@4/@20 win |
-| ViDoRe V3 | 14514 | `denseheavy125_medium_both` | 0.3902 *(plain 0.1730)* | 0.6465 *(plain 0.3312)* | 0.8227 *(plain 0.5431)* | 0.9099 *(plain 0.8854)* | 0.9788 *(plain 0.9809)* | large page gain; tiny doc@20 loss |
-| OpenDocVQA | 41017 | `denseheavy125_medium_both` | 0.3988 *(plain 0.3516)* | 0.5863 *(plain 0.5122)* | 0.7662 *(plain 0.6599)* | 0.6035 *(plain 0.5307)* | 0.7922 *(plain 0.6955)* | OCR-backed SPLADE graph result; broad early-rank win |
-| ViDoSeek | 1142 | `denseheavy150_m3best_pagepreserve` | 0.6909 *(plain 0.6830)* | 0.9037 *(plain 0.8958)* | 0.9982 *(plain 0.9842)* | 0.9991 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; heavier row best for this dataset |
+| Dataset | qids | best sweep row by page@4 | page@1 | page@4 | conservative boundary gate page hit@4 | page@20 | doc@4 | doc@20 | note |
+|---|---:|---|---:|---:|---:|---:|---:|---:|---|
+| SciEGQA-Bench | 1623 | `denseheavy125_medium_both` | 0.5508 *(plain 0.5228)* | 0.8152 *(plain 0.7394)* | 0.8152 *(1323 / 1623; native, no net change)* | 0.9248 *(plain 0.8758)* | 0.9291 *(plain 0.9070)* | 0.9871 *(plain 0.9772)* | broad page/doc win |
+| MMDocIR | 1658 | `denseheavy125_medium_both` | 0.4596 *(plain 0.4136)* | 0.6719 *(plain 0.6075)* | 0.6737 *(1117 / 1658; +3, 0 lost)* | 0.7889 *(plain 0.7480)* | 0.8160 *(plain 0.8058)* | 0.8938 *(plain 0.8890)* | clear page@1/@4/@20 win |
+| ViDoRe V3 | 14514 | `denseheavy125_medium_both` | 0.3902 *(plain 0.1730)* | 0.6465 *(plain 0.3312)* | 0.6465 *(9383 / 14514; heading no-op)* | 0.8227 *(plain 0.5431)* | 0.9099 *(plain 0.8854)* | 0.9788 *(plain 0.9809)* | large page gain; tiny doc@20 loss |
+| OpenDocVQA | 41017 | `denseheavy125_medium_both` | 0.3988 *(plain 0.3516)* | 0.5863 *(plain 0.5122)* | N/A *(gate not run)* | 0.7662 *(plain 0.6599)* | 0.6035 *(plain 0.5307)* | 0.7922 *(plain 0.6955)* | OCR-backed SPLADE graph result; broad early-rank win |
+| ViDoSeek | 1142 | `denseheavy150_m3best_pagepreserve` | 0.6909 *(plain 0.6830)* | 0.9037 *(plain 0.8958)* | 0.9011* *(1029 / 1142; +6, 0 lost)* | 0.9982 *(plain 0.9842)* | 0.9991 *(plain 0.9982)* | 1.0000 *(plain 1.0000)* | saturated; heavier row best for this dataset |
 
 Use `denseheavy125_medium_both` as the current frozen single page-labeled config. ViDoSeek's best individual row is `denseheavy150_m3best_pagepreserve`, but the `1.25/0.75 + medium_both` setting is the best common setting across SciEGQA, MMDocIR, ViDoRe V3, and OpenDocVQA and remains close on ViDoSeek. Do not claim universal superiority at every metric; report page@1 separately and keep `plain_top224` as the required baseline.
+
+The conservative-boundary column reports measured final top-4 page-hit output after native
+heading/bodyguard rescue. It is an end-to-end result only where the gate base is the listed
+graph-control branch. `*` For ViDoSeek, the gate starts from its no-heading control
+(`1023 -> 1029` hits); it was not applied directly on top of the separately selected
+`denseheavy150_m3best_pagepreserve` best row (`page@4 = 0.9037`).
 
 ## Safe Heading/Bodyguard Rescue Gate
 

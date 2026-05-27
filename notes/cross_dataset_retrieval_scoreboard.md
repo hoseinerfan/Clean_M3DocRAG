@@ -27,12 +27,18 @@ Primary source note:
 
 ## Cross-Dataset Summary
 
-| Dataset | Best Graph Row | qids | page@1 | page@4 | page@20 | doc@4 | doc@20 |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| SciEGQA | `denseheavy125_medium_both` | `1,623` | `0.5508` *(plain `0.5228`)* | `0.8152` *(plain `0.7394`)* | `0.9248` *(plain `0.8758`)* | `0.9291` *(plain `0.9070`)* | `0.9871` *(plain `0.9772`)* |
-| MMDocIR | `denseheavy125_medium_both` | `1,658` | `0.4596` *(plain `0.4136`)* | `0.6719` *(plain `0.6075`)* | `0.7889` *(plain `0.7480`)* | `0.8160` *(plain `0.8058`)* | `0.8938` *(plain `0.8890`)* |
-| ViDoRe V3 | `denseheavy125_medium_both` | `14,514` | `0.3902` *(plain `0.1730`)* | `0.6465` *(plain `0.3312`)* | `0.8227` *(plain `0.5431`)* | `0.9099` *(plain `0.8854`)* | `0.9788` *(plain `0.9809`)* |
-| ViDoSeek | `denseheavy150_m3best_pagepreserve` | `1,142` | `0.6909` *(plain `0.6830`)* | `0.9037` *(plain `0.8958`)* | `0.9982` *(plain `0.9842`)* | `0.9991` *(plain `0.9982`)* | `1.0000` *(plain `1.0000`)* |
+| Dataset | Best Graph Row | qids | page@1 | page@4 | Conservative gate page hit@4 | page@20 | doc@4 | doc@20 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| SciEGQA | `denseheavy125_medium_both` | `1,623` | `0.5508` *(plain `0.5228`)* | `0.8152` *(plain `0.7394`)* | `0.8152` (`1323 / 1623`; native, no net change) | `0.9248` *(plain `0.8758`)* | `0.9291` *(plain `0.9070`)* | `0.9871` *(plain `0.9772`)* |
+| MMDocIR | `denseheavy125_medium_both` | `1,658` | `0.4596` *(plain `0.4136`)* | `0.6719` *(plain `0.6075`)* | `0.6737` (`1117 / 1658`; `+3`, `0` lost) | `0.7889` *(plain `0.7480`)* | `0.8160` *(plain `0.8058`)* | `0.8938` *(plain `0.8890`)* |
+| ViDoRe V3 | `denseheavy125_medium_both` | `14,514` | `0.3902` *(plain `0.1730`)* | `0.6465` *(plain `0.3312`)* | `0.6465` (`9383 / 14514`; heading no-op) | `0.8227` *(plain `0.5431`)* | `0.9099` *(plain `0.8854`)* | `0.9788` *(plain `0.9809`)* |
+| ViDoSeek | `denseheavy150_m3best_pagepreserve` | `1,142` | `0.6909` *(plain `0.6830`)* | `0.9037` *(plain `0.8958`)* | `0.9011`* (`1029 / 1142`; `+6`, `0` lost) | `0.9982` *(plain `0.9842`)* | `0.9991` *(plain `0.9982`)* | `1.0000` *(plain `1.0000`)* |
+
+The conservative-gate column reports measured final top-4 page-hit output after native
+heading/bodyguard rescue. It is limited to `@4` because the gate is a rank-boundary rescue
+layer. `*` The ViDoSeek result starts from its no-heading control branch (`1023 -> 1029`
+hits), rather than directly composing the gate with the separately selected
+`denseheavy150_m3best_pagepreserve` row.
 
 ## Table C: SciEGQA
 
