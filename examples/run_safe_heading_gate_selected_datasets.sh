@@ -444,6 +444,7 @@ run_sciegqa() {
   prepare_pdf_markdown "$doc_pages_jsonl" "$pdf_root" "$pdf_markdown_jsonl" "$pdf_markdown_summary" "$variant_dir"
 
   local tag="sciegqa"
+  run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$pdf_markdown_jsonl" "${tag}_heading_control_no_heading" none
   run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$pdf_markdown_jsonl" "${tag}_heading_full_wide_edgeonly_transfer" query_gated_shared
   run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.heuristic_only.jsonl" "${tag}_heading_heuristic_only_wide_edgeonly_transfer" query_gated_shared
   run_graph_view sciegqa "$data_root" "$gold" "$dense_pred" "$sparse_pred" "$out_dir" "$variant_dir/doc_pages_dev_pdf_markdown.strict_heading.jsonl" "${tag}_heading_strict_heading_wide_edgeonly_transfer" query_gated_shared
@@ -452,7 +453,7 @@ run_sciegqa() {
     sciegqa \
     "$gold" \
     "$out_dir" \
-    "$dense_pred" \
+    "$out_dir/${tag}_heading_control_no_heading.prediction.json" \
     "$out_dir/${tag}_heading_full_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_heuristic_only_wide_edgeonly_transfer.prediction.json" \
     "$out_dir/${tag}_heading_strict_heading_wide_edgeonly_transfer.prediction.json" \
