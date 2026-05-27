@@ -816,6 +816,19 @@ DATASETS="mmdocir" \
 bash examples/run_safe_heading_gate_selected_datasets.sh
 ```
 
+Compare completed native and PyMuPDF4LLM outputs across page-labeled PDF datasets:
+
+```bash
+DATASETS="vidoseek sciegqa mmdocir" \
+bash examples/report_pdf_markdown_backend_comparison.sh
+```
+
+This writes one Markdown and one JSON report per available backend pair under
+`output/pdf_markdown_backend_comparison/`. The report separates extraction coverage and
+heading-disagreement audit samples from downstream page hit@4/gate utility. It skips MMDocIR
+until the PyMuPDF4LLM run above has completed, and skips DUDE unless a PyMuPDF4LLM DUDE run is
+generated explicitly.
+
 Alternative PDF-to-Markdown quality check:
 
 The native PDF Markdown exporter uses PDF bookmarks and font-size heuristics. To test whether the
