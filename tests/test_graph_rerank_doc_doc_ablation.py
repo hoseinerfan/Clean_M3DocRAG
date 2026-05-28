@@ -21,6 +21,8 @@ def make_args(**overrides):
         "rrf_k": 10.0,
         "doc_seed_weight": 1.0,
         "doc_seed_mode": "rrf",
+        "doc_seed_page_score_mode": "mean",
+        "doc_seed_page_top_k": 3,
         "doc_seed_graph_size_reference": 20.0,
         "doc_seed_graph_size_min_mult": 0.25,
         "doc_seed_graph_size_max_mult": 2.0,
@@ -65,7 +67,85 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
         self.assertAlmostEqual(doc_seed["doc::A"], 0.15)
         self.assertAlmostEqual(doc_seed["doc::B"], 0.05)
         self.assertEqual(metadata["doc_seed_mode"], "avg_page_seed")
+        self.assertEqual(metadata["doc_seed_page_score_mode"], "mean")
         self.assertEqual(metadata["doc_seed_node_count"], 2)
+
+    def test_page_seed_doc_seed_can_use_max_page_seed_per_doc(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0),
+            "A_page1": MODULE.PageRecord(doc_id="A", page_idx=1),
+            "B_page0": MODULE.PageRecord(doc_id="B", page_idx=0),
+        }
+        page_seed = {"A_page0": 0.2, "A_page1": 0.4, "B_page0": 0.1}
+        args = make_args(
+            doc_seed_mode="page_seed",
+            doc_seed_page_score_mode="max",
+            doc_seed_weight=0.5,
+        )
+
+        doc_seed, metadata = MODULE.build_doc_seed(
+            records=records,
+            page_seed=page_seed,
+            dense_doc_ranks={"A": 1, "B": 2},
+            sparse_doc_ranks={},
+            source_weights=MODULE.SourceWeights(1.0, 1.0, {}),
+            args=args,
+        )
+
+        self.assertAlmostEqual(doc_seed["doc::A"], 0.2)
+        self.assertAlmostEqual(doc_seed["doc::B"], 0.05)
+        self.assertEqual(metadata["doc_seed_page_score_mode"], "max")
+
+    def test_page_seed_doc_seed_can_use_topk_mean_page_seed_per_doc(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0),
+            "A_page1": MODULE.PageRecord(doc_id="A", page_idx=1),
+            "A_page2": MODULE.PageRecord(doc_id="A", page_idx=2),
+        }
+        page_seed = {"A_page0": 0.2, "A_page1": 0.4, "A_page2": 0.8}
+        args = make_args(
+            doc_seed_mode="page_seed",
+            doc_seed_page_score_mode="topk_mean",
+            doc_seed_page_top_k=2,
+            doc_seed_weight=1.0,
+        )
+
+        doc_seed, metadata = MODULE.build_doc_seed(
+            records=records,
+            page_seed=page_seed,
+            dense_doc_ranks={},
+            sparse_doc_ranks={},
+            source_weights=MODULE.SourceWeights(1.0, 1.0, {}),
+            args=args,
+        )
+
+        self.assertAlmostEqual(doc_seed["doc::A"], 0.6)
+        self.assertEqual(metadata["doc_seed_page_score_mode"], "topk_mean")
+        self.assertEqual(metadata["doc_seed_page_top_k"], 2)
+
+    def test_page_seed_doc_seed_can_use_sum_page_seed_per_doc(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0),
+            "A_page1": MODULE.PageRecord(doc_id="A", page_idx=1),
+        }
+        page_seed = {"A_page0": 0.2, "A_page1": 0.4}
+        args = make_args(
+            doc_seed_mode="page_seed",
+            doc_seed_page_score_mode="sum",
+            doc_seed_weight=0.5,
+        )
+
+        doc_seed, metadata = MODULE.build_doc_seed(
+            records=records,
+            page_seed=page_seed,
+            dense_doc_ranks={},
+            sparse_doc_ranks={},
+            source_weights=MODULE.SourceWeights(1.0, 1.0, {}),
+            args=args,
+        )
+
+        self.assertAlmostEqual(doc_seed["doc::A"], 0.3)
+        self.assertEqual(metadata["doc_seed_page_score_mode"], "sum")
 
     def test_graph_size_adaptive_scales_doc_rrf_seed(self) -> None:
         records = {

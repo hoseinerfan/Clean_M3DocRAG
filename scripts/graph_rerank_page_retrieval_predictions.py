@@ -1396,13 +1396,33 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--doc-seed-mode",
-        choices=["rrf", "avg_page_seed", "graph_size_adaptive", "avg_page_seed_graph_size"],
+        choices=[
+            "rrf",
+            "avg_page_seed",
+            "page_seed",
+            "graph_size_adaptive",
+            "avg_page_seed_graph_size",
+            "page_seed_graph_size",
+        ],
         default="rrf",
         help=(
             "Doc-node initial value mode. rrf preserves the original dense/SPLADE doc-RRF seed; "
-            "avg_page_seed uses the average candidate page seed per doc; graph_size_adaptive "
-            "scales doc-RRF by graph size; avg_page_seed_graph_size combines both."
+            "avg_page_seed is the legacy mean page-seed mode; page_seed uses configurable "
+            "page-score aggregation; graph_size_adaptive scales doc-RRF by graph size; "
+            "page_seed_graph_size combines page-score aggregation with graph-size scaling."
         ),
+    )
+    parser.add_argument(
+        "--doc-seed-page-score-mode",
+        choices=["mean", "max", "sum", "topk_mean"],
+        default="mean",
+        help="How page_seed doc-node initialization aggregates candidate page seed scores per doc.",
+    )
+    parser.add_argument(
+        "--doc-seed-page-top-k",
+        type=int,
+        default=3,
+        help="Top candidate pages per doc used by --doc-seed-page-score-mode topk_mean.",
     )
     parser.add_argument(
         "--doc-seed-graph-size-reference",
@@ -2338,6 +2358,19 @@ def build_doc_seed(
     mode = str(args.doc_seed_mode)
     seed_weight = float(args.doc_seed_weight)
     ranked_doc_ids = set(dense_doc_ranks) | set(sparse_doc_ranks)
+    page_seed_modes = {
+        "avg_page_seed",
+        "page_seed",
+        "avg_page_seed_graph_size",
+        "page_seed_graph_size",
+    }
+    graph_size_modes = {
+        "graph_size_adaptive",
+        "avg_page_seed_graph_size",
+        "page_seed_graph_size",
+    }
+    page_score_mode = "mean" if mode.startswith("avg_page_seed") else str(args.doc_seed_page_score_mode)
+    page_top_k = max(1, int(args.doc_seed_page_top_k))
 
     page_seed_by_doc: dict[str, list[float]] = defaultdict(list)
     for uid, seed_value in page_seed.items():
@@ -2345,7 +2378,7 @@ def build_doc_seed(
         if record is not None:
             page_seed_by_doc[record.doc_id].append(float(seed_value))
 
-    if mode in {"avg_page_seed", "avg_page_seed_graph_size"}:
+    if mode in page_seed_modes:
         doc_ids = sorted(ranked_doc_ids | set(page_seed_by_doc))
     else:
         doc_ids = sorted(ranked_doc_ids)
@@ -2357,16 +2390,25 @@ def build_doc_seed(
         rrf_values[doc_id] += source_weights.sparse_weight / (float(args.rrf_k) + float(rank))
 
     raw_values: dict[str, float] = {doc_id: 0.0 for doc_id in doc_ids}
-    if mode in {"avg_page_seed", "avg_page_seed_graph_size"}:
+    if mode in page_seed_modes:
         for doc_id in doc_ids:
             values = page_seed_by_doc.get(doc_id, [])
-            raw_values[doc_id] = statistics.fmean(values) if values else 0.0
+            if not values:
+                raw_values[doc_id] = 0.0
+            elif page_score_mode == "max":
+                raw_values[doc_id] = max(values)
+            elif page_score_mode == "sum":
+                raw_values[doc_id] = sum(values)
+            elif page_score_mode == "topk_mean":
+                raw_values[doc_id] = statistics.fmean(sorted(values, reverse=True)[:page_top_k])
+            else:
+                raw_values[doc_id] = statistics.fmean(values)
     else:
         for doc_id in doc_ids:
             raw_values[doc_id] = float(rrf_values.get(doc_id, 0.0))
 
     graph_size_multiplier = 1.0
-    if mode in {"graph_size_adaptive", "avg_page_seed_graph_size"}:
+    if mode in graph_size_modes:
         graph_size = max(1, len(doc_ids))
         reference = max(1e-12, float(args.doc_seed_graph_size_reference))
         graph_size_multiplier = clamp(
@@ -2385,6 +2427,8 @@ def build_doc_seed(
     metadata: dict[str, object] = {
         "doc_seed_mode": mode,
         "doc_seed_weight": seed_weight,
+        "doc_seed_page_score_mode": page_score_mode,
+        "doc_seed_page_top_k": page_top_k,
         "doc_seed_ranked_doc_count": len(ranked_doc_ids),
         "doc_seed_page_seed_doc_count": len(page_seed_by_doc),
         "doc_seed_node_count": len(doc_seed),
@@ -8312,6 +8356,8 @@ def main() -> None:
                 "score_seed_weight": float(args.score_seed_weight),
                 "doc_seed_weight": float(args.doc_seed_weight),
                 "doc_seed_mode": args.doc_seed_mode,
+                "doc_seed_page_score_mode": args.doc_seed_page_score_mode,
+                "doc_seed_page_top_k": int(args.doc_seed_page_top_k),
                 "doc_seed_graph_size_reference": float(args.doc_seed_graph_size_reference),
                 "doc_seed_graph_size_min_mult": float(args.doc_seed_graph_size_min_mult),
                 "doc_seed_graph_size_max_mult": float(args.doc_seed_graph_size_max_mult),
@@ -8604,6 +8650,8 @@ def main() -> None:
         "score_seed_weight": float(args.score_seed_weight),
         "doc_seed_weight": float(args.doc_seed_weight),
         "doc_seed_mode": args.doc_seed_mode,
+        "doc_seed_page_score_mode": args.doc_seed_page_score_mode,
+        "doc_seed_page_top_k": int(args.doc_seed_page_top_k),
         "doc_seed_graph_size_reference": float(args.doc_seed_graph_size_reference),
         "doc_seed_graph_size_min_mult": float(args.doc_seed_graph_size_min_mult),
         "doc_seed_graph_size_max_mult": float(args.doc_seed_graph_size_max_mult),
