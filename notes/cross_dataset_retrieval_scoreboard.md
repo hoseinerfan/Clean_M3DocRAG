@@ -5,6 +5,7 @@ Purpose: keep one short scoreboard for the non-MMQA page-labeled datasets. Unlik
 Primary source note:
 
 - [notes/graph_ppr_external_datasets_handoff_2026-05-21.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/graph_ppr_external_datasets_handoff_2026-05-21.md:1)
+- [notes/graph_ablation_findings_2026-05-28.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/graph_ablation_findings_2026-05-28.md:1)
 
 ## Metric Policy
 
@@ -118,6 +119,24 @@ Important note:
 
 - `denseheavy125_medium_both` is still the best **general** frozen config across datasets
 - `denseheavy150_m3best_pagepreserve` is currently a ViDoSeek-specific best row
+
+## Doc-Doc And Doc-Seed Ablation Status
+
+Latest focused ablations on MMDocIR, SciEGQA, and ViDoSeek did not replace the page-labeled default.
+
+| Dataset | main page-labeled setting after ablation | useful ablation exception | Reason |
+|---|---|---|---|
+| MMDocIR | `denseheavy125_medium_both`, no doc-doc edges, no doc seed | none | doc-doc edges can improve doc@4 but hurt page@4; doc seed hurts doc@4. |
+| SciEGQA | `denseheavy125_medium_both`, no doc-doc edges | `docseed_rrf_1p00` | doc seed improves page@4 by `+12` and doc@4 by `+4`; doc-doc edges hurt. |
+| ViDoSeek | page-preserving graph, no doc-doc edges, no doc seed | none | doc@4 is saturated and page@4 is unchanged or worse. |
+| ViDoRe V3 | pending complete ablation | cross-doc selection likely relevant | `1,386` qids have gold pages across different docs. |
+| OpenDocVQA | pending complete ablation | cross-doc selection likely relevant | `9,348` qids have gold pages across different docs. |
+
+Mechanism audits:
+
+- dense/sparse agreement edges passed strict audits.
+- semantic-similarity edges were active but neutral on MMDocIR/SciEGQA/ViDoSeek.
+- shared-entity/title/topic edges were inactive (`0` edge qids) on the checked datasets.
 
 ## Earlier Transfer Table That Failed
 

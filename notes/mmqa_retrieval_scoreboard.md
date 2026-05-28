@@ -57,6 +57,32 @@ Interpretation:
   - `MaxSim+` is slightly better at `recall@4`.
   - `Graph Page Preserve` is clearly better at `recall@20`.
 
+## M3DocVQA Complete Graph Ablation 2026-05-28
+
+Detailed interpretation note: [graph_ablation_findings_2026-05-28.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/graph_ablation_findings_2026-05-28.md:1)
+
+The table below reports the latest M3DocVQA/MMQA retrieval rows from the complete graph ablation and the focused hyperlink weight sweep. M3DocVQA has document-only gold in this setup, so `row@k` is a returned-row diagnostic rather than exact page-gold recall.
+
+| Method | doc@1 | doc@4 | doc@10 | row@4 | row@10 | Finding |
+|---|---:|---:|---:|---:|---:|---|
+| `docdoc_no_doc_doc` / score baseline | 0.608 | 0.846 | 0.903 | 0.758 | 0.848 | Baseline for the complete ablation. |
+| `docdoc_hyperlink_citation`, default `w0.10` | 0.608 | 0.847 | 0.904 | 0.759 | 0.849 | Small gain only; complete wrapper default is not tuned. |
+| `docdoc_hyperlink_citation`, tuned `w2.25` | 0.608 | 0.851 | 0.907 | 0.770 | 0.854 | Best balanced hyperlink weight from focused sweep. |
+| `docdoc_dense_sparse_agreement` | 0.609 | 0.845 | 0.902 | 0.758 | 0.847 | Does not beat baseline doc@4. |
+| `docdoc_fully_connected_topdocs` | 0.607 | 0.847 | 0.902 | 0.758 | 0.849 | Small doc@4 gain, no row@4 gain. |
+| `docdoc_all_doc_doc_features` | 0.609 | 0.847 | 0.903 | 0.759 | 0.848 | Small gain, below tuned hyperlink. |
+| `docseed_rrf_1p00` | 0.605 | 0.840 | 0.900 | 0.761 | 0.846 | Row@4 improves slightly, but doc retrieval degrades. |
+| `select_max1doc_pool50` | 0.608 | 0.846 | 0.903 | 0.845 | 0.870 | Strong row diversity, doc@4 unchanged. |
+| `select_mmr_docdiv_pool20_b0p10` | 0.608 | 0.846 | 0.903 | 0.799 | 0.850 | Best complete-wrapper row@4 selection gain. |
+
+Current M3DocVQA recommendations:
+
+- Use `DOC_DOC_EDGE_WEIGHT=2.25` for the M3DocVQA hyperlink-citation graph when optimizing document retrieval.
+- Use `FINAL_SELECTION_MODE=mmr_doc_diverse` with `FINAL_SELECTION_NEW_DOC_BONUS=0.10` when optimizing returned-row diversity.
+- Test the combined setting next; the complete wrapper tested these effects separately.
+- Do not report `shared_entity_title_topic` as a failed useful method on M3DocVQA: its audit showed zero active edge qids.
+- Rerun `semantic_similarity` with `SPLADE_INDEX_PT=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt` before drawing conclusions about semantic doc-doc edges.
+
 ## Table C: External Page-Labeled Method Tables
 
 Use this section for datasets with exact page labels. These numbers are **average page/doc recall@k**, not answer EM/F1. Raw dense baseline rows are not recorded here unless explicitly listed; the complete rows we currently have are `MaxSim+` (`plain_top224`) and page-preserving Graph-PPR.

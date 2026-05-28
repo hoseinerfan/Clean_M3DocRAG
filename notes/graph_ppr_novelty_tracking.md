@@ -2,6 +2,8 @@
 
 This note tracks the current novelty story, empirical status, and next experiments for query-adaptive graph retrieval. The goal is to separate methods with real thesis novelty from practical heuristics, and to keep the next runs focused on non-label, non-oracle improvements.
 
+Latest ablation findings: [graph_ablation_findings_2026-05-28.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/graph_ablation_findings_2026-05-28.md:1)
+
 ## Working Novelty Claim
 
 We propose a query-adaptive heterogeneous evidence graph for multimodal multi-page document retrieval. Dense and sparse candidate pages are augmented with typed evidence nodes derived from query-specific retrieval reliability, document structure, page position, and query anchors. Personalized PageRank is then used to propagate evidence over this graph.
@@ -33,14 +35,13 @@ All MMDocIR numbers below are page hit@4 unless otherwise noted.
 
 M3DocVQA/MMQA document retrieval numbers:
 
-| Method | doc@1 | doc@4 | doc@20 | doc@100 | Current verdict |
+| Method | doc@1 | doc@4 | row@4 | row@10 | Current verdict |
 | --- | ---: | ---: | ---: | ---: | --- |
-| no-hyperlink Graph Page Preserve | 0.6080 | 0.8458 | 0.9272 | 0.9632 | baseline |
-| PDF hyperlink graph `w0p05` | 0.6099 | 0.8479 | 0.9283 | 0.9655 | small safe gain |
-| PDF hyperlink graph `w0p10` | 0.6090 | 0.8517 | 0.9292 | 0.9684 | best balanced hyperlink setting |
-| PDF hyperlink graph `w0p20` | 0.6057 | 0.8527 | 0.9305 | 0.9726 | best deeper recall, hurts doc@1 |
-| query-supported hyperlink `s50_t500_m5_w0p10` | 0.6093 | 0.8500 | 0.9286 | 0.9676 | conservative/noise-control variant |
-| source-target decay hyperlink `w0p20` | 0.6103 | 0.8469 | 0.9278 | 0.9645 | top-1 gain but kills most hyperlink benefit |
+| no-hyperlink Graph Page Preserve | 0.608 | 0.846 | 0.758 | 0.848 | baseline |
+| PDF hyperlink graph default `w0.10` | 0.608 | 0.847 | 0.759 | 0.849 | small gain in complete wrapper |
+| PDF hyperlink graph tuned `w2.25` | 0.608 | 0.851 | 0.770 | 0.854 | best balanced hyperlink setting |
+| PDF hyperlink graph `w5.00` | 0.605 | 0.850 | 0.769 | 0.856 | stronger row@10, starts hurting doc@1 |
+| MMR doc-diverse final selection `b0.10` | 0.608 | 0.846 | 0.799 | 0.850 | best row@4 selection gain, doc@4 neutral |
 
 Cross-dataset structural metadata sanity:
 
@@ -331,19 +332,26 @@ gold_linked_from_baseline_sources_count: 1932 / 2441
 Current best result:
 
 ```text
-No-hyperlink baseline doc@4: 0.8458
-PDF hyperlink w0p10 doc@4: 0.8517
-PDF hyperlink w0p20 doc@4: 0.8527, but doc@1 drops
+No-hyperlink baseline doc@4: 0.846, row@4: 0.758
+PDF hyperlink w2.25 doc@4: 0.851, row@4: 0.770
+MMR doc-diverse selection b0.10 doc@4: 0.846, row@4: 0.799
 ```
 
 Interpretation:
 
-- `w0p10` is the best balanced setting
-- `w0p20` is useful if deeper recall matters more than top-1 stability
-- query-supported gating is safer but not stronger than fixed `w0p10`
-- source-target rank decay over-penalizes useful bridge links
+- tuned `DOC_DOC_EDGE_WEIGHT=2.25` is the best balanced hyperlink setting observed so far
+- larger hyperlink weights keep improving some row metrics but increasingly damage early doc rank and increase worsened qids
+- final row selection and hyperlink edges solve different problems: hyperlink improves document propagation, while MMR/max-one-doc selection improves row diversity
+- the next important test is the combination of tuned hyperlink `w2.25` with `FINAL_SELECTION_MODE=mmr_doc_diverse` and `FINAL_SELECTION_NEW_DOC_BONUS=0.10`
 
 This is thesis-facing because the graph edges come from authored PDF/Wikipedia structure, not from labels. It is strongest on entity-chain and ImageListQ-style questions.
+
+Latest M3DocVQA complete ablation notes:
+
+- `shared_entity_title_topic` remains a no-op: `active_edge_qids=0`.
+- `dense_sparse_agreement` and `fully_connected_topdocs` do not beat the tuned hyperlink setting.
+- `docseed_*` rows hurt M3DocVQA doc@4 and should not be main settings.
+- `semantic_similarity` was skipped only because the complete wrapper did not see `SPLADE_INDEX_PT`; the full index exists at `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt`.
 
 ### 7. News Query-Anchor Audit
 

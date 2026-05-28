@@ -4,6 +4,8 @@ Date: 2026-05-21
 
 Purpose: use this note in the datasets chat to adjust Graph-PPR for external page-labeled benchmarks. The first direct transfer underperformed `plain_top224` on page metrics; follow-up page-preserving sweeps found a better page-labeled default.
 
+Latest ablation findings: [graph_ablation_findings_2026-05-28.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/graph_ablation_findings_2026-05-28.md:1)
+
 ## Short Conclusion
 
 The first external-dataset transfer did not show that Graph-PPR is useless. It showed that the current best M3DocVQA config is solving the wrong objective for these benchmarks.
@@ -105,6 +107,46 @@ The runner keeps the `denseheavy125_medium_both` dense/SPLADE weights fixed and 
 The consolidated output is `graph_structure_ablation_results.md`. It reports page/doc recall and
 deltas against `seed_only`. This is the experiment required to decide whether to describe the
 backbone as page-local graph evidence or more narrowly as document-aware page reranking.
+
+## 2026-05-28 Addendum: Doc-Doc And Doc-Seed Ablations
+
+The focused doc-doc and doc-seed ablations on MMDocIR, SciEGQA, and ViDoSeek do not change the page-labeled default. For page@4, the safest general setting remains:
+
+```text
+GRAPH_PROFILE=denseheavy125_medium_both
+DOC_DOC_EDGE_MODE=none
+DOC_SEED_WEIGHT=0.0
+```
+
+Doc-doc edge conclusion:
+
+| Dataset | baseline page@4 count | best doc-doc page@4 effect | best doc-doc doc@4 effect | Verdict |
+|---|---:|---:|---:|---|
+| MMDocIR | 1114 | `fully_connected_topdocs` drops page@4 by `-7` | doc@4 improves by `+5` | helps docs, hurts pages |
+| SciEGQA | 1323 | all nontrivial doc-doc edges hurt page@4 | all nontrivial doc-doc edges hurt or do not improve doc@4 | keep no doc-doc |
+| ViDoSeek | 1020 | no meaningful page@4 change | doc@4 saturated | no gain |
+
+Mechanism audits passed:
+
+- dense/sparse agreement created edges correctly with `mismatch_count=0` and `bad_pair_qids=0`.
+- `semantic_similarity` emitted valid edges, but the resulting page@4/doc@4 was neutral on MMDocIR/SciEGQA/ViDoSeek.
+- `shared_entity_title_topic` emitted zero edges and should be described as a no-op on these data, not a negative result.
+
+Doc-seed conclusion:
+
+| Dataset | best doc-seed row | delta page@4 | delta doc@4 | Verdict |
+|---|---|---:|---:|---|
+| MMDocIR | no useful row | at most `+1` page, but doc@4 worse | negative | do not use |
+| SciEGQA | `docseed_rrf_1p00` | `+12` | `+4` | useful dataset-specific gain |
+| ViDoSeek | no useful row | `0` or `-1` | `0` | saturated/no gain |
+
+Gold-page structure explains why cross-document selection should be targeted, not global:
+
+- MMDocIR, SciEGQA, DUDE, and MMLongBench multi-page qids are same-document only.
+- ViDoRe V3 has `1,386` qids with gold pages across different docs.
+- OpenDocVQA has `9,348` qids with gold pages across different docs.
+
+Therefore, cross-doc page selection ablations are most relevant for ViDoRe and OpenDocVQA, not for MMDocIR/SciEGQA/ViDoSeek.
 
 ## 2026-05-23 Addendum: Graph Augmentation Status
 

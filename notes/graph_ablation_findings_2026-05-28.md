@@ -1,0 +1,159 @@
+# Graph Ablation Findings 2026-05-28
+
+Purpose: consolidate the recent Graph-PPR ablations so the main notes and generated result tables have a stable interpretation layer. The raw generated tables remain in dataset output folders; this file records the conclusions that should guide the next runs and thesis writeup.
+
+## Executive Summary
+
+- For MMDocIR, SciEGQA, and ViDoSeek page-labeled retrieval, doc-doc edges are not a reliable page@4 improvement. The safest page-labeled default remains `denseheavy125_medium_both` with `DOC_DOC_EDGE_MODE=none`.
+- Doc-seed restart helps SciEGQA but not MMDocIR or ViDoSeek. The best SciEGQA doc-seed row was `docseed_rrf_1p00`, improving page@4 by `+12` and doc@4 by `+4`.
+- M3DocVQA is different: it has document-only gold labels, and the authored PDF/Wikipedia hyperlink graph gives small but real doc/row gains. The best balanced hyperlink weight observed so far is `DOC_DOC_EDGE_WEIGHT=2.25`.
+- Cross-doc page selection is the strongest M3DocVQA row-rank improvement: `select_mmr_docdiv_pool20_b0p10` raises row@4 from `0.758` to `0.799` while leaving doc@4 unchanged.
+- `shared_entity_title_topic` is currently a no-op on the checked datasets because it emits zero edges.
+- `semantic_similarity` was skipped in the complete M3DocVQA run only because `SPLADE_INDEX_PT` was not pointed at the existing SPLADE index. The full index exists at `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt`.
+
+## Page-Labeled Gold Structure
+
+The current page-labeled datasets do not all need cross-document page selection.
+
+| Dataset | qids | multi-gold-page qids | multi-page same-doc only | multi-page different-docs | Implication |
+|---|---:|---:|---:|---:|---|
+| MMDocIR | 1,658 | 312 | 312 | 0 | Cross-doc page diversity is not needed for gold coverage. |
+| SciEGQA | 1,623 | 318 | 318 | 0 | Same-doc page localization matters more than cross-doc diversity. |
+| ViDoSeek | 1,142 | 0 | 0 | 0 | Single-page, saturated retrieval. |
+| DUDE | 2,903 | 59 | 59 | 0 | Mostly single-page/same-doc. |
+| ViDoRe V3 | 14,514 | 10,638 | 9,252 | 1,386 | Cross-doc page diversity is relevant. |
+| OpenDocVQA | 41,017 | 9,412 | 64 | 9,348 | Cross-doc page diversity is highly relevant. |
+| MMLongBench DocQA | 14,466 | 4,345 | 4,345 | 0 | Same-doc multi-page evidence, plus 1,050 no-page-gold qids. |
+| M3DocVQA | 2,441 | 0 | 0 | 0 | Document-only gold; row/page rank is diagnostic, not page-gold recall. |
+
+## External Doc-Doc Edge Ablation
+
+Baseline for these deltas is the page-preserving Graph-PPR `no_doc_doc` row:
+
+| Dataset | baseline page@4 count | baseline doc@4 count | best doc-doc outcome | Finding |
+|---|---:|---:|---|---|
+| MMDocIR | 1114 | 1353 | `fully_connected_topdocs` gives doc@4 `+5` but page@4 `-7` | Doc-doc edges can improve document ranking while hurting exact page ranking. |
+| SciEGQA | 1323 | 1508 | `no_doc_doc` remains best for both page@4 and doc@4 | Doc-doc edges hurt this dataset. |
+| ViDoSeek | 1020 | 1142 | all doc-doc variants keep doc@4 saturated and page@4 unchanged | Saturated; no meaningful gain. |
+
+Detailed page@4/doc@4 deltas:
+
+| Dataset | Variant | delta page@4 | delta doc@4 | edge qids | mean edge pairs |
+|---|---|---:|---:|---:|---:|
+| MMDocIR | dense_sparse_agreement | -3 | +3 | 1658 | 70.36 |
+| MMDocIR | fully_connected_topdocs | -7 | +5 | 1658 | 190.00 |
+| MMDocIR | semantic_similarity | 0 | 0 | 1375 | 15.32 |
+| MMDocIR | shared_entity_title_topic | 0 | 0 | 0 | 0.00 |
+| SciEGQA | dense_sparse_agreement | -3 | -2 | 1623 | 72.96 |
+| SciEGQA | fully_connected_topdocs | -5 | -3 | 1623 | 190.00 |
+| SciEGQA | semantic_similarity | 0 | 0 | 1039 | 5.60 |
+| SciEGQA | shared_entity_title_topic | 0 | 0 | 0 | 0.00 |
+| ViDoSeek | dense_sparse_agreement | 0 | 0 | 1142 | 71.74 |
+| ViDoSeek | fully_connected_topdocs | 0 | 0 | 1142 | 190.00 |
+| ViDoSeek | semantic_similarity | 0 | 0 | 233 | 0.34 |
+| ViDoSeek | shared_entity_title_topic | 0 | 0 | 0 | 0.00 |
+
+Audit checks passed for dense/sparse agreement and feature mechanisms:
+
+- dense/sparse agreement had `mismatch_count=0` and `bad_pair_qids=0` on all three datasets.
+- `shared_entity_title_topic` emitted zero edges on all checked datasets.
+- `semantic_similarity` emitted edges and audited correctly, but did not improve page@4.
+
+## External Doc-Seed Ablation
+
+Baseline is `docseed_none`.
+
+| Dataset | baseline page@4 count | baseline doc@4 count | best row | delta page@4 | delta doc@4 | Finding |
+|---|---:|---:|---|---:|---:|---|
+| MMDocIR | 1114 | 1353 | no useful doc-seed row | at most +1 | negative doc@4 deltas | Do not use doc-seed here. |
+| SciEGQA | 1323 | 1508 | `docseed_rrf_1p00` | +12 | +4 | Strongest external doc-seed result. |
+| ViDoSeek | 1020 | 1142 | no useful doc-seed row | 0 or -1 | 0 | Saturated/no gain. |
+
+SciEGQA doc-seed progression:
+
+| Variant | page@4 count | delta page@4 | doc@4 count | delta doc@4 |
+|---|---:|---:|---:|---:|
+| docseed_none | 1323 | 0 | 1508 | 0 |
+| docseed_rrf_0p25 | 1325 | +2 | 1510 | +2 |
+| docseed_rrf_0p50 | 1328 | +5 | 1511 | +3 |
+| docseed_rrf_1p00 | 1335 | +12 | 1512 | +4 |
+
+## M3DocVQA Hyperlink Graph
+
+The M3DocVQA hyperlink file is valid and useful:
+
+| Item | Count |
+|---|---:|
+| valid hyperlink edges | 21,451 |
+| source pages | 13,451 |
+| source docs | 2,885 |
+| target docs | 2,417 |
+| qids with any gold target inlink | 1,959 / 2,441 |
+| qids with retrieved link to a gold doc | 1,936 / 2,441 |
+
+The tuned hyperlink weight sweep used the same `no_doc_doc` baseline:
+
+| weight | doc@1 | doc@4 | doc@10 | row@4 | row@10 | improved / worsened |
+|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 0.608 | 0.846 | 0.903 | 0.758 | 0.848 | - |
+| 1.75 | 0.608 | 0.851 | 0.906 | 0.769 | 0.854 | 37 / 35 |
+| 2.00 | 0.608 | 0.851 | 0.907 | 0.769 | 0.854 | 38 / 37 |
+| 2.25 | 0.608 | 0.851 | 0.907 | 0.770 | 0.854 | 40 / 37 |
+| 2.50 | 0.608 | 0.851 | 0.907 | 0.770 | 0.855 | 40 / 39 |
+| 3.00 | 0.607 | 0.851 | 0.907 | 0.770 | 0.856 | 40 / 44 |
+| 5.00 | 0.605 | 0.850 | 0.907 | 0.769 | 0.856 | 43 / 59 |
+| 10.00 | 0.602 | 0.849 | 0.908 | 0.770 | 0.857 | 50 / 76 |
+| 20.00 | 0.603 | 0.846 | 0.907 | 0.771 | 0.857 | 55 / 84 |
+
+Recommended M3DocVQA hyperlink setting:
+
+```bash
+DOC_DOC_EDGE_MODE=hyperlink_citation
+DOC_DOC_EDGE_WEIGHT=2.25
+```
+
+Rationale: `2.25` keeps doc@1 unchanged, reaches the best observed doc@4 band, improves row@4 to `0.770`, and has the best movement balance in the `1.75-3.00` local sweep.
+
+## M3DocVQA Complete Ablation
+
+The complete wrapper was run with the default doc-doc edge weight (`0.10`) unless the environment overrides it, so it should not replace the tuned hyperlink weight result above.
+
+| Method | doc@4 | row@4 | Main finding |
+|---|---:|---:|---|
+| `docdoc_no_doc_doc` | 0.846 | 0.758 | Baseline. |
+| `docdoc_dense_sparse_agreement` | 0.845 | 0.758 | Slightly worse doc@4. |
+| `docdoc_fully_connected_topdocs` | 0.847 | 0.758 | Small doc@4 gain, no row@4 gain. |
+| `docdoc_hyperlink_citation` default `w0.10` | 0.847 | 0.759 | Small gain; tuned `w2.25` is better. |
+| `docdoc_all_doc_doc_features` | 0.847 | 0.759 | Small gain only. |
+| `docseed_rrf_1p00` | 0.840 | 0.761 | Row@4 up, doc@4 down; not a main setting. |
+| `select_max1doc_pool50` | 0.846 | 0.845 | Strong row diversity effect, doc@4 unchanged. |
+| `select_mmr_docdiv_pool20_b0p10` | 0.846 | 0.799 | Best row@4 among complete rows, doc@4 unchanged. |
+
+Recommended combined M3DocVQA test:
+
+```bash
+DOC_DOC_EDGE_WEIGHT=2.25 \
+FINAL_SELECTION_MODE=mmr_doc_diverse \
+FINAL_SELECTION_CANDIDATE_POOL=20 \
+FINAL_SELECTION_NEW_DOC_BONUS=0.10 \
+GRAPH_OUT_DIR=output/m3docvqa_hyperlink_w2p25_mmr_b0p10 \
+bash examples/run_m3docvqa_doc_doc_edge_ablation.sh
+```
+
+The direct semantic-similarity rerun should use:
+
+```bash
+export SPLADE_INDEX_PT=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt
+```
+
+and explicit dense/sparse prediction paths if running the lower-level pipeline directly.
+
+## Reporting Recommendation
+
+- For MMDocIR/SciEGQA/ViDoSeek page-labeled retrieval, report `denseheavy125_medium_both` with `DOC_DOC_EDGE_MODE=none` as the main page-preserving graph result.
+- For SciEGQA only, report `docseed_rrf_1p00` as a useful doc-seed ablation.
+- For M3DocVQA, report hyperlink doc-doc edges and final selection separately:
+  - hyperlink edges improve document retrieval modestly
+  - MMR/max-one-doc final selection improves row diversity strongly
+- Do not claim `shared_entity_title_topic` helped; it emitted zero edges.
+- Do not claim M3DocVQA semantic-similarity failed until rerunning with the found SPLADE index.
