@@ -1250,6 +1250,46 @@ def parse_args() -> argparse.Namespace:
         help="Per-page SPLADE terms used to build document semantic vectors.",
     )
     parser.add_argument(
+        "--doc-doc-hyperlink-weight-mode",
+        choices=[
+            "log_count",
+            "source_seed",
+            "target_support",
+            "source_seed_target_support",
+        ],
+        default="log_count",
+        help=(
+            "Relative weighting for hyperlink-citation doc-doc edges. log_count keeps "
+            "the original behavior; source_seed trusts links from stronger seed pages; "
+            "target_support trusts links to docs already supported by dense/SPLADE; "
+            "source_seed_target_support combines both query-conditioned signals."
+        ),
+    )
+    parser.add_argument(
+        "--doc-doc-hyperlink-source-seed-floor",
+        type=float,
+        default=0.5,
+        help="Minimum multiplier for source_seed hyperlink doc-doc weighting.",
+    )
+    parser.add_argument(
+        "--doc-doc-hyperlink-source-seed-scale",
+        type=float,
+        default=0.5,
+        help="Additional multiplier applied by normalized source page seed.",
+    )
+    parser.add_argument(
+        "--doc-doc-hyperlink-target-support-floor",
+        type=float,
+        default=0.5,
+        help="Minimum multiplier for target_support hyperlink doc-doc weighting.",
+    )
+    parser.add_argument(
+        "--doc-doc-hyperlink-target-support-scale",
+        type=float,
+        default=0.75,
+        help="Additional multiplier applied by normalized target doc dense/SPLADE support.",
+    )
+    parser.add_argument(
         "--splade-index-pt",
         default="",
         help=(
@@ -6836,7 +6876,12 @@ def hyperlink_citation_doc_doc_scores(
     *,
     selected_doc_ids: set[str],
     records: dict[str, PageRecord],
+    page_seed: dict[str, float],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
     pdf_hyperlink_graph: PdfHyperlinkGraph | None,
+    args: argparse.Namespace,
 ) -> tuple[dict[tuple[str, str], float], dict[str, object]]:
     if pdf_hyperlink_graph is None:
         return (
@@ -6849,33 +6894,82 @@ def hyperlink_citation_doc_doc_scores(
             },
         )
 
+    mode = str(args.doc_doc_hyperlink_weight_mode)
+    page_seed_scaled = max_scale({uid: float(score) for uid, score in page_seed.items()})
+    target_supports = doc_doc_support_values(
+        doc_ids=selected_doc_ids,
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        source_weights=source_weights,
+        args=args,
+    )
+    source_floor = max(0.0, float(args.doc_doc_hyperlink_source_seed_floor))
+    source_scale = max(0.0, float(args.doc_doc_hyperlink_source_seed_scale))
+    target_floor = max(0.0, float(args.doc_doc_hyperlink_target_support_floor))
+    target_scale = max(0.0, float(args.doc_doc_hyperlink_target_support_scale))
     pair_scores: dict[tuple[str, str], float] = {}
     raw_link_count = 0
     source_doc_ids: set[str] = set()
     target_doc_ids: set[str] = set()
+    source_multipliers: list[float] = []
+    target_multipliers: list[float] = []
+    raw_scores: list[float] = []
+    weighted_scores: list[float] = []
     for source_uid, source_edges in pdf_hyperlink_graph.by_source_page.items():
         source_record = records.get(source_uid)
         if source_record is None or source_record.doc_id not in selected_doc_ids:
             continue
+        source_multiplier = 1.0
+        if mode in {"source_seed", "source_seed_target_support"}:
+            source_multiplier = source_floor + source_scale * page_seed_scaled.get(source_uid, 0.0)
         for edge in source_edges:
             if edge.target_doc_id not in selected_doc_ids or edge.target_doc_id == source_record.doc_id:
                 continue
+            target_multiplier = 1.0
+            if mode in {"target_support", "source_seed_target_support"}:
+                target_multiplier = target_floor + target_scale * target_supports.get(
+                    edge.target_doc_id,
+                    0.0,
+                )
+            raw_score = math.log1p(max(1, int(edge.raw_link_count)))
+            weighted_score = raw_score * source_multiplier * target_multiplier
             raw_link_count += int(edge.raw_link_count)
             source_doc_ids.add(source_record.doc_id)
             target_doc_ids.add(edge.target_doc_id)
+            source_multipliers.append(source_multiplier)
+            target_multipliers.append(target_multiplier)
+            raw_scores.append(raw_score)
+            weighted_scores.append(weighted_score)
             add_pair_score(
                 pair_scores,
                 source_record.doc_id,
                 edge.target_doc_id,
-                math.log1p(max(1, int(edge.raw_link_count))),
+                weighted_score,
             )
 
     metadata = {
         "doc_doc_hyperlink_available": True,
+        "doc_doc_hyperlink_weight_mode": mode,
+        "doc_doc_hyperlink_source_seed_floor": source_floor,
+        "doc_doc_hyperlink_source_seed_scale": source_scale,
+        "doc_doc_hyperlink_target_support_floor": target_floor,
+        "doc_doc_hyperlink_target_support_scale": target_scale,
         "doc_doc_hyperlink_source_doc_count": len(source_doc_ids),
         "doc_doc_hyperlink_target_doc_count": len(target_doc_ids),
         "doc_doc_hyperlink_raw_link_count": raw_link_count,
         "doc_doc_hyperlink_pair_count": len(pair_scores),
+        "mean_doc_doc_hyperlink_source_multiplier": (
+            statistics.fmean(source_multipliers) if source_multipliers else None
+        ),
+        "mean_doc_doc_hyperlink_target_multiplier": (
+            statistics.fmean(target_multipliers) if target_multipliers else None
+        ),
+        "mean_doc_doc_hyperlink_raw_score": (
+            statistics.fmean(raw_scores) if raw_scores else None
+        ),
+        "mean_doc_doc_hyperlink_weighted_score": (
+            statistics.fmean(weighted_scores) if weighted_scores else None
+        ),
         "doc_doc_hyperlink_missing_graph": False,
     }
     return pair_scores, metadata
@@ -6945,6 +7039,7 @@ def add_doc_doc_edges(
         "doc_doc_edge_weight": float(args.doc_doc_edge_weight),
         "doc_doc_top_docs": int(args.doc_doc_top_docs),
         "doc_doc_max_edges_per_doc": int(args.doc_doc_max_edges_per_doc),
+        "doc_doc_hyperlink_weight_mode": str(args.doc_doc_hyperlink_weight_mode),
         "doc_doc_edge_count_directed": 0,
         "doc_doc_edge_pair_count": 0,
         "mean_doc_doc_edge_weight": None,
@@ -7030,7 +7125,12 @@ def add_doc_doc_edges(
         hyperlink_scores, hyperlink_metadata = hyperlink_citation_doc_doc_scores(
             selected_doc_ids=selected_doc_ids,
             records=records,
+            page_seed=page_seed,
+            dense_doc_ranks=dense_doc_ranks,
+            sparse_doc_ranks=sparse_doc_ranks,
+            source_weights=source_weights,
             pdf_hyperlink_graph=pdf_hyperlink_graph,
+            args=args,
         )
         metadata.update(hyperlink_metadata)
         for pair, score in hyperlink_scores.items():
@@ -8164,6 +8264,19 @@ def main() -> None:
                 "doc_doc_max_signal_doc_matches": int(args.doc_doc_max_signal_doc_matches),
                 "doc_doc_min_semantic_similarity": float(args.doc_doc_min_semantic_similarity),
                 "doc_doc_semantic_top_terms": int(args.doc_doc_semantic_top_terms),
+                "doc_doc_hyperlink_weight_mode": args.doc_doc_hyperlink_weight_mode,
+                "doc_doc_hyperlink_source_seed_floor": float(
+                    args.doc_doc_hyperlink_source_seed_floor
+                ),
+                "doc_doc_hyperlink_source_seed_scale": float(
+                    args.doc_doc_hyperlink_source_seed_scale
+                ),
+                "doc_doc_hyperlink_target_support_floor": float(
+                    args.doc_doc_hyperlink_target_support_floor
+                ),
+                "doc_doc_hyperlink_target_support_scale": float(
+                    args.doc_doc_hyperlink_target_support_scale
+                ),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -8446,6 +8559,15 @@ def main() -> None:
         "doc_doc_max_signal_doc_matches": int(args.doc_doc_max_signal_doc_matches),
         "doc_doc_min_semantic_similarity": float(args.doc_doc_min_semantic_similarity),
         "doc_doc_semantic_top_terms": int(args.doc_doc_semantic_top_terms),
+        "doc_doc_hyperlink_weight_mode": args.doc_doc_hyperlink_weight_mode,
+        "doc_doc_hyperlink_source_seed_floor": float(args.doc_doc_hyperlink_source_seed_floor),
+        "doc_doc_hyperlink_source_seed_scale": float(args.doc_doc_hyperlink_source_seed_scale),
+        "doc_doc_hyperlink_target_support_floor": float(
+            args.doc_doc_hyperlink_target_support_floor
+        ),
+        "doc_doc_hyperlink_target_support_scale": float(
+            args.doc_doc_hyperlink_target_support_scale
+        ),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
