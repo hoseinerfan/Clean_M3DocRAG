@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-if [[ -n "${M3DOCVQA_INTERNAL_ENV_LOADED:-}" ]]; then
+if [[ -n "${M3DOCVQA_INTERNAL_ENV_LOADED:-}" && -n "${PYTHON_BIN:-}" && -n "${LOCAL_OUTPUT_DIR:-}" ]]; then
   return 0 2>/dev/null || exit 0
 fi
 export M3DOCVQA_INTERNAL_ENV_LOADED=1
@@ -12,11 +12,13 @@ PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/env/bin/python}"
 if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python}"
 fi
+export PYTHON_BIN
 
 ACCELERATE_BIN="${ACCELERATE_BIN:-$REPO_ROOT/env/bin/accelerate}"
 if [[ ! -x "$ACCELERATE_BIN" ]]; then
   ACCELERATE_BIN="${ACCELERATE_BIN_FALLBACK:-accelerate}"
 fi
+export ACCELERATE_BIN
 
 DEFAULT_M3DOCVQA_LOCAL_DATA_DIR="$REPO_ROOT/data"
 DEFAULT_M3DOCVQA_LOCAL_MODEL_DIR="$REPO_ROOT/model"
