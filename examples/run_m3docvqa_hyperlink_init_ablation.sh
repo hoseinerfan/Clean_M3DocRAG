@@ -40,17 +40,13 @@ DENSE_PRED="${M3DOCVQA_DENSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_
 SPARSE_PRED="${M3DOCVQA_SPARSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_${SPLIT}/mmqa_${SPLIT}_splade.prediction.json}"
 DOC_PAGES_JSONL="${M3DOCVQA_PAGE_TEXT_JSONL:-$LOCAL_OUTPUT_DIR/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl}"
 SPLADE_INDEX_PT="${SPLADE_INDEX_PT:-$LOCAL_OUTPUT_DIR/m3docvqa_splade/m3docvqa_${SPLIT}_splade.pt}"
-GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$LOCAL_OUTPUT_DIR/m3docvqa_adaptive_hyperlink_ablation}"
-LABEL_PREFIX="${LABEL_PREFIX:-mmqa_${SPLIT}_adaptive_hyperlink}"
+GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$LOCAL_OUTPUT_DIR/m3docvqa_hyperlink_init_ablation}"
+LABEL_PREFIX="${LABEL_PREFIX:-mmqa_${SPLIT}_hyperlink_init}"
 GRAPH_PROFILE="${GRAPH_PROFILE:-denseheavy125_medium_both}"
 DOC_DOC_EDGE_WEIGHT="${DOC_DOC_EDGE_WEIGHT:-2.25}"
 DOC_DOC_TOP_DOCS="${DOC_DOC_TOP_DOCS:-20}"
 DOC_DOC_MAX_EDGES_PER_DOC="${DOC_DOC_MAX_EDGES_PER_DOC:-8}"
-DOC_DOC_HYPERLINK_INIT_MODE="${DOC_DOC_HYPERLINK_INIT_MODE:-log_count}"
-DOC_DOC_HYPERLINK_SOURCE_SEED_FLOOR="${DOC_DOC_HYPERLINK_SOURCE_SEED_FLOOR:-0.5}"
-DOC_DOC_HYPERLINK_SOURCE_SEED_SCALE="${DOC_DOC_HYPERLINK_SOURCE_SEED_SCALE:-0.5}"
-DOC_DOC_HYPERLINK_TARGET_SUPPORT_FLOOR="${DOC_DOC_HYPERLINK_TARGET_SUPPORT_FLOOR:-0.5}"
-DOC_DOC_HYPERLINK_TARGET_SUPPORT_SCALE="${DOC_DOC_HYPERLINK_TARGET_SUPPORT_SCALE:-0.75}"
+DOC_DOC_HYPERLINK_WEIGHT_MODE="${DOC_DOC_HYPERLINK_WEIGHT_MODE:-log_count}"
 FINAL_SELECTION_MODE="${FINAL_SELECTION_MODE:-mmr_doc_diverse}"
 FINAL_SELECTION_TOP_K="${FINAL_SELECTION_TOP_K:-4}"
 FINAL_SELECTION_CANDIDATE_POOL="${FINAL_SELECTION_CANDIDATE_POOL:-20}"
@@ -84,11 +80,11 @@ run_variant() {
   local variant="$1"
   local edge_mode="$2"
   local edge_weight="$3"
-  local hyperlink_weight_mode="$4"
+  local init_mode="$4"
   local label="${LABEL_PREFIX}_${variant}"
 
   echo
-  echo "== m3docvqa adaptive hyperlink: $variant =="
+  echo "== m3docvqa hyperlink init: $variant =="
   DATA_NAME="m3-docvqa" \
   SPLIT="$SPLIT" \
   GOLD="$GOLD" \
@@ -104,12 +100,8 @@ run_variant() {
   DOC_DOC_EDGE_WEIGHT="$edge_weight" \
   DOC_DOC_TOP_DOCS="$DOC_DOC_TOP_DOCS" \
   DOC_DOC_MAX_EDGES_PER_DOC="$DOC_DOC_MAX_EDGES_PER_DOC" \
-  DOC_DOC_HYPERLINK_WEIGHT_MODE="$hyperlink_weight_mode" \
-  DOC_DOC_HYPERLINK_INIT_MODE="$DOC_DOC_HYPERLINK_INIT_MODE" \
-  DOC_DOC_HYPERLINK_SOURCE_SEED_FLOOR="$DOC_DOC_HYPERLINK_SOURCE_SEED_FLOOR" \
-  DOC_DOC_HYPERLINK_SOURCE_SEED_SCALE="$DOC_DOC_HYPERLINK_SOURCE_SEED_SCALE" \
-  DOC_DOC_HYPERLINK_TARGET_SUPPORT_FLOOR="$DOC_DOC_HYPERLINK_TARGET_SUPPORT_FLOOR" \
-  DOC_DOC_HYPERLINK_TARGET_SUPPORT_SCALE="$DOC_DOC_HYPERLINK_TARGET_SUPPORT_SCALE" \
+  DOC_DOC_HYPERLINK_WEIGHT_MODE="$DOC_DOC_HYPERLINK_WEIGHT_MODE" \
+  DOC_DOC_HYPERLINK_INIT_MODE="$init_mode" \
   PDF_HYPERLINK_EDGES_JSONL="$PDF_HYPERLINK_EDGES_JSONL" \
   FINAL_SELECTION_MODE="$FINAL_SELECTION_MODE" \
   FINAL_SELECTION_TOP_K="$FINAL_SELECTION_TOP_K" \
@@ -120,17 +112,17 @@ run_variant() {
 }
 
 run_variant no_doc_doc none 0.0 log_count
-run_variant hyperlink_fixed_log_count hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" log_count
-run_variant hyperlink_source_seed hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" source_seed
-run_variant hyperlink_target_support hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" target_support
-run_variant hyperlink_source_seed_target_support hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" source_seed_target_support
+run_variant hyperlink_init_uniform hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" uniform
+run_variant hyperlink_init_sqrt_count hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" sqrt_count
+run_variant hyperlink_init_log_count hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" log_count
+run_variant hyperlink_init_raw_count hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" raw_count
 
 baseline_pred="$GRAPH_OUT_DIR/${LABEL_PREFIX}_no_doc_doc.prediction.json"
 for variant in \
-  hyperlink_fixed_log_count \
-  hyperlink_source_seed \
-  hyperlink_target_support \
-  hyperlink_source_seed_target_support
+  hyperlink_init_uniform \
+  hyperlink_init_sqrt_count \
+  hyperlink_init_log_count \
+  hyperlink_init_raw_count
 do
   candidate_pred="$GRAPH_OUT_DIR/${LABEL_PREFIX}_${variant}.prediction.json"
   "$PYTHON_BIN" "$REPO_ROOT/scripts/compare_m3docvqa_retrieval_runs.py" \

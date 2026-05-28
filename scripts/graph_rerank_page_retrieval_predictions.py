@@ -1266,6 +1266,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--doc-doc-hyperlink-init-mode",
+        choices=["uniform", "sqrt_count", "log_count", "raw_count"],
+        default="log_count",
+        help=(
+            "Initial value for each hyperlink doc-doc observation before adaptive "
+            "multipliers and per-query max normalization."
+        ),
+    )
+    parser.add_argument(
         "--doc-doc-hyperlink-source-seed-floor",
         type=float,
         default=0.5,
@@ -6872,6 +6881,17 @@ def semantic_similarity_doc_doc_scores(
     return pair_scores, metadata
 
 
+def hyperlink_citation_initial_score(raw_link_count: int, mode: str) -> float:
+    count = max(1, int(raw_link_count))
+    if mode == "uniform":
+        return 1.0
+    if mode == "sqrt_count":
+        return math.sqrt(float(count))
+    if mode == "raw_count":
+        return float(count)
+    return math.log1p(count)
+
+
 def hyperlink_citation_doc_doc_scores(
     *,
     selected_doc_ids: set[str],
@@ -6895,6 +6915,7 @@ def hyperlink_citation_doc_doc_scores(
         )
 
     mode = str(args.doc_doc_hyperlink_weight_mode)
+    init_mode = str(args.doc_doc_hyperlink_init_mode)
     page_seed_scaled = max_scale({uid: float(score) for uid, score in page_seed.items()})
     target_supports = doc_doc_support_values(
         doc_ids=selected_doc_ids,
@@ -6931,7 +6952,7 @@ def hyperlink_citation_doc_doc_scores(
                     edge.target_doc_id,
                     0.0,
                 )
-            raw_score = math.log1p(max(1, int(edge.raw_link_count)))
+            raw_score = hyperlink_citation_initial_score(edge.raw_link_count, init_mode)
             weighted_score = raw_score * source_multiplier * target_multiplier
             raw_link_count += int(edge.raw_link_count)
             source_doc_ids.add(source_record.doc_id)
@@ -6950,6 +6971,7 @@ def hyperlink_citation_doc_doc_scores(
     metadata = {
         "doc_doc_hyperlink_available": True,
         "doc_doc_hyperlink_weight_mode": mode,
+        "doc_doc_hyperlink_init_mode": init_mode,
         "doc_doc_hyperlink_source_seed_floor": source_floor,
         "doc_doc_hyperlink_source_seed_scale": source_scale,
         "doc_doc_hyperlink_target_support_floor": target_floor,
@@ -7040,6 +7062,7 @@ def add_doc_doc_edges(
         "doc_doc_top_docs": int(args.doc_doc_top_docs),
         "doc_doc_max_edges_per_doc": int(args.doc_doc_max_edges_per_doc),
         "doc_doc_hyperlink_weight_mode": str(args.doc_doc_hyperlink_weight_mode),
+        "doc_doc_hyperlink_init_mode": str(args.doc_doc_hyperlink_init_mode),
         "doc_doc_edge_count_directed": 0,
         "doc_doc_edge_pair_count": 0,
         "mean_doc_doc_edge_weight": None,
@@ -8265,6 +8288,7 @@ def main() -> None:
                 "doc_doc_min_semantic_similarity": float(args.doc_doc_min_semantic_similarity),
                 "doc_doc_semantic_top_terms": int(args.doc_doc_semantic_top_terms),
                 "doc_doc_hyperlink_weight_mode": args.doc_doc_hyperlink_weight_mode,
+                "doc_doc_hyperlink_init_mode": args.doc_doc_hyperlink_init_mode,
                 "doc_doc_hyperlink_source_seed_floor": float(
                     args.doc_doc_hyperlink_source_seed_floor
                 ),
@@ -8560,6 +8584,7 @@ def main() -> None:
         "doc_doc_min_semantic_similarity": float(args.doc_doc_min_semantic_similarity),
         "doc_doc_semantic_top_terms": int(args.doc_doc_semantic_top_terms),
         "doc_doc_hyperlink_weight_mode": args.doc_doc_hyperlink_weight_mode,
+        "doc_doc_hyperlink_init_mode": args.doc_doc_hyperlink_init_mode,
         "doc_doc_hyperlink_source_seed_floor": float(args.doc_doc_hyperlink_source_seed_floor),
         "doc_doc_hyperlink_source_seed_scale": float(args.doc_doc_hyperlink_source_seed_scale),
         "doc_doc_hyperlink_target_support_floor": float(

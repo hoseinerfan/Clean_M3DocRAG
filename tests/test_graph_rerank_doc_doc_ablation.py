@@ -31,6 +31,7 @@ def make_args(**overrides):
         "doc_doc_min_semantic_similarity": 0.35,
         "doc_doc_semantic_top_terms": 64,
         "doc_doc_hyperlink_weight_mode": "log_count",
+        "doc_doc_hyperlink_init_mode": "log_count",
         "doc_doc_hyperlink_source_seed_floor": 0.5,
         "doc_doc_hyperlink_source_seed_scale": 0.5,
         "doc_doc_hyperlink_target_support_floor": 0.5,
@@ -210,7 +211,66 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
 
         self.assertGreater(pair_scores[("A", "C")], pair_scores[("A", "B")])
         self.assertAlmostEqual(pair_scores[("A", "C")], math.log1p(5))
+        self.assertEqual(metadata["doc_doc_hyperlink_init_mode"], "log_count")
         self.assertEqual(metadata["doc_doc_hyperlink_weight_mode"], "log_count")
+
+    def test_hyperlink_citation_uniform_init_ignores_raw_link_count(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0),
+            "B_page0": MODULE.PageRecord(doc_id="B", page_idx=0),
+            "C_page0": MODULE.PageRecord(doc_id="C", page_idx=0),
+        }
+        graph = MODULE.PdfHyperlinkGraph(
+            by_source_page={
+                "A_page0": [
+                    MODULE.PdfHyperlinkEdge(
+                        source_page_uid="A_page0",
+                        target_doc_id="B",
+                        raw_link_count=1,
+                    ),
+                    MODULE.PdfHyperlinkEdge(
+                        source_page_uid="A_page0",
+                        target_doc_id="C",
+                        raw_link_count=5,
+                    ),
+                ]
+            },
+            edge_count=2,
+            source_page_count=1,
+            target_doc_count=2,
+        )
+
+        pair_scores, metadata = MODULE.hyperlink_citation_doc_doc_scores(
+            selected_doc_ids={"A", "B", "C"},
+            records=records,
+            page_seed={"A_page0": 1.0},
+            dense_doc_ranks={"B": 1, "C": 10},
+            sparse_doc_ranks={},
+            source_weights=MODULE.SourceWeights(1.0, 1.0, {}),
+            pdf_hyperlink_graph=graph,
+            args=make_args(doc_doc_hyperlink_init_mode="uniform"),
+        )
+
+        self.assertAlmostEqual(pair_scores[("A", "B")], pair_scores[("A", "C")])
+        self.assertEqual(metadata["doc_doc_hyperlink_init_mode"], "uniform")
+
+    def test_hyperlink_initial_score_modes(self) -> None:
+        self.assertAlmostEqual(
+            MODULE.hyperlink_citation_initial_score(4, "uniform"),
+            1.0,
+        )
+        self.assertAlmostEqual(
+            MODULE.hyperlink_citation_initial_score(4, "sqrt_count"),
+            2.0,
+        )
+        self.assertAlmostEqual(
+            MODULE.hyperlink_citation_initial_score(4, "raw_count"),
+            4.0,
+        )
+        self.assertAlmostEqual(
+            MODULE.hyperlink_citation_initial_score(4, "log_count"),
+            math.log1p(4),
+        )
 
     def test_shared_entity_title_topic_scores_shared_signals(self) -> None:
         records = {
