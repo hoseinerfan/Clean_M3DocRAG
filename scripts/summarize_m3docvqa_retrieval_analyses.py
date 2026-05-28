@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 
-RECALL_K_VALUES = [1, 2, 4, 5, 10, 20, 50, 100]
+RECALL_K_VALUES = [1, 2, 4, 5, 10, 20, 50, 100, 500, 1000]
 COLUMNS = [
     "label",
     "n_qids",
