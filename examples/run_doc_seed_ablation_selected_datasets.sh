@@ -141,6 +141,26 @@ for dataset in $DATASETS; do
         "$DUDE_WORK_ROOT" dude "$DUDE_GOLD" "$DUDE_DOC_PAGES" \
         "$DUDE_DENSE_PRED" "$DUDE_SPARSE_PRED"
       ;;
+    vidore|vidore-v3)
+      require_value VIDORE_WORK_ROOT
+      require_value VIDORE_GOLD
+      require_value VIDORE_DOC_PAGES
+      require_value VIDORE_DENSE_PRED
+      require_value VIDORE_SPARSE_PRED
+      run_dataset "ViDoRe-V3" vidore-v3 vidore_docseed_ablation \
+        "$VIDORE_WORK_ROOT" vidore-v3 "$VIDORE_GOLD" "$VIDORE_DOC_PAGES" \
+        "$VIDORE_DENSE_PRED" "$VIDORE_SPARSE_PRED"
+      ;;
+    opendocvqa)
+      require_value OPENDOCVQA_WORK_ROOT
+      require_value OPENDOCVQA_GOLD
+      require_value OPENDOCVQA_DOC_PAGES
+      require_value OPENDOCVQA_DENSE_PRED
+      require_value OPENDOCVQA_SPARSE_PRED
+      run_dataset "OpenDocVQA" opendocvqa opendocvqa_docseed_ablation \
+        "$OPENDOCVQA_WORK_ROOT" opendocvqa "$OPENDOCVQA_GOLD" "$OPENDOCVQA_DOC_PAGES" \
+        "$OPENDOCVQA_DENSE_PRED" "$OPENDOCVQA_SPARSE_PRED"
+      ;;
     *)
       echo "unknown_dataset: $dataset" >&2
       exit 1

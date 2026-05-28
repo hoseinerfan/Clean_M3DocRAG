@@ -60,6 +60,14 @@ dataset_summary_root() {
       require_value DUDE_WORK_ROOT
       echo "$DUDE_WORK_ROOT/output/dude/doc_doc_edge_ablation/dude_docdoc_ablation"
       ;;
+    vidore|vidore-v3)
+      require_value VIDORE_WORK_ROOT
+      echo "$VIDORE_WORK_ROOT/output/vidore-v3/doc_doc_edge_ablation/vidore_docdoc_ablation"
+      ;;
+    opendocvqa)
+      require_value OPENDOCVQA_WORK_ROOT
+      echo "$OPENDOCVQA_WORK_ROOT/output/opendocvqa/doc_doc_edge_ablation/opendocvqa_docdoc_ablation"
+      ;;
     *)
       echo "unknown_dataset: $dataset" >&2
       exit 1
@@ -73,6 +81,8 @@ for dataset in $DATASETS; do
     sciegqa) display_name="SciEGQA" ;;
     vidoseek) display_name="ViDoSeek" ;;
     dude) display_name="DUDE" ;;
+    vidore|vidore-v3) display_name="ViDoRe-V3" ;;
+    opendocvqa) display_name="OpenDocVQA" ;;
     *) display_name="$dataset" ;;
   esac
   prefix="$(dataset_summary_root "$dataset")"

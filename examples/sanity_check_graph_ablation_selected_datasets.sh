@@ -48,6 +48,16 @@ for dataset in $DATASETS; do
       args+=(--doc-doc-summary-glob "$DUDE_WORK_ROOT/output/dude/doc_doc_edge_ablation/*.summary.json")
       args+=(--doc-seed-summary-glob "$DUDE_WORK_ROOT/output/dude/doc_seed_ablation/*.summary.json")
       ;;
+    vidore|vidore-v3)
+      require_value VIDORE_WORK_ROOT
+      args+=(--doc-doc-summary-glob "$VIDORE_WORK_ROOT/output/vidore-v3/doc_doc_edge_ablation/*.summary.json")
+      args+=(--doc-seed-summary-glob "$VIDORE_WORK_ROOT/output/vidore-v3/doc_seed_ablation/*.summary.json")
+      ;;
+    opendocvqa)
+      require_value OPENDOCVQA_WORK_ROOT
+      args+=(--doc-doc-summary-glob "$OPENDOCVQA_WORK_ROOT/output/opendocvqa/doc_doc_edge_ablation/*.summary.json")
+      args+=(--doc-seed-summary-glob "$OPENDOCVQA_WORK_ROOT/output/opendocvqa/doc_seed_ablation/*.summary.json")
+      ;;
     *)
       echo "unknown_dataset: $dataset" >&2
       exit 1
