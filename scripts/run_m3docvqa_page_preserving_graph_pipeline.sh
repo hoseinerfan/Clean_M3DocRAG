@@ -11,6 +11,7 @@ GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$DEFAULT_GRAPH_OUT_DIR}"
 DENSE_PRED="${DENSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_${SPLIT}/mmqa_${SPLIT}_plain_top224_nprobe${FAISS_NPROBE}_effdiag_all.prediction.json}"
 SPARSE_PRED="${SPARSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_${SPLIT}/mmqa_${SPLIT}_splade.prediction.json}"
 SPLADE_INDEX_PT="${SPLADE_INDEX_PT:-$LOCAL_OUTPUT_DIR/m3docvqa_splade/m3docvqa_${SPLIT}_splade.pt}"
+DOC_PAGES_JSONL="${DOC_PAGES_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-$LOCAL_OUTPUT_DIR/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl}}"
 
 GRAPH_PROFILE="${GRAPH_PROFILE:-denseheavy125_medium_both}"
 GRAPH_LABEL="${GRAPH_LABEL:-mmqa_${SPLIT}_plain_top224_splade_graph_pagepreserve_${GRAPH_PROFILE}}"
@@ -27,6 +28,7 @@ mkdir -p "$GRAPH_OUT_DIR"
 echo "using_dense_pred=$DENSE_PRED"
 echo "using_sparse_pred=$SPARSE_PRED"
 echo "using_gold=$GOLD"
+echo "using_doc_pages_jsonl=$DOC_PAGES_JSONL"
 echo "using_graph_out_dir=$GRAPH_OUT_DIR"
 echo "using_graph_profile=$GRAPH_PROFILE"
 if [[ -n "${OUT_DIR:-}" && "$GRAPH_OUT_DIR" == "$DEFAULT_GRAPH_OUT_DIR" ]]; then
@@ -239,6 +241,26 @@ ADAPTIVE_ADJACENT_MIN_MULT="${ADAPTIVE_ADJACENT_MIN_MULT:-0.0}"
 ADAPTIVE_ADJACENT_MAX_MULT="${ADAPTIVE_ADJACENT_MAX_MULT:-1.0}"
 ADAPTIVE_ADJACENT_POWER="${ADAPTIVE_ADJACENT_POWER:-0.5}"
 DOC_SEED_WEIGHT="${DOC_SEED_WEIGHT:-0.0}"
+DOC_SEED_MODE="${DOC_SEED_MODE:-rrf}"
+DOC_SEED_GRAPH_SIZE_REFERENCE="${DOC_SEED_GRAPH_SIZE_REFERENCE:-20.0}"
+DOC_SEED_GRAPH_SIZE_MIN_MULT="${DOC_SEED_GRAPH_SIZE_MIN_MULT:-0.25}"
+DOC_SEED_GRAPH_SIZE_MAX_MULT="${DOC_SEED_GRAPH_SIZE_MAX_MULT:-2.0}"
+PDF_HYPERLINK_EDGES_JSONL="${PDF_HYPERLINK_EDGES_JSONL:-}"
+PDF_HYPERLINK_EDGE_WEIGHT="${PDF_HYPERLINK_EDGE_WEIGHT:-0.0}"
+PDF_HYPERLINK_DIRECTION="${PDF_HYPERLINK_DIRECTION:-source_to_target_doc}"
+PDF_HYPERLINK_WEIGHT_MODE="${PDF_HYPERLINK_WEIGHT_MODE:-uniform}"
+PDF_HYPERLINK_MAX_EDGES_PER_SOURCE="${PDF_HYPERLINK_MAX_EDGES_PER_SOURCE:-0}"
+PDF_HYPERLINK_SOURCE_TOP_K="${PDF_HYPERLINK_SOURCE_TOP_K:-0}"
+PDF_HYPERLINK_TARGET_DOC_TOP_K="${PDF_HYPERLINK_TARGET_DOC_TOP_K:-0}"
+PDF_HYPERLINK_QUERY_SUPPORT_WEIGHT_MODE="${PDF_HYPERLINK_QUERY_SUPPORT_WEIGHT_MODE:-none}"
+DOC_DOC_EDGE_MODE="${DOC_DOC_EDGE_MODE:-none}"
+DOC_DOC_EDGE_WEIGHT="${DOC_DOC_EDGE_WEIGHT:-0.0}"
+DOC_DOC_TOP_DOCS="${DOC_DOC_TOP_DOCS:-20}"
+DOC_DOC_MAX_EDGES_PER_DOC="${DOC_DOC_MAX_EDGES_PER_DOC:-8}"
+DOC_DOC_MIN_SHARED_SIGNALS="${DOC_DOC_MIN_SHARED_SIGNALS:-1}"
+DOC_DOC_MAX_SIGNAL_DOC_MATCHES="${DOC_DOC_MAX_SIGNAL_DOC_MATCHES:-8}"
+DOC_DOC_MIN_SEMANTIC_SIMILARITY="${DOC_DOC_MIN_SEMANTIC_SIMILARITY:-0.35}"
+DOC_DOC_SEMANTIC_TOP_TERMS="${DOC_DOC_SEMANTIC_TOP_TERMS:-64}"
 RESTART_PROB="${RESTART_PROB:-0.15}"
 PPR_ITERS="${PPR_ITERS:-30}"
 PAGE_DOC_EDGE_WEIGHT="${PAGE_DOC_EDGE_WEIGHT:-1.0}"
@@ -306,6 +328,25 @@ GRAPH_ARGS=(
   --adaptive-adjacent-max-mult "$ADAPTIVE_ADJACENT_MAX_MULT"
   --adaptive-adjacent-power "$ADAPTIVE_ADJACENT_POWER"
   --doc-seed-weight "$DOC_SEED_WEIGHT"
+  --doc-seed-mode "$DOC_SEED_MODE"
+  --doc-seed-graph-size-reference "$DOC_SEED_GRAPH_SIZE_REFERENCE"
+  --doc-seed-graph-size-min-mult "$DOC_SEED_GRAPH_SIZE_MIN_MULT"
+  --doc-seed-graph-size-max-mult "$DOC_SEED_GRAPH_SIZE_MAX_MULT"
+  --pdf-hyperlink-edge-weight "$PDF_HYPERLINK_EDGE_WEIGHT"
+  --pdf-hyperlink-direction "$PDF_HYPERLINK_DIRECTION"
+  --pdf-hyperlink-weight-mode "$PDF_HYPERLINK_WEIGHT_MODE"
+  --pdf-hyperlink-max-edges-per-source "$PDF_HYPERLINK_MAX_EDGES_PER_SOURCE"
+  --pdf-hyperlink-source-top-k "$PDF_HYPERLINK_SOURCE_TOP_K"
+  --pdf-hyperlink-target-doc-top-k "$PDF_HYPERLINK_TARGET_DOC_TOP_K"
+  --pdf-hyperlink-query-support-weight-mode "$PDF_HYPERLINK_QUERY_SUPPORT_WEIGHT_MODE"
+  --doc-doc-edge-mode "$DOC_DOC_EDGE_MODE"
+  --doc-doc-edge-weight "$DOC_DOC_EDGE_WEIGHT"
+  --doc-doc-top-docs "$DOC_DOC_TOP_DOCS"
+  --doc-doc-max-edges-per-doc "$DOC_DOC_MAX_EDGES_PER_DOC"
+  --doc-doc-min-shared-signals "$DOC_DOC_MIN_SHARED_SIGNALS"
+  --doc-doc-max-signal-doc-matches "$DOC_DOC_MAX_SIGNAL_DOC_MATCHES"
+  --doc-doc-min-semantic-similarity "$DOC_DOC_MIN_SEMANTIC_SIMILARITY"
+  --doc-doc-semantic-top-terms "$DOC_DOC_SEMANTIC_TOP_TERMS"
   --restart-prob "$RESTART_PROB"
   --ppr-iters "$PPR_ITERS"
   --page-doc-edge-weight "$PAGE_DOC_EDGE_WEIGHT"
@@ -348,6 +389,12 @@ if [[ "$ADAPTIVE_TRANSITION_GATE_DOC_TO_PAGE" == "0" ]]; then
   GRAPH_ARGS+=(--no-adaptive-transition-gate-doc-to-page)
 else
   GRAPH_ARGS+=(--adaptive-transition-gate-doc-to-page)
+fi
+if [[ -n "$DOC_PAGES_JSONL" && -f "$DOC_PAGES_JSONL" ]]; then
+  GRAPH_ARGS+=(--doc-pages-jsonl "$DOC_PAGES_JSONL")
+fi
+if [[ -n "$PDF_HYPERLINK_EDGES_JSONL" && -f "$PDF_HYPERLINK_EDGES_JSONL" ]]; then
+  GRAPH_ARGS+=(--pdf-hyperlink-edges-jsonl "$PDF_HYPERLINK_EDGES_JSONL")
 fi
 if [[ "$NEIGHBOR_EXPANSION_WINDOW" -gt 0 ]]; then
   GRAPH_ARGS+=(
