@@ -1155,6 +1155,64 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--doc-doc-edge-mode",
+        choices=[
+            "none",
+            "dense_sparse_agreement",
+            "shared_entity_title_topic",
+            "semantic_similarity",
+            "hyperlink_citation",
+            "all",
+        ],
+        default="none",
+        help=(
+            "Optional direct doc-doc transitions for ablations. Each non-none mode links "
+            "candidate document nodes using exactly one evidence family; 'all' combines them."
+        ),
+    )
+    parser.add_argument(
+        "--doc-doc-edge-weight",
+        type=float,
+        default=0.0,
+        help="Base transition weight for doc-doc edges. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--doc-doc-top-docs",
+        type=int,
+        default=20,
+        help="Candidate docs considered for doc-doc edges by best dense/SPLADE doc rank. Use 0 for all.",
+    )
+    parser.add_argument(
+        "--doc-doc-max-edges-per-doc",
+        type=int,
+        default=8,
+        help="Optional cap on doc-doc neighbors retained for each doc. Use 0 for no cap.",
+    )
+    parser.add_argument(
+        "--doc-doc-min-shared-signals",
+        type=int,
+        default=1,
+        help="Minimum shared entity/title/topic signals required for shared-evidence doc-doc edges.",
+    )
+    parser.add_argument(
+        "--doc-doc-max-signal-doc-matches",
+        type=int,
+        default=8,
+        help="Drop shared entity/title/topic signals that occur in more than this many candidate docs. Use 0 for no cap.",
+    )
+    parser.add_argument(
+        "--doc-doc-min-semantic-similarity",
+        type=float,
+        default=0.35,
+        help="Minimum cosine similarity for semantic-similarity doc-doc edges.",
+    )
+    parser.add_argument(
+        "--doc-doc-semantic-top-terms",
+        type=int,
+        default=64,
+        help="Per-page SPLADE terms used to build document semantic vectors.",
+    )
+    parser.add_argument(
         "--splade-index-pt",
         default="",
         help=(
@@ -1250,6 +1308,24 @@ def parse_args() -> argparse.Namespace:
         default=1.0,
         help="Weight for doc-node restart mass from dense/SPLADE doc RRF. Default: 1.",
     )
+    parser.add_argument(
+        "--doc-seed-mode",
+        choices=["rrf", "avg_page_seed", "graph_size_adaptive", "avg_page_seed_graph_size"],
+        default="rrf",
+        help=(
+            "Doc-node initial value mode. rrf preserves the original dense/SPLADE doc-RRF seed; "
+            "avg_page_seed uses the average candidate page seed per doc; graph_size_adaptive "
+            "scales doc-RRF by graph size; avg_page_seed_graph_size combines both."
+        ),
+    )
+    parser.add_argument(
+        "--doc-seed-graph-size-reference",
+        type=float,
+        default=20.0,
+        help="Reference candidate-doc count for graph-size adaptive doc seed scaling.",
+    )
+    parser.add_argument("--doc-seed-graph-size-min-mult", type=float, default=0.25)
+    parser.add_argument("--doc-seed-graph-size-max-mult", type=float, default=2.0)
     parser.add_argument("--restart-prob", type=float, default=0.20)
     parser.add_argument("--ppr-iters", type=int, default=30)
     parser.add_argument("--page-doc-edge-weight", type=float, default=1.0)
@@ -2158,6 +2234,86 @@ def effective_doc_to_page_edge_weight(args: argparse.Namespace) -> float:
     if value is None:
         return float(args.page_doc_edge_weight)
     return float(value)
+
+
+def doc_node_id(doc_id: str) -> str:
+    return f"doc::{doc_id}"
+
+
+def build_doc_seed(
+    *,
+    records: dict[str, PageRecord],
+    page_seed: dict[str, float],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
+    args: argparse.Namespace,
+) -> tuple[dict[str, float], dict[str, object]]:
+    mode = str(args.doc_seed_mode)
+    seed_weight = float(args.doc_seed_weight)
+    ranked_doc_ids = set(dense_doc_ranks) | set(sparse_doc_ranks)
+
+    page_seed_by_doc: dict[str, list[float]] = defaultdict(list)
+    for uid, seed_value in page_seed.items():
+        record = records.get(uid)
+        if record is not None:
+            page_seed_by_doc[record.doc_id].append(float(seed_value))
+
+    if mode in {"avg_page_seed", "avg_page_seed_graph_size"}:
+        doc_ids = sorted(ranked_doc_ids | set(page_seed_by_doc))
+    else:
+        doc_ids = sorted(ranked_doc_ids)
+
+    rrf_values: dict[str, float] = defaultdict(float)
+    for doc_id, rank in dense_doc_ranks.items():
+        rrf_values[doc_id] += source_weights.dense_weight / (float(args.rrf_k) + float(rank))
+    for doc_id, rank in sparse_doc_ranks.items():
+        rrf_values[doc_id] += source_weights.sparse_weight / (float(args.rrf_k) + float(rank))
+
+    raw_values: dict[str, float] = {doc_id: 0.0 for doc_id in doc_ids}
+    if mode in {"avg_page_seed", "avg_page_seed_graph_size"}:
+        for doc_id in doc_ids:
+            values = page_seed_by_doc.get(doc_id, [])
+            raw_values[doc_id] = statistics.fmean(values) if values else 0.0
+    else:
+        for doc_id in doc_ids:
+            raw_values[doc_id] = float(rrf_values.get(doc_id, 0.0))
+
+    graph_size_multiplier = 1.0
+    if mode in {"graph_size_adaptive", "avg_page_seed_graph_size"}:
+        graph_size = max(1, len(doc_ids))
+        reference = max(1e-12, float(args.doc_seed_graph_size_reference))
+        graph_size_multiplier = clamp(
+            math.sqrt(reference / float(graph_size)),
+            float(args.doc_seed_graph_size_min_mult),
+            float(args.doc_seed_graph_size_max_mult),
+        )
+    else:
+        graph_size = len(doc_ids)
+
+    doc_seed = {
+        doc_node_id(doc_id): seed_weight * graph_size_multiplier * float(raw_value)
+        for doc_id, raw_value in raw_values.items()
+    }
+    nonzero_values = [value for value in doc_seed.values() if abs(value) > 1e-12]
+    metadata: dict[str, object] = {
+        "doc_seed_mode": mode,
+        "doc_seed_weight": seed_weight,
+        "doc_seed_ranked_doc_count": len(ranked_doc_ids),
+        "doc_seed_page_seed_doc_count": len(page_seed_by_doc),
+        "doc_seed_node_count": len(doc_seed),
+        "doc_seed_nonzero_node_count": len(nonzero_values),
+        "doc_seed_raw_total": sum(raw_values.values()),
+        "doc_seed_total": sum(doc_seed.values()),
+        "mean_doc_seed_raw_value": statistics.fmean(raw_values.values()) if raw_values else None,
+        "mean_doc_seed_value": statistics.fmean(nonzero_values) if nonzero_values else None,
+        "doc_seed_graph_size": graph_size,
+        "doc_seed_graph_size_reference": float(args.doc_seed_graph_size_reference),
+        "doc_seed_graph_size_multiplier": graph_size_multiplier,
+        "doc_seed_graph_size_min_mult": float(args.doc_seed_graph_size_min_mult),
+        "doc_seed_graph_size_max_mult": float(args.doc_seed_graph_size_max_mult),
+    }
+    return doc_seed, metadata
 
 
 def jaccard(left: set[str], right: set[str]) -> float:
@@ -6391,6 +6547,453 @@ def add_external_page_graph_edges(
     }
 
 
+def doc_doc_best_rank(
+    doc_id: str,
+    records_by_doc: dict[str, list[PageRecord]],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+) -> int | None:
+    ranks: list[int] = []
+    for rank in (dense_doc_ranks.get(doc_id), sparse_doc_ranks.get(doc_id)):
+        if rank is not None:
+            ranks.append(int(rank))
+    for record in records_by_doc.get(doc_id, []):
+        rank = page_record_best_rank(record)
+        if rank is not None:
+            ranks.append(int(rank))
+    return min(ranks) if ranks else None
+
+
+def selected_doc_doc_ids(
+    *,
+    records: dict[str, PageRecord],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    args: argparse.Namespace,
+) -> tuple[set[str], dict[str, int | None]]:
+    records_by_doc: dict[str, list[PageRecord]] = defaultdict(list)
+    for record in records.values():
+        records_by_doc[record.doc_id].append(record)
+    candidate_doc_ids = set(records_by_doc) | set(dense_doc_ranks) | set(sparse_doc_ranks)
+    doc_best_ranks = {
+        doc_id: doc_doc_best_rank(doc_id, records_by_doc, dense_doc_ranks, sparse_doc_ranks)
+        for doc_id in candidate_doc_ids
+    }
+    ordered = sorted(
+        candidate_doc_ids,
+        key=lambda doc_id: (
+            doc_best_ranks.get(doc_id) if doc_best_ranks.get(doc_id) is not None else 10**9,
+            doc_id,
+        ),
+    )
+    top_docs = max(0, int(args.doc_doc_top_docs))
+    if top_docs > 0:
+        ordered = ordered[:top_docs]
+    return set(ordered), doc_best_ranks
+
+
+def doc_doc_support_values(
+    *,
+    doc_ids: set[str],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
+    args: argparse.Namespace,
+) -> dict[str, float]:
+    supports: dict[str, float] = {}
+    for doc_id in doc_ids:
+        value = 0.0
+        dense_rank = dense_doc_ranks.get(doc_id)
+        sparse_rank = sparse_doc_ranks.get(doc_id)
+        if dense_rank is not None:
+            value += source_weights.dense_weight / (float(args.rrf_k) + float(dense_rank))
+        if sparse_rank is not None:
+            value += source_weights.sparse_weight / (float(args.rrf_k) + float(sparse_rank))
+        supports[doc_id] = value
+    max_value = max(supports.values(), default=0.0)
+    if max_value <= 0:
+        return {doc_id: 0.0 for doc_id in supports}
+    return {doc_id: value / max_value for doc_id, value in supports.items()}
+
+
+def add_pair_score(
+    pair_scores: dict[tuple[str, str], float],
+    left_doc_id: str,
+    right_doc_id: str,
+    score: float,
+) -> None:
+    if left_doc_id == right_doc_id or score <= 0:
+        return
+    left, right = sorted((left_doc_id, right_doc_id))
+    pair_scores[(left, right)] = pair_scores.get((left, right), 0.0) + float(score)
+
+
+def dense_sparse_agreement_doc_doc_scores(
+    *,
+    selected_doc_ids: set[str],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
+    args: argparse.Namespace,
+) -> dict[tuple[str, str], float]:
+    agreement_docs = sorted(
+        doc_id
+        for doc_id in selected_doc_ids
+        if doc_id in dense_doc_ranks and doc_id in sparse_doc_ranks
+    )
+    supports = doc_doc_support_values(
+        doc_ids=set(agreement_docs),
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        source_weights=source_weights,
+        args=args,
+    )
+    pair_scores: dict[tuple[str, str], float] = {}
+    for left_idx, left_doc_id in enumerate(agreement_docs):
+        for right_doc_id in agreement_docs[left_idx + 1 :]:
+            score = math.sqrt(
+                max(0.0, supports.get(left_doc_id, 0.0))
+                * max(0.0, supports.get(right_doc_id, 0.0))
+            )
+            add_pair_score(pair_scores, left_doc_id, right_doc_id, score)
+    return pair_scores
+
+
+def shared_entity_title_topic_doc_doc_scores(
+    *,
+    selected_doc_ids: set[str],
+    records: dict[str, PageRecord],
+    page_breadcrumbs: dict[str, list[str]],
+    page_entities: dict[str, dict[str, list[str]]],
+    args: argparse.Namespace,
+) -> tuple[dict[tuple[str, str], float], dict[str, object]]:
+    labels_by_doc: dict[str, set[str]] = defaultdict(set)
+    for uid, record in records.items():
+        if record.doc_id not in selected_doc_ids:
+            continue
+        for signature in page_entities.get(uid, {}):
+            if signature:
+                labels_by_doc[record.doc_id].add(f"entity:{signature}")
+        for breadcrumb in page_breadcrumbs.get(uid, []):
+            key = normalize_heading_breadcrumb_key(
+                breadcrumb,
+                min_token_len=max(1, int(args.heading_breadcrumb_min_token_len)),
+            )
+            if key:
+                labels_by_doc[record.doc_id].add(f"topic:{key}")
+
+    signal_docs: dict[str, set[str]] = defaultdict(set)
+    for doc_id, labels in labels_by_doc.items():
+        for label in labels:
+            signal_docs[label].add(doc_id)
+
+    max_signal_doc_matches = max(0, int(args.doc_doc_max_signal_doc_matches))
+    dropped_broad_signal_count = 0
+    kept_signals: set[str] = set()
+    for label, doc_ids in signal_docs.items():
+        if max_signal_doc_matches > 0 and len(doc_ids) > max_signal_doc_matches:
+            dropped_broad_signal_count += 1
+            continue
+        kept_signals.add(label)
+
+    filtered_labels_by_doc = {
+        doc_id: labels & kept_signals for doc_id, labels in labels_by_doc.items()
+    }
+    min_shared = max(1, int(args.doc_doc_min_shared_signals))
+    docs = sorted(doc_id for doc_id, labels in filtered_labels_by_doc.items() if labels)
+    pair_scores: dict[tuple[str, str], float] = {}
+    for left_idx, left_doc_id in enumerate(docs):
+        left_labels = filtered_labels_by_doc[left_doc_id]
+        for right_doc_id in docs[left_idx + 1 :]:
+            right_labels = filtered_labels_by_doc[right_doc_id]
+            shared_count = len(left_labels & right_labels)
+            if shared_count < min_shared:
+                continue
+            denom = math.sqrt(max(1, len(left_labels)) * max(1, len(right_labels)))
+            add_pair_score(pair_scores, left_doc_id, right_doc_id, shared_count / denom)
+
+    metadata = {
+        "doc_doc_shared_signal_doc_count": len(filtered_labels_by_doc),
+        "doc_doc_shared_signal_count": len(kept_signals),
+        "doc_doc_shared_dropped_broad_signal_count": dropped_broad_signal_count,
+        "doc_doc_shared_pair_count": len(pair_scores),
+        "doc_doc_min_shared_signals": int(args.doc_doc_min_shared_signals),
+        "doc_doc_max_signal_doc_matches": int(args.doc_doc_max_signal_doc_matches),
+    }
+    return pair_scores, metadata
+
+
+def semantic_similarity_doc_doc_scores(
+    *,
+    selected_doc_ids: set[str],
+    records: dict[str, PageRecord],
+    page_seed: dict[str, float],
+    sparse_index: SparsePageIndex | None,
+    args: argparse.Namespace,
+) -> tuple[dict[tuple[str, str], float], dict[str, object]]:
+    if sparse_index is None:
+        return (
+            {},
+            {
+                "doc_doc_semantic_available": False,
+                "doc_doc_semantic_vector_doc_count": 0,
+                "doc_doc_semantic_pair_count": 0,
+                "doc_doc_semantic_missing_sparse_index": True,
+            },
+        )
+
+    top_terms = max(1, int(args.doc_doc_semantic_top_terms))
+    doc_vectors: dict[str, dict[int, float]] = defaultdict(lambda: defaultdict(float))
+    for uid, record in records.items():
+        if record.doc_id not in selected_doc_ids:
+            continue
+        page_weight = max(1e-12, float(page_seed.get(uid, 0.0)))
+        for term_id, term_weight in sparse_index.top_terms_for_page(uid, top_terms):
+            doc_vectors[record.doc_id][int(term_id)] += page_weight * float(term_weight)
+
+    norms = {
+        doc_id: math.sqrt(sum(value * value for value in vector.values()))
+        for doc_id, vector in doc_vectors.items()
+    }
+    min_similarity = float(args.doc_doc_min_semantic_similarity)
+    docs = sorted(doc_id for doc_id in doc_vectors if norms.get(doc_id, 0.0) > 0)
+    pair_scores: dict[tuple[str, str], float] = {}
+    for left_idx, left_doc_id in enumerate(docs):
+        left_vector = doc_vectors[left_doc_id]
+        left_norm = norms[left_doc_id]
+        for right_doc_id in docs[left_idx + 1 :]:
+            right_vector = doc_vectors[right_doc_id]
+            right_norm = norms[right_doc_id]
+            if len(left_vector) <= len(right_vector):
+                dot = sum(value * right_vector.get(term_id, 0.0) for term_id, value in left_vector.items())
+            else:
+                dot = sum(value * left_vector.get(term_id, 0.0) for term_id, value in right_vector.items())
+            similarity = dot / (left_norm * right_norm) if left_norm > 0 and right_norm > 0 else 0.0
+            if similarity >= min_similarity:
+                add_pair_score(pair_scores, left_doc_id, right_doc_id, similarity)
+
+    metadata = {
+        "doc_doc_semantic_available": True,
+        "doc_doc_semantic_vector_doc_count": len(docs),
+        "doc_doc_semantic_pair_count": len(pair_scores),
+        "doc_doc_semantic_top_terms": top_terms,
+        "doc_doc_min_semantic_similarity": min_similarity,
+        "doc_doc_semantic_missing_sparse_index": False,
+    }
+    return pair_scores, metadata
+
+
+def hyperlink_citation_doc_doc_scores(
+    *,
+    selected_doc_ids: set[str],
+    records: dict[str, PageRecord],
+    pdf_hyperlink_graph: PdfHyperlinkGraph | None,
+) -> tuple[dict[tuple[str, str], float], dict[str, object]]:
+    if pdf_hyperlink_graph is None:
+        return (
+            {},
+            {
+                "doc_doc_hyperlink_available": False,
+                "doc_doc_hyperlink_raw_link_count": 0,
+                "doc_doc_hyperlink_pair_count": 0,
+                "doc_doc_hyperlink_missing_graph": True,
+            },
+        )
+
+    pair_scores: dict[tuple[str, str], float] = {}
+    raw_link_count = 0
+    source_doc_ids: set[str] = set()
+    target_doc_ids: set[str] = set()
+    for source_uid, source_edges in pdf_hyperlink_graph.by_source_page.items():
+        source_record = records.get(source_uid)
+        if source_record is None or source_record.doc_id not in selected_doc_ids:
+            continue
+        for edge in source_edges:
+            if edge.target_doc_id not in selected_doc_ids or edge.target_doc_id == source_record.doc_id:
+                continue
+            raw_link_count += int(edge.raw_link_count)
+            source_doc_ids.add(source_record.doc_id)
+            target_doc_ids.add(edge.target_doc_id)
+            add_pair_score(
+                pair_scores,
+                source_record.doc_id,
+                edge.target_doc_id,
+                math.log1p(max(1, int(edge.raw_link_count))),
+            )
+
+    metadata = {
+        "doc_doc_hyperlink_available": True,
+        "doc_doc_hyperlink_source_doc_count": len(source_doc_ids),
+        "doc_doc_hyperlink_target_doc_count": len(target_doc_ids),
+        "doc_doc_hyperlink_raw_link_count": raw_link_count,
+        "doc_doc_hyperlink_pair_count": len(pair_scores),
+        "doc_doc_hyperlink_missing_graph": False,
+    }
+    return pair_scores, metadata
+
+
+def add_doc_doc_pair_edges(
+    *,
+    graph: dict[str, dict[str, float]],
+    pair_scores: dict[tuple[str, str], float],
+    args: argparse.Namespace,
+) -> tuple[int, int, float | None]:
+    if not pair_scores or float(args.doc_doc_edge_weight) <= 0:
+        return 0, 0, None
+
+    max_score = max(pair_scores.values())
+    if max_score <= 0:
+        return 0, 0, None
+    normalized_pairs = [
+        (left_doc_id, right_doc_id, score / max_score)
+        for (left_doc_id, right_doc_id), score in pair_scores.items()
+        if score > 0
+    ]
+    normalized_pairs.sort(key=lambda item: (-item[2], item[0], item[1]))
+
+    max_edges_per_doc = max(0, int(args.doc_doc_max_edges_per_doc))
+    if max_edges_per_doc > 0:
+        kept: list[tuple[str, str, float]] = []
+        degree: dict[str, int] = defaultdict(int)
+        for left_doc_id, right_doc_id, score in normalized_pairs:
+            if degree[left_doc_id] >= max_edges_per_doc or degree[right_doc_id] >= max_edges_per_doc:
+                continue
+            kept.append((left_doc_id, right_doc_id, score))
+            degree[left_doc_id] += 1
+            degree[right_doc_id] += 1
+        normalized_pairs = kept
+
+    directed_edges = 0
+    edge_weights: list[float] = []
+    for left_doc_id, right_doc_id, normalized_score in normalized_pairs:
+        weight = float(args.doc_doc_edge_weight) * float(normalized_score)
+        if weight <= 0:
+            continue
+        add_undirected_edge(graph, doc_node_id(left_doc_id), doc_node_id(right_doc_id), weight)
+        directed_edges += 2
+        edge_weights.append(weight)
+    mean_weight = statistics.fmean(edge_weights) if edge_weights else None
+    return directed_edges, len(edge_weights), mean_weight
+
+
+def add_doc_doc_edges(
+    *,
+    graph: dict[str, dict[str, float]],
+    records: dict[str, PageRecord],
+    page_seed: dict[str, float],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
+    sparse_index: SparsePageIndex | None,
+    page_breadcrumbs: dict[str, list[str]],
+    page_entities: dict[str, dict[str, list[str]]],
+    pdf_hyperlink_graph: PdfHyperlinkGraph | None,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    mode = str(args.doc_doc_edge_mode)
+    base_metadata: dict[str, object] = {
+        "doc_doc_edge_mode": mode,
+        "doc_doc_edge_weight": float(args.doc_doc_edge_weight),
+        "doc_doc_top_docs": int(args.doc_doc_top_docs),
+        "doc_doc_max_edges_per_doc": int(args.doc_doc_max_edges_per_doc),
+        "doc_doc_edge_count_directed": 0,
+        "doc_doc_edge_pair_count": 0,
+        "mean_doc_doc_edge_weight": None,
+        "doc_doc_selected_doc_count": 0,
+        "doc_doc_dense_sparse_agreement_pair_count": 0,
+        "doc_doc_shared_pair_count": 0,
+        "doc_doc_semantic_pair_count": 0,
+        "doc_doc_hyperlink_pair_count": 0,
+    }
+    if mode == "none" or float(args.doc_doc_edge_weight) <= 0:
+        return base_metadata
+
+    selected_doc_ids, doc_best_ranks = selected_doc_doc_ids(
+        records=records,
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        args=args,
+    )
+    pair_scores: dict[tuple[str, str], float] = {}
+    metadata = dict(base_metadata)
+    metadata.update(
+        {
+            "doc_doc_selected_doc_count": len(selected_doc_ids),
+            "doc_doc_selected_min_best_rank": (
+                min(rank for doc_id, rank in doc_best_ranks.items() if doc_id in selected_doc_ids and rank is not None)
+                if any(doc_best_ranks.get(doc_id) is not None for doc_id in selected_doc_ids)
+                else None
+            ),
+            "doc_doc_selected_max_best_rank": (
+                max(rank for doc_id, rank in doc_best_ranks.items() if doc_id in selected_doc_ids and rank is not None)
+                if any(doc_best_ranks.get(doc_id) is not None for doc_id in selected_doc_ids)
+                else None
+            ),
+        }
+    )
+
+    if mode in {"dense_sparse_agreement", "all"}:
+        agreement_scores = dense_sparse_agreement_doc_doc_scores(
+            selected_doc_ids=selected_doc_ids,
+            dense_doc_ranks=dense_doc_ranks,
+            sparse_doc_ranks=sparse_doc_ranks,
+            source_weights=source_weights,
+            args=args,
+        )
+        metadata["doc_doc_dense_sparse_agreement_pair_count"] = len(agreement_scores)
+        for pair, score in agreement_scores.items():
+            pair_scores[pair] = pair_scores.get(pair, 0.0) + score
+
+    if mode in {"shared_entity_title_topic", "all"}:
+        shared_scores, shared_metadata = shared_entity_title_topic_doc_doc_scores(
+            selected_doc_ids=selected_doc_ids,
+            records=records,
+            page_breadcrumbs=page_breadcrumbs,
+            page_entities=page_entities,
+            args=args,
+        )
+        metadata.update(shared_metadata)
+        for pair, score in shared_scores.items():
+            pair_scores[pair] = pair_scores.get(pair, 0.0) + score
+
+    if mode in {"semantic_similarity", "all"}:
+        semantic_scores, semantic_metadata = semantic_similarity_doc_doc_scores(
+            selected_doc_ids=selected_doc_ids,
+            records=records,
+            page_seed=page_seed,
+            sparse_index=sparse_index,
+            args=args,
+        )
+        metadata.update(semantic_metadata)
+        for pair, score in semantic_scores.items():
+            pair_scores[pair] = pair_scores.get(pair, 0.0) + score
+
+    if mode in {"hyperlink_citation", "all"}:
+        hyperlink_scores, hyperlink_metadata = hyperlink_citation_doc_doc_scores(
+            selected_doc_ids=selected_doc_ids,
+            records=records,
+            pdf_hyperlink_graph=pdf_hyperlink_graph,
+        )
+        metadata.update(hyperlink_metadata)
+        for pair, score in hyperlink_scores.items():
+            pair_scores[pair] = pair_scores.get(pair, 0.0) + score
+
+    directed_edges, pair_count, mean_weight = add_doc_doc_pair_edges(
+        graph=graph,
+        pair_scores=pair_scores,
+        args=args,
+    )
+    metadata.update(
+        {
+            "doc_doc_edge_count_directed": directed_edges,
+            "doc_doc_edge_pair_count": pair_count,
+            "doc_doc_raw_pair_count": len(pair_scores),
+            "mean_doc_doc_edge_weight": mean_weight,
+        }
+    )
+    return metadata
+
+
 def add_undirected_edge(
     graph: dict[str, dict[str, float]],
     left: str,
@@ -6610,7 +7213,6 @@ def build_qid_graph_ranking(
 
     records: dict[str, PageRecord] = {}
     page_seed: dict[str, float] = defaultdict(float)
-    doc_seed: dict[str, float] = defaultdict(float)
 
     for source_name, source_weight, source_pages, source_score_norm in [
         ("dense", source_weights.dense_weight, dense_pages, dense_score_norm),
@@ -6644,18 +7246,14 @@ def build_qid_graph_ranking(
         record.neighbor_seed_score += float(seed_score)
         page_seed[uid] += float(seed_score)
 
-    for doc_id, rank in dense_doc_ranks.items():
-        doc_seed[f"doc::{doc_id}"] += (
-            float(args.doc_seed_weight)
-            * source_weights.dense_weight
-            / (float(args.rrf_k) + float(rank))
-        )
-    for doc_id, rank in sparse_doc_ranks.items():
-        doc_seed[f"doc::{doc_id}"] += (
-            float(args.doc_seed_weight)
-            * source_weights.sparse_weight
-            / (float(args.rrf_k) + float(rank))
-        )
+    doc_seed, doc_seed_metadata = build_doc_seed(
+        records=records,
+        page_seed=page_seed,
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        source_weights=source_weights,
+        args=args,
+    )
 
     transition_policy = build_transition_policy(
         records=records,
@@ -6746,7 +7344,7 @@ def build_qid_graph_ranking(
     base_page_to_doc_weight = effective_page_to_doc_edge_weight(args)
     base_doc_to_page_weight = effective_doc_to_page_edge_weight(args)
     for uid, record in records.items():
-        doc_node = f"doc::{record.doc_id}"
+        doc_node = doc_node_id(record.doc_id)
         graph.setdefault(uid, {})
         graph.setdefault(doc_node, {})
         transition_multiplier = transition_policy.page_doc_multipliers.get(uid, 1.0)
@@ -6768,6 +7366,20 @@ def build_qid_graph_ranking(
             )
         add_directed_edge(graph, uid, doc_node, page_to_doc_weight)
         add_directed_edge(graph, doc_node, uid, doc_to_page_weight)
+
+    doc_doc_metadata = add_doc_doc_edges(
+        graph=graph,
+        records=records,
+        page_seed=page_seed,
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        source_weights=source_weights,
+        sparse_index=sparse_index,
+        page_breadcrumbs=page_breadcrumbs,
+        page_entities=page_entities,
+        pdf_hyperlink_graph=pdf_hyperlink_graph,
+        args=args,
+    )
 
     evidence_community_metadata = add_evidence_community_edges(
         graph=graph,
@@ -6886,7 +7498,7 @@ def build_qid_graph_ranking(
 
     ranked_records: list[tuple[PageRecord, float, float, float, float]] = []
     for uid, record in records.items():
-        doc_node = f"doc::{record.doc_id}"
+        doc_node = doc_node_id(record.doc_id)
         seed_component = page_seed_scaled.get(uid, 0.0)
         page_ppr_component = page_ppr_scaled.get(uid, 0.0)
         doc_ppr_component = doc_ppr_scaled.get(doc_node, 0.0)
@@ -6960,6 +7572,7 @@ def build_qid_graph_ranking(
         ),
         "top_graph_pages": trace_top,
         **source_weights.metadata,
+        **doc_seed_metadata,
         **restart_vector.metadata,
         **transition_policy.metadata,
         **adjacent_policy.metadata,
@@ -6974,6 +7587,7 @@ def build_qid_graph_ranking(
         **entity_alias_policy.metadata,
         **entity_alias_metadata,
         **constraint_competition_policy.metadata,
+        **doc_doc_metadata,
         **pdf_hyperlink_metadata,
         **external_page_graph_metadata,
         "position_evidence_restart_seed_node_count": position_seed_node_count,
@@ -7030,8 +7644,10 @@ def main() -> None:
     dense_pred = load_prediction(Path(args.dense_prediction_json))
     sparse_pred = load_prediction(Path(args.sparse_prediction_json))
     sparse_index = None
+    needs_doc_doc_semantic = str(args.doc_doc_edge_mode) in {"semantic_similarity", "all"}
     need_sparse_index = bool(args.splade_index_pt) and (
         int(args.expansion_top_pages) > 0 or int(args.neighbor_expansion_window) > 0
+        or needs_doc_doc_semantic
     )
     if int(args.neighbor_expansion_window) > 0 and not args.splade_index_pt:
         raise ValueError("--neighbor-expansion-window requires --splade-index-pt for page-catalog lookup.")
@@ -7060,6 +7676,10 @@ def main() -> None:
 
     doc_page_catalog: DocPageCatalog | None = None
     if args.doc_pages_jsonl:
+        needs_doc_doc_shared = str(args.doc_doc_edge_mode) in {
+            "shared_entity_title_topic",
+            "all",
+        }
         doc_page_catalog = load_doc_page_catalog(
             Path(args.doc_pages_jsonl),
             text_fields=args.query_anchor_text_field,
@@ -7069,12 +7689,14 @@ def main() -> None:
                 in {"query_local_softmax", "query_local_selector"}
             ),
             heading_fields=args.heading_breadcrumb_field,
-            load_page_breadcrumbs=str(args.heading_breadcrumb_mode) != "none",
+            load_page_breadcrumbs=(
+                str(args.heading_breadcrumb_mode) != "none" or needs_doc_doc_shared
+            ),
             heading_max_per_page=int(args.heading_breadcrumb_max_headings_per_page),
             heading_min_tokens=int(args.heading_breadcrumb_min_tokens),
             heading_min_token_len=int(args.heading_breadcrumb_min_token_len),
             entity_fields=args.entity_alias_field,
-            load_page_entities=str(args.entity_alias_mode) != "none",
+            load_page_entities=str(args.entity_alias_mode) != "none" or needs_doc_doc_shared,
             entity_max_per_page=int(args.entity_alias_max_entities_per_page),
             entity_min_token_len=int(args.entity_alias_min_token_len),
         )
@@ -7397,6 +8019,14 @@ def main() -> None:
                 ),
                 "external_page_graph_source_top_k": int(args.external_page_graph_source_top_k),
                 "external_page_graph_target_top_k": int(args.external_page_graph_target_top_k),
+                "doc_doc_edge_mode": args.doc_doc_edge_mode,
+                "doc_doc_edge_weight": float(args.doc_doc_edge_weight),
+                "doc_doc_top_docs": int(args.doc_doc_top_docs),
+                "doc_doc_max_edges_per_doc": int(args.doc_doc_max_edges_per_doc),
+                "doc_doc_min_shared_signals": int(args.doc_doc_min_shared_signals),
+                "doc_doc_max_signal_doc_matches": int(args.doc_doc_max_signal_doc_matches),
+                "doc_doc_min_semantic_similarity": float(args.doc_doc_min_semantic_similarity),
+                "doc_doc_semantic_top_terms": int(args.doc_doc_semantic_top_terms),
                 "splade_index_pt": args.splade_index_pt,
                 "expansion_top_pages": int(args.expansion_top_pages),
                 "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -7407,6 +8037,10 @@ def main() -> None:
                 "expansion_min_score": float(args.expansion_min_score),
                 "score_seed_weight": float(args.score_seed_weight),
                 "doc_seed_weight": float(args.doc_seed_weight),
+                "doc_seed_mode": args.doc_seed_mode,
+                "doc_seed_graph_size_reference": float(args.doc_seed_graph_size_reference),
+                "doc_seed_graph_size_min_mult": float(args.doc_seed_graph_size_min_mult),
+                "doc_seed_graph_size_max_mult": float(args.doc_seed_graph_size_max_mult),
                 "restart_prob": float(args.restart_prob),
                 "ppr_iters": int(args.ppr_iters),
                 "page_doc_edge_weight": float(args.page_doc_edge_weight),
@@ -7662,6 +8296,14 @@ def main() -> None:
         "external_page_graph_loaded_target_doc_count": (
             external_page_graph.target_doc_count if external_page_graph is not None else 0
         ),
+        "doc_doc_edge_mode": args.doc_doc_edge_mode,
+        "doc_doc_edge_weight": float(args.doc_doc_edge_weight),
+        "doc_doc_top_docs": int(args.doc_doc_top_docs),
+        "doc_doc_max_edges_per_doc": int(args.doc_doc_max_edges_per_doc),
+        "doc_doc_min_shared_signals": int(args.doc_doc_min_shared_signals),
+        "doc_doc_max_signal_doc_matches": int(args.doc_doc_max_signal_doc_matches),
+        "doc_doc_min_semantic_similarity": float(args.doc_doc_min_semantic_similarity),
+        "doc_doc_semantic_top_terms": int(args.doc_doc_semantic_top_terms),
         "splade_index_pt": args.splade_index_pt,
         "expansion_top_pages": int(args.expansion_top_pages),
         "expand_from_top_dense_pages": int(args.expand_from_top_dense_pages),
@@ -7672,6 +8314,10 @@ def main() -> None:
         "expansion_min_score": float(args.expansion_min_score),
         "score_seed_weight": float(args.score_seed_weight),
         "doc_seed_weight": float(args.doc_seed_weight),
+        "doc_seed_mode": args.doc_seed_mode,
+        "doc_seed_graph_size_reference": float(args.doc_seed_graph_size_reference),
+        "doc_seed_graph_size_min_mult": float(args.doc_seed_graph_size_min_mult),
+        "doc_seed_graph_size_max_mult": float(args.doc_seed_graph_size_max_mult),
         "restart_prob": float(args.restart_prob),
         "ppr_iters": int(args.ppr_iters),
         "page_doc_edge_weight": float(args.page_doc_edge_weight),
@@ -7830,6 +8476,62 @@ def main() -> None:
         "mean_restart_vector_doc_node_count": (
             statistics.fmean(float(row["graph"].get("restart_vector_doc_node_count", 0)) for row in per_qid)
             if per_qid
+            else None
+        ),
+        "mean_doc_seed_node_count": (
+            statistics.fmean(float(row["graph"].get("doc_seed_node_count", 0.0)) for row in per_qid)
+            if per_qid
+            else None
+        ),
+        "mean_doc_seed_total": (
+            statistics.fmean(float(row["graph"].get("doc_seed_total", 0.0)) for row in per_qid)
+            if per_qid
+            else None
+        ),
+        "mean_doc_seed_graph_size_multiplier": (
+            statistics.fmean(
+                float(row["graph"].get("doc_seed_graph_size_multiplier", 1.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "doc_doc_edge_qid_count": sum(
+            1
+            for row in per_qid
+            if int(row["graph"].get("doc_doc_edge_count_directed", 0)) > 0
+        ),
+        "mean_doc_doc_selected_doc_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_selected_doc_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_edge_count_directed": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_edge_count_directed", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_edge_pair_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_edge_pair_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_edge_weight": (
+            statistics.fmean(
+                float(row["graph"].get("mean_doc_doc_edge_weight", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_doc_doc_edge_weight") is not None
+            )
+            if any(row["graph"].get("mean_doc_doc_edge_weight") is not None for row in per_qid)
             else None
         ),
         "mean_adaptive_transition_global_multiplier": (
