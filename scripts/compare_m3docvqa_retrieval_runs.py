@@ -62,6 +62,13 @@ def parse_args() -> argparse.Namespace:
         help="Restrict to one or more qids; pass multiple times",
     )
     parser.add_argument(
+        "--qid-file",
+        dest="qid_files",
+        action="append",
+        default=[],
+        help="Restrict to qids listed in a text file, one qid per line. Can be passed multiple times.",
+    )
+    parser.add_argument(
         "--recall-k",
         dest="recall_ks",
         type=int,
@@ -81,6 +88,28 @@ def parse_args() -> argparse.Namespace:
         help="Emit machine-readable JSON instead of plain text",
     )
     return parser.parse_args()
+
+
+def load_qids_from_file(path: Path) -> list[str]:
+    qids: list[str] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            value = line.strip()
+            if not value or value.startswith("#"):
+                continue
+            qids.append(value)
+    return qids
+
+
+def ordered_unique(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
 
 
 def first_unique_doc_ranks(retrieval_rows: list[list]) -> dict[str, int]:
@@ -202,7 +231,10 @@ def main() -> None:
     gold_rows = load_jsonl(Path(args.gold))
     gold_by_qid = {row["qid"]: row for row in gold_rows}
 
-    qids = args.qids if args.qids else sorted(set(baseline.keys()) & set(candidate.keys()))
+    requested_qids = list(args.qids)
+    for qid_file in args.qid_files:
+        requested_qids.extend(load_qids_from_file(Path(qid_file)))
+    qids = ordered_unique(requested_qids) if requested_qids else sorted(set(baseline.keys()) & set(candidate.keys()))
 
     baseline_analyses = []
     candidate_analyses = []
