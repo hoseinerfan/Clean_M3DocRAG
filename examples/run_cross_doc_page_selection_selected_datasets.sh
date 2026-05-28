@@ -10,9 +10,9 @@ if [[ -f "$VITAL_PATHS_ENV" ]]; then
   source "$VITAL_PATHS_ENV"
 fi
 
-DATASETS="${DATASETS:-mmdocir sciegqa vidoseek}"
-REPORT_OUT="${REPORT_OUT:-$REPO_ROOT/doc_doc_edge_ablation_results.md}"
-REPORT_CSV_OUT="${REPORT_CSV_OUT:-$REPO_ROOT/doc_doc_edge_ablation_results.csv}"
+DATASETS="${DATASETS:-vidore opendocvqa}"
+REPORT_OUT="${REPORT_OUT:-$REPO_ROOT/cross_doc_page_selection_ablation_results.md}"
+REPORT_CSV_OUT="${REPORT_CSV_OUT:-$REPO_ROOT/cross_doc_page_selection_ablation_results.csv}"
 
 require_value() {
   local name="$1"
@@ -68,16 +68,11 @@ run_dataset() {
   local doc_pages="$7"
   local dense_pred="$8"
   local sparse_pred="$9"
-  local pdf_hyperlink_edges="${10:-}"
   local data_root
   local out_dir
-  local sparse_dir
-  local splade_index
 
   data_root="$(dirname "$gold")"
-  out_dir="$work_root/output/$output_slug/doc_doc_edge_ablation"
-  sparse_dir="$(cd "$(dirname "$sparse_pred")" && pwd)"
-  splade_index="${SPLADE_INDEX_PT:-$sparse_dir/${data_name}_splade_page_index.pt}"
+  out_dir="$work_root/output/$output_slug/cross_doc_page_selection_ablation"
 
   require_file gold "$gold"
   require_file doc_pages "$doc_pages"
@@ -86,7 +81,7 @@ run_dataset() {
   mkdir -p "$out_dir"
 
   echo
-  echo "== $display_name doc-doc edge ablation =="
+  echo "== $display_name cross-doc page selection ablation =="
   DATA_NAME="$data_name" \
   DATA_ROOT="$data_root" \
   GOLD="$gold" \
@@ -95,9 +90,7 @@ run_dataset() {
   SPARSE_PRED="$sparse_pred" \
   OUT_DIR="$out_dir" \
   LABEL_PREFIX="$label_prefix" \
-  SPLADE_INDEX_PT="$splade_index" \
-  PDF_HYPERLINK_EDGES_JSONL="$pdf_hyperlink_edges" \
-  bash "$REPO_ROOT/scripts/run_external_doc_doc_edge_ablation.sh"
+  bash "$REPO_ROOT/scripts/run_external_cross_doc_page_selection_ablation.sh"
 
   append_reports "$display_name" \
     "$out_dir/${label_prefix}_recall_table.md" \
@@ -108,60 +101,15 @@ init_reports
 
 for dataset in $DATASETS; do
   case "$dataset" in
-    mmdocir)
-      require_value MMDocIR_WORK_ROOT
-      require_value MMDOCIR_GOLD
-      require_value MMDOCIR_DOC_PAGES
-      require_value MMDOCIR_DENSE_PRED
-      require_value MMDOCIR_SPARSE_PRED
-      run_dataset "MMDocIR" mmdocir mmdocir_docdoc_ablation \
-        "$MMDocIR_WORK_ROOT" mmdocir "$MMDOCIR_GOLD" "$MMDOCIR_DOC_PAGES" \
-        "$MMDOCIR_DENSE_PRED" "$MMDOCIR_SPARSE_PRED" \
-        "${MMDOCIR_PDF_HYPERLINK_EDGES_JSONL:-}"
-      ;;
-    sciegqa)
-      require_value SciEGQA_WORK_ROOT
-      require_value SCIEGQA_GOLD
-      require_value SCIEGQA_DOC_PAGES
-      require_value SCIEGQA_DENSE_PRED
-      require_value SCIEGQA_SPARSE_PRED
-      run_dataset "SciEGQA" sciegqa sciegqa_docdoc_ablation \
-        "$SciEGQA_WORK_ROOT" sciegqa "$SCIEGQA_GOLD" "$SCIEGQA_DOC_PAGES" \
-        "$SCIEGQA_DENSE_PRED" "$SCIEGQA_SPARSE_PRED" \
-        "${SCIEGQA_PDF_HYPERLINK_EDGES_JSONL:-}"
-      ;;
-    vidoseek)
-      require_value VIDOSEEK_WORK_ROOT
-      require_value VIDOSEEK_GOLD
-      require_value VIDOSEEK_DOC_PAGES
-      require_value VIDOSEEK_DENSE_PRED
-      require_value VIDOSEEK_SPARSE_PRED
-      run_dataset "ViDoSeek" vidoseek vidoseek_docdoc_ablation \
-        "$VIDOSEEK_WORK_ROOT" vidoseek "$VIDOSEEK_GOLD" "$VIDOSEEK_DOC_PAGES" \
-        "$VIDOSEEK_DENSE_PRED" "$VIDOSEEK_SPARSE_PRED" \
-        "${VIDOSEEK_PDF_HYPERLINK_EDGES_JSONL:-}"
-      ;;
-    dude)
-      require_value DUDE_WORK_ROOT
-      require_value DUDE_GOLD
-      require_value DUDE_DOC_PAGES
-      require_value DUDE_DENSE_PRED
-      require_value DUDE_SPARSE_PRED
-      run_dataset "DUDE" dude dude_docdoc_ablation \
-        "$DUDE_WORK_ROOT" dude "$DUDE_GOLD" "$DUDE_DOC_PAGES" \
-        "$DUDE_DENSE_PRED" "$DUDE_SPARSE_PRED" \
-        "${DUDE_PDF_HYPERLINK_EDGES_JSONL:-}"
-      ;;
     vidore|vidore-v3)
       require_value VIDORE_WORK_ROOT
       require_value VIDORE_GOLD
       require_value VIDORE_DOC_PAGES
       require_value VIDORE_DENSE_PRED
       require_value VIDORE_SPARSE_PRED
-      run_dataset "ViDoRe-V3" vidore-v3 vidore_docdoc_ablation \
+      run_dataset "ViDoRe-V3" vidore-v3 vidore_crossdoc_select_ablation \
         "$VIDORE_WORK_ROOT" vidore-v3 "$VIDORE_GOLD" "$VIDORE_DOC_PAGES" \
-        "$VIDORE_DENSE_PRED" "$VIDORE_SPARSE_PRED" \
-        "${VIDORE_PDF_HYPERLINK_EDGES_JSONL:-}"
+        "$VIDORE_DENSE_PRED" "$VIDORE_SPARSE_PRED"
       ;;
     opendocvqa)
       require_value OPENDOCVQA_WORK_ROOT
@@ -169,10 +117,9 @@ for dataset in $DATASETS; do
       require_value OPENDOCVQA_DOC_PAGES
       require_value OPENDOCVQA_DENSE_PRED
       require_value OPENDOCVQA_SPARSE_PRED
-      run_dataset "OpenDocVQA" opendocvqa opendocvqa_docdoc_ablation \
+      run_dataset "OpenDocVQA" opendocvqa opendocvqa_crossdoc_select_ablation \
         "$OPENDOCVQA_WORK_ROOT" opendocvqa "$OPENDOCVQA_GOLD" "$OPENDOCVQA_DOC_PAGES" \
-        "$OPENDOCVQA_DENSE_PRED" "$OPENDOCVQA_SPARSE_PRED" \
-        "${OPENDOCVQA_PDF_HYPERLINK_EDGES_JSONL:-}"
+        "$OPENDOCVQA_DENSE_PRED" "$OPENDOCVQA_SPARSE_PRED"
       ;;
     *)
       echo "unknown_dataset: $dataset" >&2

@@ -244,6 +244,41 @@ def parse_args() -> argparse.Namespace:
             "use 0 for no cap."
         ),
     )
+    parser.add_argument(
+        "--final-selection-mode",
+        choices=["score", "max1_per_doc_then_fill", "mmr_doc_diverse"],
+        default="score",
+        help=(
+            "Optional post-GPP ordering policy for the first --final-selection-top-k slots. "
+            "score leaves the GPP score order unchanged; max1_per_doc_then_fill first takes "
+            "at most one page per doc from the candidate pool; mmr_doc_diverse adds a new-doc "
+            "bonus and same-doc penalty while selecting the first slots."
+        ),
+    )
+    parser.add_argument(
+        "--final-selection-top-k",
+        type=int,
+        default=4,
+        help="Number of leading slots controlled by --final-selection-mode.",
+    )
+    parser.add_argument(
+        "--final-selection-candidate-pool",
+        type=int,
+        default=20,
+        help="Top scored pages considered by the final selection policy.",
+    )
+    parser.add_argument(
+        "--final-selection-new-doc-bonus",
+        type=float,
+        default=0.05,
+        help="New-document bonus for --final-selection-mode mmr_doc_diverse.",
+    )
+    parser.add_argument(
+        "--final-selection-same-doc-penalty",
+        type=float,
+        default=0.05,
+        help="Per-selected-page same-document penalty for --final-selection-mode mmr_doc_diverse.",
+    )
     parser.add_argument("--rrf-k", type=float, default=10.0)
     parser.add_argument("--dense-weight", type=float, default=1.0)
     parser.add_argument("--sparse-weight", type=float, default=1.0)
@@ -7061,6 +7096,78 @@ def max_scale(values: dict[str, float]) -> dict[str, float]:
     return {key: float(value) / max_value for key, value in values.items()}
 
 
+def apply_final_selection_policy(
+    ranked_records: list[tuple[PageRecord, float, float, float, float]],
+    args: argparse.Namespace,
+) -> tuple[list[tuple[PageRecord, float, float, float, float]], dict[str, object]]:
+    mode = str(getattr(args, "final_selection_mode", "score"))
+    top_k = max(0, int(getattr(args, "final_selection_top_k", 4)))
+    pool_size = max(0, int(getattr(args, "final_selection_candidate_pool", 20)))
+    metadata: dict[str, object] = {
+        "final_selection_mode": mode,
+        "final_selection_top_k": top_k,
+        "final_selection_candidate_pool": pool_size,
+        "final_selection_reordered": False,
+        "final_selection_selected_doc_count": 0,
+    }
+    if mode == "score" or top_k <= 0 or not ranked_records:
+        return ranked_records, metadata
+
+    pool_size = max(top_k, pool_size) if pool_size > 0 else len(ranked_records)
+    pool = ranked_records[:pool_size]
+    suffix = ranked_records[pool_size:]
+    selected: list[tuple[PageRecord, float, float, float, float]] = []
+    doc_counts: dict[str, int] = defaultdict(int)
+
+    def add_item(item: tuple[PageRecord, float, float, float, float]) -> None:
+        selected.append(item)
+        doc_counts[item[0].doc_id] += 1
+
+    if mode == "max1_per_doc_then_fill":
+        for item in pool:
+            if len(selected) >= min(top_k, len(pool)):
+                break
+            if doc_counts[item[0].doc_id] == 0:
+                add_item(item)
+        for item in pool:
+            if len(selected) >= min(top_k, len(pool)):
+                break
+            if item not in selected:
+                add_item(item)
+    elif mode == "mmr_doc_diverse":
+        remaining = list(pool)
+        new_doc_bonus = float(getattr(args, "final_selection_new_doc_bonus", 0.05))
+        same_doc_penalty = float(getattr(args, "final_selection_same_doc_penalty", 0.05))
+        metadata["final_selection_new_doc_bonus"] = new_doc_bonus
+        metadata["final_selection_same_doc_penalty"] = same_doc_penalty
+        while remaining and len(selected) < min(top_k, len(pool)):
+            best_idx = max(
+                range(len(remaining)),
+                key=lambda idx: (
+                    remaining[idx][1]
+                    + (new_doc_bonus if doc_counts[remaining[idx][0].doc_id] == 0 else 0.0)
+                    - same_doc_penalty * doc_counts[remaining[idx][0].doc_id],
+                    remaining[idx][1],
+                    -(remaining[idx][0].dense_rank or 10**9),
+                    -(remaining[idx][0].sparse_rank or 10**9),
+                    remaining[idx][0].doc_id,
+                    -remaining[idx][0].page_idx,
+                ),
+            )
+            add_item(remaining.pop(best_idx))
+    else:
+        return ranked_records, metadata
+
+    selected_uids = {item[0].page_uid for item in selected}
+    reordered = selected + [item for item in pool if item[0].page_uid not in selected_uids] + suffix
+    metadata["final_selection_reordered"] = [
+        item[0].page_uid for item in reordered[: len(selected)]
+    ] != [item[0].page_uid for item in ranked_records[: len(selected)]]
+    metadata["final_selection_selected_doc_count"] = len({item[0].doc_id for item in selected})
+    metadata["final_selection_selected_page_uids"] = [item[0].page_uid for item in selected]
+    return reordered, metadata
+
+
 def run_ppr(
     *,
     graph: dict[str, dict[str, float]],
@@ -7544,6 +7651,7 @@ def build_qid_graph_ranking(
             item[0].page_idx,
         )
     )
+    ranked_records, final_selection_metadata = apply_final_selection_policy(ranked_records, args)
 
     final_rows: list[list[object]] = []
     per_doc_counts: dict[str, int] = defaultdict(int)
@@ -7582,6 +7690,7 @@ def build_qid_graph_ranking(
         "expansion_candidate_page_count": len(expansion_pages),
         "neighbor_candidate_page_count": len(neighbor_pages),
         "output_page_count": len(final_rows),
+        **final_selection_metadata,
         "graph_node_count": len(graph),
         "graph_edge_count_directed": sum(len(neighbors) for neighbors in graph.values()),
         "graph_edge_count_undirected": sum(len(neighbors) for neighbors in graph.values()) // 2,
@@ -7781,6 +7890,11 @@ def main() -> None:
                 "sparse_top_pages": int(args.sparse_top_pages),
                 "final_top_pages": int(args.final_top_pages),
                 "per_doc_page_limit": int(args.per_doc_page_limit),
+                "final_selection_mode": args.final_selection_mode,
+                "final_selection_top_k": int(args.final_selection_top_k),
+                "final_selection_candidate_pool": int(args.final_selection_candidate_pool),
+                "final_selection_new_doc_bonus": float(args.final_selection_new_doc_bonus),
+                "final_selection_same_doc_penalty": float(args.final_selection_same_doc_penalty),
                 "rrf_k": float(args.rrf_k),
                 "dense_weight": float(args.dense_weight),
                 "sparse_weight": float(args.sparse_weight),
@@ -8093,6 +8207,11 @@ def main() -> None:
         "sparse_top_pages": int(args.sparse_top_pages),
         "final_top_pages": int(args.final_top_pages),
         "per_doc_page_limit": int(args.per_doc_page_limit),
+        "final_selection_mode": args.final_selection_mode,
+        "final_selection_top_k": int(args.final_selection_top_k),
+        "final_selection_candidate_pool": int(args.final_selection_candidate_pool),
+        "final_selection_new_doc_bonus": float(args.final_selection_new_doc_bonus),
+        "final_selection_same_doc_penalty": float(args.final_selection_same_doc_penalty),
         "rrf_k": float(args.rrf_k),
         "dense_weight": float(args.dense_weight),
         "sparse_weight": float(args.sparse_weight),
@@ -8351,6 +8470,17 @@ def main() -> None:
         "final_page_seed_weight": float(args.final_page_seed_weight),
         "final_ppr_page_weight": float(args.final_ppr_page_weight),
         "final_ppr_doc_weight": float(args.final_ppr_doc_weight),
+        "final_selection_reordered_count": sum(
+            1 for row in per_qid if row["graph"].get("final_selection_reordered") is True
+        ),
+        "mean_final_selection_selected_doc_count": (
+            statistics.fmean(
+                float(row["graph"].get("final_selection_selected_doc_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
         "mean_candidate_page_count": (
             statistics.fmean(float(row["graph"]["candidate_page_count"]) for row in per_qid)
             if per_qid

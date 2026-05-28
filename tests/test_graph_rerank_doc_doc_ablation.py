@@ -147,6 +147,25 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
         self.assertNotIn(("A", "C"), pair_scores)
         self.assertEqual(metadata["doc_doc_shared_pair_count"], 1)
 
+    def test_max1_per_doc_final_selection_promotes_distinct_docs(self) -> None:
+        ranked = [
+            (MODULE.PageRecord(doc_id="A", page_idx=0, dense_rank=1), 1.00, 1.0, 0.0, 0.0),
+            (MODULE.PageRecord(doc_id="A", page_idx=1, dense_rank=2), 0.99, 0.9, 0.0, 0.0),
+            (MODULE.PageRecord(doc_id="B", page_idx=0, dense_rank=3), 0.98, 0.8, 0.0, 0.0),
+            (MODULE.PageRecord(doc_id="C", page_idx=0, dense_rank=4), 0.97, 0.7, 0.0, 0.0),
+        ]
+        args = make_args(
+            final_selection_mode="max1_per_doc_then_fill",
+            final_selection_top_k=3,
+            final_selection_candidate_pool=4,
+        )
+
+        selected, metadata = MODULE.apply_final_selection_policy(ranked, args)
+
+        self.assertEqual([item[0].page_uid for item in selected[:3]], ["A_page0", "B_page0", "C_page0"])
+        self.assertTrue(metadata["final_selection_reordered"])
+        self.assertEqual(metadata["final_selection_selected_doc_count"], 3)
+
 
 if __name__ == "__main__":
     unittest.main()
