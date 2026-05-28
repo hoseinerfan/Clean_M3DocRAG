@@ -245,6 +245,7 @@ def check_variant_configs(records: list[SummaryRecord], problems: list[str]) -> 
     expected_docdoc_modes = {
         "no_doc_doc": ("none", 0.0),
         "dense_sparse_agreement": ("dense_sparse_agreement", None),
+        "fully_connected_topdocs": ("fully_connected", None),
         "shared_entity_title_topic": ("shared_entity_title_topic", None),
         "semantic_similarity": ("semantic_similarity", None),
         "all_doc_doc_features": ("all", None),
@@ -364,6 +365,7 @@ def check_required_variants(records: list[SummaryRecord], problems: list[str]) -
         "docdoc": {
             "no_doc_doc",
             "dense_sparse_agreement",
+            "fully_connected_topdocs",
             "shared_entity_title_topic",
             "semantic_similarity",
             "all_doc_doc_features",

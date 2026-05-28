@@ -102,6 +102,24 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
         self.assertEqual(set(pair_scores), {("A", "B")})
         self.assertGreater(pair_scores[("A", "B")], 0.0)
 
+    def test_fully_connected_scores_link_every_selected_doc_pair(self) -> None:
+        pair_scores = MODULE.fully_connected_doc_doc_scores(
+            selected_doc_ids={"A", "B", "C", "D"},
+        )
+
+        self.assertEqual(
+            set(pair_scores),
+            {
+                ("A", "B"),
+                ("A", "C"),
+                ("A", "D"),
+                ("B", "C"),
+                ("B", "D"),
+                ("C", "D"),
+            },
+        )
+        self.assertTrue(all(score == 1.0 for score in pair_scores.values()))
+
     def test_shared_entity_title_topic_scores_shared_signals(self) -> None:
         records = {
             "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0),

@@ -1162,12 +1162,14 @@ def parse_args() -> argparse.Namespace:
             "shared_entity_title_topic",
             "semantic_similarity",
             "hyperlink_citation",
+            "fully_connected",
             "all",
         ],
         default="none",
         help=(
             "Optional direct doc-doc transitions for ablations. Each non-none mode links "
-            "candidate document nodes using exactly one evidence family; 'all' combines them."
+            "candidate document nodes using exactly one evidence family; "
+            "'fully_connected' links all selected docs, and 'all' combines evidence families."
         ),
     )
     parser.add_argument(
@@ -6659,6 +6661,18 @@ def dense_sparse_agreement_doc_doc_scores(
     return pair_scores
 
 
+def fully_connected_doc_doc_scores(
+    *,
+    selected_doc_ids: set[str],
+) -> dict[tuple[str, str], float]:
+    pair_scores: dict[tuple[str, str], float] = {}
+    ordered_docs = sorted(selected_doc_ids)
+    for idx, left_doc_id in enumerate(ordered_docs):
+        for right_doc_id in ordered_docs[idx + 1 :]:
+            add_pair_score(pair_scores, left_doc_id, right_doc_id, 1.0)
+    return pair_scores
+
+
 def shared_entity_title_topic_doc_doc_scores(
     *,
     selected_doc_ids: set[str],
@@ -6904,6 +6918,7 @@ def add_doc_doc_edges(
         "doc_doc_shared_pair_count": 0,
         "doc_doc_semantic_pair_count": 0,
         "doc_doc_hyperlink_pair_count": 0,
+        "doc_doc_fully_connected_pair_count": 0,
     }
     if mode == "none" or float(args.doc_doc_edge_weight) <= 0:
         return base_metadata
@@ -6942,6 +6957,14 @@ def add_doc_doc_edges(
         )
         metadata["doc_doc_dense_sparse_agreement_pair_count"] = len(agreement_scores)
         for pair, score in agreement_scores.items():
+            pair_scores[pair] = pair_scores.get(pair, 0.0) + score
+
+    if mode == "fully_connected":
+        fully_connected_scores = fully_connected_doc_doc_scores(
+            selected_doc_ids=selected_doc_ids,
+        )
+        metadata["doc_doc_fully_connected_pair_count"] = len(fully_connected_scores)
+        for pair, score in fully_connected_scores.items():
             pair_scores[pair] = pair_scores.get(pair, 0.0) + score
 
     if mode in {"shared_entity_title_topic", "all"}:

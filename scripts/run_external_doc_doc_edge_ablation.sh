@@ -60,6 +60,7 @@ run_variant() {
   local variant="$1"
   local edge_mode="$2"
   local edge_weight="$3"
+  local max_edges_per_doc="${4:-$DOC_DOC_MAX_EDGES_PER_DOC}"
   local label="${LABEL_PREFIX}_${variant}"
 
   echo "== $DATA_NAME: $variant =="
@@ -106,7 +107,7 @@ run_variant() {
   DOC_DOC_EDGE_MODE="$edge_mode" \
   DOC_DOC_EDGE_WEIGHT="$edge_weight" \
   DOC_DOC_TOP_DOCS="$DOC_DOC_TOP_DOCS" \
-  DOC_DOC_MAX_EDGES_PER_DOC="$DOC_DOC_MAX_EDGES_PER_DOC" \
+  DOC_DOC_MAX_EDGES_PER_DOC="$max_edges_per_doc" \
   DOC_DOC_MIN_SHARED_SIGNALS="$DOC_DOC_MIN_SHARED_SIGNALS" \
   DOC_DOC_MAX_SIGNAL_DOC_MATCHES="$DOC_DOC_MAX_SIGNAL_DOC_MATCHES" \
   DOC_DOC_MIN_SEMANTIC_SIMILARITY="$DOC_DOC_MIN_SEMANTIC_SIMILARITY" \
@@ -120,6 +121,7 @@ run_variant() {
 
 run_variant no_doc_doc none 0.0
 run_variant dense_sparse_agreement dense_sparse_agreement "$DOC_DOC_EDGE_WEIGHT"
+run_variant fully_connected_topdocs fully_connected "$DOC_DOC_EDGE_WEIGHT" 0
 run_variant shared_entity_title_topic shared_entity_title_topic "$DOC_DOC_EDGE_WEIGHT"
 
 if [[ -n "$SPLADE_INDEX_PT" && -f "$SPLADE_INDEX_PT" ]]; then
