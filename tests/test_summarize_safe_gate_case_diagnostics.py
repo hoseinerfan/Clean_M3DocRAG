@@ -90,7 +90,9 @@ class SafeGateCaseDiagnosticsTests(unittest.TestCase):
         self.assertEqual(entry["net"], 0)
         self.assertEqual(entry["accepted_movements"]["lost"], 1)
         self.assertEqual(entry["boundary_opportunities"], 1)
-        self.assertIn("| boundary | 1 | 2 | NA | 10 | 11 | 10 | 1 | 1 | 1 | 0 | 0 |", markdown)
+        self.assertIn("| boundary | 1 | 2 | NA | 10 | 10 | 1 | 1 | 1 | 0 | 0 |", markdown)
+        self.assertNotIn("candidate page", markdown)
+        self.assertNotIn("candidate net", markdown)
         self.assertIn("q-lost", markdown)
         self.assertIn("q-recovered", markdown)
 

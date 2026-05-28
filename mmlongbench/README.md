@@ -102,6 +102,12 @@ bash mmlongbench/run_plain_top224_mmlongbench.sh
   --recall-k 1 2 4 5 10 20 50 100
 ```
 
+Batch version:
+
+```bash
+sbatch mmlongbench/sbatch_plain_top224_mmlongbench.sh
+```
+
 ## SPLADE + Graph-PPR
 
 The converter stores `page_text_list` into the page manifest as `text` and `ocr_text`, so the SPLADE pipeline can use manifest text directly.
@@ -141,4 +147,10 @@ FINAL_PAGE_SEED_WEIGHT=1.0 \
 FINAL_PPR_PAGE_WEIGHT=0.5 \
 FINAL_PPR_DOC_WEIGHT=0.25 \
 bash scripts/run_external_graph_ppr_pipeline.sh
+```
+
+Batch version:
+
+```bash
+sbatch mmlongbench/sbatch_splade_graph_ppr_mmlongbench.sh
 ```

@@ -350,13 +350,13 @@ def render_markdown(entries: list[dict[str, Any]], topn: int) -> str:
         "",
         "## Aggregate By Variant",
         "",
-        "| variant | datasets | accepted | M3DocRAG page | base page | candidate page | gated page | boundary opportunities | recovered | lost | net | doc net |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| variant | datasets | accepted | M3DocRAG page | base page | gated page | boundary opportunities | recovered | lost | net | doc net |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for row in aggregate_by_variant(entries):
         lines.append(
             "| {variant} | {datasets} | {accepted} | {baseline_page} | {base_page} | "
-            "{candidate_page} | {gated_page} | {boundary_opportunities} | {recovered} | "
+            "{gated_page} | {boundary_opportunities} | {recovered} | "
             "{lost} | {net} | {doc_net} |".format(
                 **{**row, "baseline_page": display(row.get("baseline_page"))}
             )
@@ -367,28 +367,26 @@ def render_markdown(entries: list[dict[str, Any]], topn: int) -> str:
             "",
             "## Dataset/Variant Diagnostics",
             "",
-            "| dataset | variant | accepted | M3DocRAG page | base page | candidate page | gated page | boundary opportunities | recovered | lost | net | candidate net | accepted movements | accepted base ranks | accepted doc ranks | support votes | top rejected reasons |",
-            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|---|",
+            "| dataset | variant | accepted | M3DocRAG page | base page | gated page | boundary opportunities | recovered | lost | net | accepted movements | accepted base ranks | accepted doc ranks | support votes | top rejected reasons |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---|---|---|---|",
         ]
     )
     for entry in entries:
         lines.append(
             "| {dataset} | {variant} | {accepted} | {baseline_page} | {base_page} | "
-            "{candidate_page} | {gated_page} | {boundary_opportunities} | {recovered} | "
-            "{lost} | {net} | {candidate_net} | {accepted_movements} | {base_ranks} | "
+            "{gated_page} | {boundary_opportunities} | {recovered} | "
+            "{lost} | {net} | {accepted_movements} | {base_ranks} | "
             "{doc_ranks} | {support_votes} | {rejected} |".format(
                 dataset=entry["dataset"],
                 variant=entry["variant"],
                 accepted=entry["accepted"],
                 baseline_page=display(entry.get("baseline_page")),
                 base_page=display(entry["base_page"]),
-                candidate_page=display(entry["candidate_page"]),
                 gated_page=display(entry["gated_page"]),
                 boundary_opportunities=display(entry.get("boundary_opportunities")),
                 recovered=display(entry["recovered"]),
                 lost=display(entry["lost"]),
                 net=signed(entry["net"]),
-                candidate_net=signed(entry["candidate_net"]),
                 accepted_movements=top_counts(entry["accepted_movements"]),
                 base_ranks=entry["accepted_base_rank_counts"],
                 doc_ranks=entry["accepted_doc_rank_counts"],
