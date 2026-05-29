@@ -175,12 +175,79 @@ def doc_pages_link_records(
     return records
 
 
-def discover_pdfs(pdf_root: Path, doc_ids: set[str], max_docs: int) -> list[tuple[str, Path]]:
+def resolve_pdf_from_doc_rows(
+    pdf_root: Path,
+    doc_id: str,
+    rows: list[dict[str, Any]],
+    pdfs_by_stem: dict[str, Path],
+) -> Path | None:
+    if doc_id in pdfs_by_stem:
+        return pdfs_by_stem[doc_id]
+
+    seen: set[Path] = set()
+    candidates: list[Path] = []
+    for row in rows:
+        for key in ["pdf_path", "source_pdf_path"]:
+            value = str(row.get(key, "") or "").strip()
+            if not value:
+                continue
+            path = Path(value)
+            candidates.append(path if path.is_absolute() else pdf_root / path)
+        file_name = str(row.get("file_name", "") or "").strip()
+        if file_name:
+            candidates.extend([pdf_root / file_name, pdf_root / "PDF" / file_name])
+        doc_name = str(row.get("doc_name", "") or "").strip()
+        category = str(row.get("category", "") or "").strip()
+        if doc_name:
+            candidates.append(pdf_root / f"{doc_name}.pdf")
+            if category:
+                candidates.extend(
+                    [
+                        pdf_root / "PDF" / category / f"{doc_name}.pdf",
+                        pdf_root / category / f"{doc_name}.pdf",
+                    ]
+                )
+            if doc_name in pdfs_by_stem:
+                candidates.append(pdfs_by_stem[doc_name])
+
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate.exists() and candidate.is_file():
+            return candidate
+
+    for row in rows[:1]:
+        file_name = str(row.get("file_name", "") or "").strip()
+        if file_name:
+            matches = sorted(pdf_root.rglob(file_name))
+            if matches:
+                return matches[0]
+        doc_name = str(row.get("doc_name", "") or "").strip()
+        if doc_name:
+            matches = sorted(pdf_root.rglob(f"{doc_name}*.pdf"))
+            if matches:
+                return matches[0]
+    return None
+
+
+def discover_pdfs(
+    pdf_root: Path,
+    doc_ids: set[str],
+    max_docs: int,
+    doc_rows_by_id: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[tuple[str, Path]]:
     pdfs_by_stem = {path.stem: path for path in pdf_root.rglob("*.pdf")}
     selected_doc_ids = sorted(doc_ids) if doc_ids else sorted(pdfs_by_stem)
     if max_docs > 0:
         selected_doc_ids = selected_doc_ids[:max_docs]
-    return [(doc_id, pdfs_by_stem[doc_id]) for doc_id in selected_doc_ids if doc_id in pdfs_by_stem]
+    out = []
+    rows_by_id = doc_rows_by_id or {}
+    for doc_id in selected_doc_ids:
+        pdf_path = resolve_pdf_from_doc_rows(pdf_root, doc_id, rows_by_id.get(doc_id, []), pdfs_by_stem)
+        if pdf_path is not None:
+            out.append((doc_id, pdf_path))
+    return out
 
 
 def pdf_link_records_with_fitz(
@@ -420,17 +487,18 @@ def main() -> None:
 
     records: list[dict[str, Any]] = []
     doc_ids: set[str] = set()
+    doc_rows_by_id: dict[str, list[dict[str, Any]]] = defaultdict(list)
     doc_page_count = 0
     if args.doc_pages_jsonl:
         doc_pages_path = Path(args.doc_pages_jsonl)
         if doc_pages_path.exists():
             rows = read_jsonl(doc_pages_path)
             doc_page_count = len(rows)
-            doc_ids = {
-                row_doc_page_identity(row)[0]
-                for row in rows
-                if row_doc_page_identity(row)[0]
-            }
+            for row in rows:
+                doc_id, _page_idx = row_doc_page_identity(row)
+                if doc_id:
+                    doc_ids.add(doc_id)
+                    doc_rows_by_id[doc_id].append(row)
             records.extend(doc_pages_link_records(doc_pages_path, key_to_doc_ids))
 
     pdf_count = 0
@@ -438,7 +506,7 @@ def main() -> None:
     if args.pdf_root:
         pdf_root = Path(args.pdf_root)
         if pdf_root.exists():
-            pdfs = discover_pdfs(pdf_root, doc_ids, int(args.max_docs))
+            pdfs = discover_pdfs(pdf_root, doc_ids, int(args.max_docs), doc_rows_by_id)
             pdf_count = len(pdfs)
             pdf_records, pdf_backend = pdf_link_records(pdfs, key_to_doc_ids)
             records.extend(pdf_records)

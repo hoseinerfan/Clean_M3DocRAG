@@ -172,6 +172,71 @@ run_dataset() {
 
 for dataset in $DATASETS; do
   case "$dataset" in
+    dude)
+      require_value DUDE_WORK_ROOT
+      DUDE_DATA_ROOT="${DUDE_DATA_ROOT:-$DUDE_WORK_ROOT/data/dude}"
+      run_dataset \
+        "DUDE" \
+        "dude" \
+        "$DUDE_WORK_ROOT" \
+        "${DUDE_DOC_PAGES:-$DUDE_DATA_ROOT/doc_pages_dev.jsonl}" \
+        "${DUDE_PDF_ROOT:-$DUDE_DATA_ROOT/raw/DUDE_train-val-test_binaries/PDF}" \
+        "${DUDE_DOC_IDS_JSON:-$DUDE_DATA_ROOT/dev_doc_ids.json}" \
+        "${DUDE_ID_URL_JSONL:-}" \
+        "dude_pdf_hyperlink_sanity"
+      ;;
+    vidoseek)
+      require_value VIDOSEEK_WORK_ROOT
+      VIDOSEEK_DATA_ROOT="${VIDOSEEK_DATA_ROOT:-$VIDOSEEK_WORK_ROOT/data/vidoseek}"
+      run_dataset \
+        "ViDoSeek" \
+        "vidoseek" \
+        "$VIDOSEEK_WORK_ROOT" \
+        "${VIDOSEEK_DOC_PAGES:-$VIDOSEEK_DATA_ROOT/doc_pages_dev.jsonl}" \
+        "${VIDOSEEK_PDF_ROOT:-$VIDOSEEK_DATA_ROOT/pdfs_raw}" \
+        "${VIDOSEEK_DOC_IDS_JSON:-$VIDOSEEK_DATA_ROOT/dev_doc_ids.json}" \
+        "${VIDOSEEK_ID_URL_JSONL:-}" \
+        "vidoseek_pdf_hyperlink_sanity"
+      ;;
+    sciegqa)
+      require_value SciEGQA_WORK_ROOT
+      SCIEGQA_DATA_ROOT="${SCIEGQA_DATA_ROOT:-$SciEGQA_WORK_ROOT/data/sci-egqa-bench}"
+      run_dataset \
+        "SciEGQA" \
+        "sciegqa" \
+        "$SciEGQA_WORK_ROOT" \
+        "${SCIEGQA_DOC_PAGES:-$SCIEGQA_DATA_ROOT/doc_pages_dev.jsonl}" \
+        "${SCIEGQA_PDF_ROOT:-$SCIEGQA_DATA_ROOT/images_raw}" \
+        "${SCIEGQA_DOC_IDS_JSON:-$SCIEGQA_DATA_ROOT/dev_doc_ids.json}" \
+        "${SCIEGQA_ID_URL_JSONL:-}" \
+        "sciegqa_pdf_hyperlink_sanity"
+      ;;
+    mmdocir)
+      require_value MMDocIR_WORK_ROOT
+      MMDOCIR_DATA_ROOT="${MMDOCIR_DATA_ROOT:-$MMDocIR_WORK_ROOT/data/mm-docir}"
+      run_dataset \
+        "MMDocIR" \
+        "mmdocir" \
+        "$MMDocIR_WORK_ROOT" \
+        "${MMDOCIR_DOC_PAGES:-$MMDOCIR_DATA_ROOT/doc_pages_dev.jsonl}" \
+        "${MMDOCIR_PDF_ROOT:-$MMDOCIR_DATA_ROOT}" \
+        "${MMDOCIR_DOC_IDS_JSON:-$MMDOCIR_DATA_ROOT/dev_doc_ids.json}" \
+        "${MMDOCIR_ID_URL_JSONL:-}" \
+        "mmdocir_pdf_hyperlink_sanity"
+      ;;
+    mmlongbench|mmlongbench-docqa)
+      require_value MMLONGBENCH_WORK_ROOT
+      MMLONGBENCH_DATA_ROOT="${MMLONGBENCH_DATA_ROOT:-$MMLONGBENCH_WORK_ROOT/data/mmlongbench-docqa}"
+      run_dataset \
+        "MMLongBench DocQA" \
+        "mmlongbench-docqa" \
+        "$MMLONGBENCH_WORK_ROOT" \
+        "${MMLONGBENCH_DOC_PAGES:-$MMLONGBENCH_DATA_ROOT/doc_pages_dev.jsonl}" \
+        "${MMLONGBENCH_PDF_ROOT:-$MMLONGBENCH_DATA_ROOT}" \
+        "${MMLONGBENCH_DOC_IDS_JSON:-$MMLONGBENCH_DATA_ROOT/dev_doc_ids.json}" \
+        "${MMLONGBENCH_ID_URL_JSONL:-}" \
+        "mmlongbench_pdf_hyperlink_sanity"
+      ;;
     vidore|vidore-v3)
       require_value VIDORE_WORK_ROOT
       require_value VIDORE_DOC_PAGES
