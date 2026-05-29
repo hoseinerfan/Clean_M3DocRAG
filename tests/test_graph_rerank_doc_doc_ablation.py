@@ -32,6 +32,11 @@ def make_args(**overrides):
         "doc_doc_max_signal_doc_matches": 8,
         "doc_doc_min_semantic_similarity": 0.35,
         "doc_doc_semantic_top_terms": 64,
+        "doc_doc_page_embedding_dir": "",
+        "doc_doc_embedding_pooling": "page_seed_weighted_mean",
+        "doc_doc_embedding_page_top_k": 0,
+        "doc_doc_embedding_min_similarity": 0.0,
+        "doc_doc_embedding_cache_docs": 128,
         "doc_doc_hyperlink_weight_mode": "log_count",
         "doc_doc_hyperlink_init_mode": "log_count",
         "doc_doc_hyperlink_source_seed_floor": 0.5,
@@ -62,6 +67,15 @@ def make_args(**overrides):
     }
     defaults.update(overrides)
     return SimpleNamespace(**defaults)
+
+
+class FakePageEmbeddingProvider:
+    def __init__(self, vectors):
+        self.vectors = vectors
+        self.error = None
+
+    def page_vector(self, doc_id, page_idx):
+        return self.vectors.get((doc_id, page_idx))
 
 
 class GraphRerankDocDocAblationTests(unittest.TestCase):
@@ -264,6 +278,83 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
             },
         )
         self.assertTrue(all(score == 1.0 for score in pair_scores.values()))
+
+    def test_page_embedding_cosine_links_nearest_document_embeddings(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0, dense_rank=1),
+            "B_page0": MODULE.PageRecord(doc_id="B", page_idx=0, dense_rank=2),
+            "C_page0": MODULE.PageRecord(doc_id="C", page_idx=0, dense_rank=3),
+        }
+        provider = FakePageEmbeddingProvider(
+            {
+                ("A", 0): [1.0, 0.0],
+                ("B", 0): [0.9, 0.1],
+                ("C", 0): [0.0, 1.0],
+            }
+        )
+
+        pair_scores, metadata = MODULE.page_embedding_cosine_doc_doc_scores(
+            selected_doc_ids={"A", "B", "C"},
+            records=records,
+            page_seed={"A_page0": 1.0, "B_page0": 0.8, "C_page0": 0.7},
+            page_embedding_provider=provider,
+            args=make_args(
+                doc_doc_page_embedding_dir="embeddings",
+                doc_doc_embedding_min_similarity=0.8,
+                doc_doc_embedding_pooling="mean",
+            ),
+        )
+
+        self.assertEqual(set(pair_scores), {("A", "B")})
+        self.assertGreater(pair_scores[("A", "B")], 0.9)
+        self.assertEqual(metadata["doc_doc_embedding_vector_doc_count"], 3)
+        self.assertEqual(metadata["doc_doc_embedding_page_vector_count"], 3)
+        self.assertEqual(metadata["doc_doc_embedding_pair_count"], 1)
+
+    def test_page_embedding_cosine_can_pool_pages_by_page_seed(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0, dense_rank=1),
+            "A_page1": MODULE.PageRecord(doc_id="A", page_idx=1, dense_rank=2),
+            "B_page0": MODULE.PageRecord(doc_id="B", page_idx=0, dense_rank=3),
+            "C_page0": MODULE.PageRecord(doc_id="C", page_idx=0, dense_rank=4),
+        }
+        provider = FakePageEmbeddingProvider(
+            {
+                ("A", 0): [1.0, 0.0],
+                ("A", 1): [0.0, 1.0],
+                ("B", 0): [1.0, 0.0],
+                ("C", 0): [0.0, 1.0],
+            }
+        )
+
+        pair_scores, metadata = MODULE.page_embedding_cosine_doc_doc_scores(
+            selected_doc_ids={"A", "B", "C"},
+            records=records,
+            page_seed={"A_page0": 10.0, "A_page1": 0.1, "B_page0": 1.0, "C_page0": 1.0},
+            page_embedding_provider=provider,
+            args=make_args(
+                doc_doc_page_embedding_dir="embeddings",
+                doc_doc_embedding_min_similarity=0.8,
+                doc_doc_embedding_pooling="page_seed_weighted_mean",
+            ),
+        )
+
+        self.assertIn(("A", "B"), pair_scores)
+        self.assertNotIn(("A", "C"), pair_scores)
+        self.assertEqual(metadata["doc_doc_embedding_page_vector_count"], 4)
+
+    def test_page_embedding_cosine_reports_unavailable_without_embedding_dir(self) -> None:
+        pair_scores, metadata = MODULE.page_embedding_cosine_doc_doc_scores(
+            selected_doc_ids={"A", "B"},
+            records={},
+            page_seed={},
+            page_embedding_provider=None,
+            args=make_args(doc_doc_page_embedding_dir=""),
+        )
+
+        self.assertEqual(pair_scores, {})
+        self.assertFalse(metadata["doc_doc_embedding_available"])
+        self.assertEqual(metadata["doc_doc_embedding_missing_doc_count"], 2)
 
     def test_hyperlink_citation_target_support_adapts_pair_weights(self) -> None:
         records = {

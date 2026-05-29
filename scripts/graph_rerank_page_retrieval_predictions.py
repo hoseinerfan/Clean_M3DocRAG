@@ -8,7 +8,7 @@ import json
 import math
 import re
 import statistics
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -1224,6 +1224,7 @@ def parse_args() -> argparse.Namespace:
             "dense_sparse_agreement",
             "shared_entity_title_topic",
             "semantic_similarity",
+            "page_embedding_cosine",
             "hyperlink_citation",
             "fully_connected",
             "all",
@@ -1232,7 +1233,9 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional direct doc-doc transitions for ablations. Each non-none mode links "
             "candidate document nodes using exactly one evidence family; "
-            "'fully_connected' links all selected docs, and 'all' combines evidence families."
+            "'page_embedding_cosine' links docs by query-local pooled page embeddings, "
+            "'fully_connected' links all selected docs, and 'all' combines the historical "
+            "evidence families."
         ),
     )
     parser.add_argument(
@@ -1276,6 +1279,38 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=64,
         help="Per-page SPLADE terms used to build document semantic vectors.",
+    )
+    parser.add_argument(
+        "--doc-doc-page-embedding-dir",
+        default="",
+        help=(
+            "Directory containing one ColPali-style {doc_id}.safetensors file per document. "
+            "Used only by --doc-doc-edge-mode page_embedding_cosine."
+        ),
+    )
+    parser.add_argument(
+        "--doc-doc-embedding-pooling",
+        choices=["mean", "page_seed_weighted_mean", "max_seed_page"],
+        default="page_seed_weighted_mean",
+        help="How page embeddings from the retrieved candidate pool are pooled into one doc vector.",
+    )
+    parser.add_argument(
+        "--doc-doc-embedding-page-top-k",
+        type=int,
+        default=0,
+        help="Max retrieved pages per doc used for embedding pooling. Use 0 for all retrieved pages.",
+    )
+    parser.add_argument(
+        "--doc-doc-embedding-min-similarity",
+        type=float,
+        default=0.0,
+        help="Minimum cosine similarity for page-embedding doc-doc edges.",
+    )
+    parser.add_argument(
+        "--doc-doc-embedding-cache-docs",
+        type=int,
+        default=128,
+        help="LRU cache size for loaded safetensors document embedding files.",
     )
     parser.add_argument(
         "--doc-doc-hyperlink-weight-mode",
@@ -7037,6 +7072,234 @@ def semantic_similarity_doc_doc_scores(
     return pair_scores, metadata
 
 
+class SafetensorPageEmbeddingProvider:
+    def __init__(self, embedding_dir: Path, *, cache_docs: int = 128) -> None:
+        self.embedding_dir = embedding_dir
+        self.cache_docs = max(1, int(cache_docs))
+        self._cache: OrderedDict[str, object] = OrderedDict()
+        self._load_file = None
+        self.error: str | None = None
+
+    def _ensure_loader(self) -> bool:
+        if self._load_file is not None:
+            return True
+        if self.error is not None:
+            return False
+        try:
+            from safetensors.torch import load_file
+        except Exception as exc:  # pragma: no cover - depends on HPC runtime packages.
+            self.error = f"{type(exc).__name__}: {exc}"
+            return False
+        self._load_file = load_file
+        return True
+
+    def _doc_embeddings(self, doc_id: str) -> object | None:
+        if doc_id in self._cache:
+            embeddings = self._cache.pop(doc_id)
+            self._cache[doc_id] = embeddings
+            return embeddings
+        if not self._ensure_loader():
+            return None
+        path = self.embedding_dir / f"{doc_id}.safetensors"
+        if not path.exists():
+            return None
+        try:
+            payload = self._load_file(str(path), device="cpu")
+            embeddings = payload.get("embeddings") if isinstance(payload, dict) else None
+        except Exception as exc:  # pragma: no cover - defensive against corrupt embedding files.
+            self.error = f"{type(exc).__name__}: {exc}"
+            return None
+        if embeddings is None:
+            return None
+        self._cache[doc_id] = embeddings
+        while len(self._cache) > self.cache_docs:
+            self._cache.popitem(last=False)
+        return embeddings
+
+    def page_vector(self, doc_id: str, page_idx: int) -> list[float] | None:
+        embeddings = self._doc_embeddings(doc_id)
+        if embeddings is None:
+            return None
+        try:
+            if int(page_idx) < 0 or int(page_idx) >= int(embeddings.shape[0]):
+                return None
+            page_tensor = embeddings[int(page_idx)].float()
+            while getattr(page_tensor, "ndim", 1) > 1:
+                page_tensor = page_tensor.mean(dim=0)
+            return [float(value) for value in page_tensor.tolist()]
+        except Exception as exc:  # pragma: no cover - defensive shape/type guard.
+            self.error = f"{type(exc).__name__}: {exc}"
+            return None
+
+
+def l2_normalize_dense_vector(values: Iterable[float]) -> list[float]:
+    vector = [float(value) for value in values]
+    norm = math.sqrt(sum(value * value for value in vector))
+    if norm <= 0:
+        return []
+    return [value / norm for value in vector]
+
+
+def cosine_dense_vectors(left: list[float], right: list[float]) -> float:
+    if not left or not right:
+        return 0.0
+    length = min(len(left), len(right))
+    if length <= 0:
+        return 0.0
+    return sum(left[idx] * right[idx] for idx in range(length))
+
+
+def pooled_doc_embedding_from_page_vectors(
+    *,
+    doc_id: str,
+    doc_records: list[PageRecord],
+    page_seed: dict[str, float],
+    page_embedding_provider: SafetensorPageEmbeddingProvider | object,
+    pooling: str,
+    page_top_k: int,
+) -> tuple[list[float] | None, int, int]:
+    ordered_records = sorted(
+        doc_records,
+        key=lambda record: (
+            page_record_best_rank(record)
+            if page_record_best_rank(record) is not None
+            else 10**9,
+            record.page_idx,
+        ),
+    )
+    if page_top_k > 0:
+        ordered_records = ordered_records[:page_top_k]
+
+    page_vectors: list[tuple[str, list[float], float]] = []
+    missing_count = 0
+    for record in ordered_records:
+        raw_vector = page_embedding_provider.page_vector(doc_id, record.page_idx)
+        vector = l2_normalize_dense_vector(raw_vector or [])
+        if not vector:
+            missing_count += 1
+            continue
+        page_vectors.append((record.page_uid, vector, max(0.0, float(page_seed.get(record.page_uid, 0.0)))))
+
+    if not page_vectors:
+        return None, 0, missing_count
+
+    if pooling == "max_seed_page":
+        best_uid, best_vector, _best_weight = max(
+            page_vectors,
+            key=lambda item: (item[2], item[0]),
+        )
+        return best_vector, 1, missing_count
+
+    if pooling == "page_seed_weighted_mean":
+        weights = [weight for _uid, _vector, weight in page_vectors]
+        if sum(weights) <= 0:
+            weights = [1.0 for _uid, _vector, _weight in page_vectors]
+    else:
+        weights = [1.0 for _uid, _vector, _weight in page_vectors]
+
+    dim = min(len(vector) for _uid, vector, _weight in page_vectors)
+    if dim <= 0:
+        return None, len(page_vectors), missing_count
+    pooled = [0.0] * dim
+    total_weight = sum(weights)
+    if total_weight <= 0:
+        return None, len(page_vectors), missing_count
+    for (_uid, vector, _weight), weight in zip(page_vectors, weights):
+        for idx in range(dim):
+            pooled[idx] += float(weight) * vector[idx]
+    pooled = [value / total_weight for value in pooled]
+    normalized = l2_normalize_dense_vector(pooled)
+    return (normalized if normalized else None), len(page_vectors), missing_count
+
+
+def page_embedding_cosine_doc_doc_scores(
+    *,
+    selected_doc_ids: set[str],
+    records: dict[str, PageRecord],
+    page_seed: dict[str, float],
+    page_embedding_provider: SafetensorPageEmbeddingProvider | object | None,
+    args: argparse.Namespace,
+) -> tuple[dict[tuple[str, str], float], dict[str, object]]:
+    pooling = str(args.doc_doc_embedding_pooling)
+    page_top_k = max(0, int(args.doc_doc_embedding_page_top_k))
+    min_similarity = float(args.doc_doc_embedding_min_similarity)
+    embedding_dir = str(args.doc_doc_page_embedding_dir)
+    if page_embedding_provider is None or not embedding_dir:
+        return (
+            {},
+            {
+                "doc_doc_embedding_available": False,
+                "doc_doc_embedding_dir": embedding_dir,
+                "doc_doc_embedding_pooling": pooling,
+                "doc_doc_embedding_page_top_k": page_top_k,
+                "doc_doc_embedding_min_similarity": min_similarity,
+                "doc_doc_embedding_vector_doc_count": 0,
+                "doc_doc_embedding_page_vector_count": 0,
+                "doc_doc_embedding_missing_page_count": 0,
+                "doc_doc_embedding_missing_doc_count": len(selected_doc_ids),
+                "doc_doc_embedding_pair_count": 0,
+                "mean_doc_doc_embedding_similarity": None,
+                "max_doc_doc_embedding_similarity": None,
+                "doc_doc_embedding_error": None,
+            },
+        )
+
+    records_by_doc: dict[str, list[PageRecord]] = defaultdict(list)
+    for record in records.values():
+        if record.doc_id in selected_doc_ids:
+            records_by_doc[record.doc_id].append(record)
+
+    doc_vectors: dict[str, list[float]] = {}
+    page_vector_count = 0
+    missing_page_count = 0
+    missing_doc_count = 0
+    for doc_id in sorted(selected_doc_ids):
+        vector, available_pages, missing_pages = pooled_doc_embedding_from_page_vectors(
+            doc_id=doc_id,
+            doc_records=records_by_doc.get(doc_id, []),
+            page_seed=page_seed,
+            page_embedding_provider=page_embedding_provider,
+            pooling=pooling,
+            page_top_k=page_top_k,
+        )
+        page_vector_count += available_pages
+        missing_page_count += missing_pages
+        if vector is None:
+            missing_doc_count += 1
+            continue
+        doc_vectors[doc_id] = vector
+
+    pair_scores: dict[tuple[str, str], float] = {}
+    similarities: list[float] = []
+    docs = sorted(doc_vectors)
+    for left_idx, left_doc_id in enumerate(docs):
+        left_vector = doc_vectors[left_doc_id]
+        for right_doc_id in docs[left_idx + 1 :]:
+            similarity = cosine_dense_vectors(left_vector, doc_vectors[right_doc_id])
+            similarities.append(similarity)
+            if similarity >= min_similarity:
+                add_pair_score(pair_scores, left_doc_id, right_doc_id, similarity)
+
+    metadata = {
+        "doc_doc_embedding_available": True,
+        "doc_doc_embedding_dir": embedding_dir,
+        "doc_doc_embedding_pooling": pooling,
+        "doc_doc_embedding_page_top_k": page_top_k,
+        "doc_doc_embedding_min_similarity": min_similarity,
+        "doc_doc_embedding_vector_doc_count": len(doc_vectors),
+        "doc_doc_embedding_page_vector_count": page_vector_count,
+        "doc_doc_embedding_missing_page_count": missing_page_count,
+        "doc_doc_embedding_missing_doc_count": missing_doc_count,
+        "doc_doc_embedding_pair_count": len(pair_scores),
+        "mean_doc_doc_embedding_similarity": (
+            statistics.fmean(similarities) if similarities else None
+        ),
+        "max_doc_doc_embedding_similarity": max(similarities) if similarities else None,
+        "doc_doc_embedding_error": getattr(page_embedding_provider, "error", None),
+    }
+    return pair_scores, metadata
+
+
 def hyperlink_citation_initial_score(raw_link_count: int, mode: str) -> float:
     count = max(1, int(raw_link_count))
     if mode == "uniform":
@@ -7206,6 +7469,7 @@ def add_doc_doc_edges(
     sparse_doc_ranks: dict[str, int],
     source_weights: SourceWeights,
     sparse_index: SparsePageIndex | None,
+    page_embedding_provider: SafetensorPageEmbeddingProvider | object | None,
     page_breadcrumbs: dict[str, list[str]],
     page_entities: dict[str, dict[str, list[str]]],
     pdf_hyperlink_graph: PdfHyperlinkGraph | None,
@@ -7219,6 +7483,10 @@ def add_doc_doc_edges(
         "doc_doc_max_edges_per_doc": int(args.doc_doc_max_edges_per_doc),
         "doc_doc_hyperlink_weight_mode": str(args.doc_doc_hyperlink_weight_mode),
         "doc_doc_hyperlink_init_mode": str(args.doc_doc_hyperlink_init_mode),
+        "doc_doc_page_embedding_dir": str(args.doc_doc_page_embedding_dir),
+        "doc_doc_embedding_pooling": str(args.doc_doc_embedding_pooling),
+        "doc_doc_embedding_page_top_k": int(args.doc_doc_embedding_page_top_k),
+        "doc_doc_embedding_min_similarity": float(args.doc_doc_embedding_min_similarity),
         "doc_doc_edge_count_directed": 0,
         "doc_doc_edge_pair_count": 0,
         "mean_doc_doc_edge_weight": None,
@@ -7226,6 +7494,15 @@ def add_doc_doc_edges(
         "doc_doc_dense_sparse_agreement_pair_count": 0,
         "doc_doc_shared_pair_count": 0,
         "doc_doc_semantic_pair_count": 0,
+        "doc_doc_embedding_available": False,
+        "doc_doc_embedding_vector_doc_count": 0,
+        "doc_doc_embedding_page_vector_count": 0,
+        "doc_doc_embedding_missing_page_count": 0,
+        "doc_doc_embedding_missing_doc_count": 0,
+        "doc_doc_embedding_pair_count": 0,
+        "mean_doc_doc_embedding_similarity": None,
+        "max_doc_doc_embedding_similarity": None,
+        "doc_doc_embedding_error": None,
         "doc_doc_hyperlink_pair_count": 0,
         "doc_doc_fully_connected_pair_count": 0,
     }
@@ -7298,6 +7575,18 @@ def add_doc_doc_edges(
         )
         metadata.update(semantic_metadata)
         for pair, score in semantic_scores.items():
+            pair_scores[pair] = pair_scores.get(pair, 0.0) + score
+
+    if mode == "page_embedding_cosine":
+        embedding_scores, embedding_metadata = page_embedding_cosine_doc_doc_scores(
+            selected_doc_ids=selected_doc_ids,
+            records=records,
+            page_seed=page_seed,
+            page_embedding_provider=page_embedding_provider,
+            args=args,
+        )
+        metadata.update(embedding_metadata)
+        for pair, score in embedding_scores.items():
             pair_scores[pair] = pair_scores.get(pair, 0.0) + score
 
     if mode in {"hyperlink_citation", "all"}:
@@ -7645,6 +7934,7 @@ def build_qid_graph_ranking(
     doc_page_catalog: DocPageCatalog | None = None,
     pdf_hyperlink_graph: PdfHyperlinkGraph | None = None,
     external_page_graph: ExternalPageGraph | None = None,
+    page_embedding_provider: SafetensorPageEmbeddingProvider | object | None = None,
 ) -> tuple[list[list[object]], dict]:
     question = str(dense_row.get("question") or sparse_row.get("question", ""))
     dense_pages = ranked_unique_pages(
@@ -7862,6 +8152,7 @@ def build_qid_graph_ranking(
         sparse_doc_ranks=sparse_doc_ranks,
         source_weights=source_weights,
         sparse_index=sparse_index,
+        page_embedding_provider=page_embedding_provider,
         page_breadcrumbs=page_breadcrumbs,
         page_entities=page_entities,
         pdf_hyperlink_graph=pdf_hyperlink_graph,
@@ -8166,6 +8457,12 @@ def main() -> None:
     external_page_graph = None
     if args.external_page_graph_jsonl:
         external_page_graph = load_external_page_graph(Path(args.external_page_graph_jsonl))
+    page_embedding_provider = None
+    if args.doc_doc_page_embedding_dir:
+        page_embedding_provider = SafetensorPageEmbeddingProvider(
+            Path(args.doc_doc_page_embedding_dir),
+            cache_docs=int(args.doc_doc_embedding_cache_docs),
+        )
     common_qids = sorted(set(dense_pred) & set(sparse_pred))
     if not common_qids:
         raise ValueError("Dense and sparse predictions have no qids in common.")
@@ -8219,6 +8516,7 @@ def main() -> None:
             doc_page_catalog=doc_page_catalog,
             pdf_hyperlink_graph=pdf_hyperlink_graph,
             external_page_graph=external_page_graph,
+            page_embedding_provider=page_embedding_provider,
         )
         question = dense_pred[qid].get("question") or sparse_pred[qid].get("question", "")
         dense_source_summary = summarize_prediction_rows(
@@ -8543,6 +8841,13 @@ def main() -> None:
                 "doc_doc_max_signal_doc_matches": int(args.doc_doc_max_signal_doc_matches),
                 "doc_doc_min_semantic_similarity": float(args.doc_doc_min_semantic_similarity),
                 "doc_doc_semantic_top_terms": int(args.doc_doc_semantic_top_terms),
+                "doc_doc_page_embedding_dir": args.doc_doc_page_embedding_dir,
+                "doc_doc_embedding_pooling": args.doc_doc_embedding_pooling,
+                "doc_doc_embedding_page_top_k": int(args.doc_doc_embedding_page_top_k),
+                "doc_doc_embedding_min_similarity": float(
+                    args.doc_doc_embedding_min_similarity
+                ),
+                "doc_doc_embedding_cache_docs": int(args.doc_doc_embedding_cache_docs),
                 "doc_doc_hyperlink_weight_mode": args.doc_doc_hyperlink_weight_mode,
                 "doc_doc_hyperlink_init_mode": args.doc_doc_hyperlink_init_mode,
                 "doc_doc_hyperlink_source_seed_floor": float(
@@ -8851,6 +9156,11 @@ def main() -> None:
         "doc_doc_max_signal_doc_matches": int(args.doc_doc_max_signal_doc_matches),
         "doc_doc_min_semantic_similarity": float(args.doc_doc_min_semantic_similarity),
         "doc_doc_semantic_top_terms": int(args.doc_doc_semantic_top_terms),
+        "doc_doc_page_embedding_dir": args.doc_doc_page_embedding_dir,
+        "doc_doc_embedding_pooling": args.doc_doc_embedding_pooling,
+        "doc_doc_embedding_page_top_k": int(args.doc_doc_embedding_page_top_k),
+        "doc_doc_embedding_min_similarity": float(args.doc_doc_embedding_min_similarity),
+        "doc_doc_embedding_cache_docs": int(args.doc_doc_embedding_cache_docs),
         "doc_doc_hyperlink_weight_mode": args.doc_doc_hyperlink_weight_mode,
         "doc_doc_hyperlink_init_mode": args.doc_doc_hyperlink_init_mode,
         "doc_doc_hyperlink_source_seed_floor": float(args.doc_doc_hyperlink_source_seed_floor),
@@ -9129,6 +9439,42 @@ def main() -> None:
                 if row["graph"].get("mean_doc_doc_edge_weight") is not None
             )
             if any(row["graph"].get("mean_doc_doc_edge_weight") is not None for row in per_qid)
+            else None
+        ),
+        "mean_doc_doc_embedding_vector_doc_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_embedding_vector_doc_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_embedding_page_vector_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_embedding_page_vector_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_embedding_pair_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_embedding_pair_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_embedding_similarity": (
+            statistics.fmean(
+                float(row["graph"].get("mean_doc_doc_embedding_similarity", 0.0))
+                for row in per_qid
+                if row["graph"].get("mean_doc_doc_embedding_similarity") is not None
+            )
+            if any(
+                row["graph"].get("mean_doc_doc_embedding_similarity") is not None
+                for row in per_qid
+            )
             else None
         ),
         "mean_adaptive_transition_global_multiplier": (
