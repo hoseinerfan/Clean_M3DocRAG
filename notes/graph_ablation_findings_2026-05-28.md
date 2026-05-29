@@ -6,8 +6,9 @@ Latest focused M3DocVQA update: [m3docvqa_gpp_ablation_findings_2026-05-29.md](/
 
 ## Executive Summary
 
-- For MMDocIR, SciEGQA, and ViDoSeek page-labeled retrieval, doc-doc edges are not a reliable page@4 improvement. The safest page-labeled default remains `denseheavy125_medium_both` with `DOC_DOC_EDGE_MODE=none`.
+- For MMDocIR, SciEGQA, ViDoSeek, and ViDoRe page-labeled retrieval, doc-doc edges are not a reliable page@4 improvement. OpenDocVQA is the important exception: `fully_connected_topdocs` improves average page recall@4 by `+0.0140` and average doc recall@4 by `+0.0153`.
 - Doc-seed restart helps SciEGQA but not MMDocIR or ViDoSeek. The best SciEGQA doc-seed row was `docseed_rrf_1p00`, improving page@4 by `+12` and doc@4 by `+4`.
+- New selected-dataset runs show OpenDocVQA doc-seed hurts, ViDoRe doc-seed is only a tiny page gain with doc-rank cost, and ViDoRe hard cross-doc page selection is harmful.
 - M3DocVQA is different: it has document-only gold labels, and the authored PDF/Wikipedia hyperlink graph gives small but real doc/row gains. The latest best GPP hyperlink variant is `pagenode_to_hyperlink_pages + log_count + PDF_HYPERLINK_TARGET_PAGES_PER_DOC=1 + MMR doc-diverse`.
 - The current best M3DocVQA hyperlink-node run reaches `doc@4=0.853`, `doc@20=0.936`, `row@4=0.804`, and `row@20=0.905`. It trades off top-1 recall (`doc@1=0.600` vs `0.608` no-hyperlink), so `docnode_to_hyperlink_docs` remains the conservative alternative.
 - Cross-doc/final row selection is still important for M3DocVQA: MMR document-diverse selection raises row@4 substantially compared with score-only selection, and the hyperlink-node variants build on that.
@@ -38,6 +39,8 @@ Baseline for these deltas is the page-preserving Graph-PPR `no_doc_doc` row:
 | MMDocIR | 1114 | 1353 | `fully_connected_topdocs` gives doc@4 `+5` but page@4 `-7` | Doc-doc edges can improve document ranking while hurting exact page ranking. |
 | SciEGQA | 1323 | 1508 | `no_doc_doc` remains best for both page@4 and doc@4 | Doc-doc edges hurt this dataset. |
 | ViDoSeek | 1020 | 1142 | all doc-doc variants keep doc@4 saturated and page@4 unchanged | Saturated; no meaningful gain. |
+| ViDoRe V3 | 9383 | 13206 | no useful average page recall gain | Doc-doc edges are effectively neutral or slightly harmful. |
+| OpenDocVQA | 26173 | 26901 | `fully_connected_topdocs` gives page hit@4 `+625` and doc hit@4 `+684` | Strong non-hyperlink gain. |
 
 Detailed page@4/doc@4 deltas:
 
@@ -62,6 +65,19 @@ Audit checks passed for dense/sparse agreement and feature mechanisms:
 - `shared_entity_title_topic` emitted zero edges on all checked datasets.
 - `semantic_similarity` emitted edges and audited correctly, but did not improve page@4.
 
+Selected OpenDocVQA/ViDoRe average recall deltas:
+
+| Dataset | Variant | delta avg page recall@4 | delta avg doc recall@4 | delta page hit@4 | delta doc hit@4 |
+|---|---|---:|---:|---:|---:|
+| ViDoRe V3 | dense_sparse_agreement | -0.0004 | -0.0003 | +1 | -4 |
+| ViDoRe V3 | fully_connected_topdocs | -0.0011 | +0.0000 | -11 | +2 |
+| ViDoRe V3 | semantic_similarity | -0.0002 | -0.0004 | 0 | -6 |
+| ViDoRe V3 | all_doc_doc_features | -0.0003 | -0.0003 | +2 | -5 |
+| OpenDocVQA | dense_sparse_agreement | +0.0037 | +0.0042 | +134 | +158 |
+| OpenDocVQA | fully_connected_topdocs | +0.0140 | +0.0153 | +625 | +684 |
+| OpenDocVQA | semantic_similarity | +0.0002 | +0.0004 | +4 | +13 |
+| OpenDocVQA | all_doc_doc_features | +0.0029 | +0.0032 | +99 | +116 |
+
 ## External Doc-Seed Ablation
 
 Baseline is `docseed_none`.
@@ -71,6 +87,8 @@ Baseline is `docseed_none`.
 | MMDocIR | 1114 | 1353 | no useful doc-seed row | at most +1 | negative doc@4 deltas | Do not use doc-seed here. |
 | SciEGQA | 1323 | 1508 | `docseed_rrf_1p00` | +12 | +4 | Strongest external doc-seed result. |
 | ViDoSeek | 1020 | 1142 | no useful doc-seed row | 0 or -1 | 0 | Saturated/no gain. |
+| ViDoRe V3 | 9383 | 13206 | `docseed_rrf_1p00` gives page hit@4 `+29` but doc hit@4 `-21` | tiny positive | negative | Too weak to use as main setting. |
+| OpenDocVQA | 26173 | 26901 | no useful doc-seed row | negative | negative | Do not use doc-seed here. |
 
 SciEGQA doc-seed progression:
 
@@ -80,6 +98,29 @@ SciEGQA doc-seed progression:
 | docseed_rrf_0p25 | 1325 | +2 | 1510 | +2 |
 | docseed_rrf_0p50 | 1328 | +5 | 1511 | +3 |
 | docseed_rrf_1p00 | 1335 | +12 | 1512 | +4 |
+
+Selected OpenDocVQA/ViDoRe doc-seed average recall deltas:
+
+| Dataset | Variant | delta avg page recall@4 | delta avg doc recall@4 | delta page hit@4 | delta doc hit@4 |
+|---|---|---:|---:|---:|---:|
+| ViDoRe V3 | docseed_rrf_0p25 | +0.0004 | 0.0000 | +10 | 0 |
+| ViDoRe V3 | docseed_rrf_0p50 | +0.0006 | -0.0004 | +22 | -5 |
+| ViDoRe V3 | docseed_rrf_1p00 | +0.0006 | -0.0017 | +29 | -21 |
+| ViDoRe V3 | docseed_avgpage_0p50 | -0.0002 | -0.0004 | -6 | -4 |
+| OpenDocVQA | docseed_rrf_0p25 | -0.0018 | -0.0024 | -87 | -112 |
+| OpenDocVQA | docseed_rrf_0p50 | -0.0033 | -0.0042 | -151 | -192 |
+| OpenDocVQA | docseed_rrf_1p00 | -0.0050 | -0.0065 | -231 | -295 |
+| OpenDocVQA | docseed_avgpage_0p50 | -0.0090 | -0.0099 | -409 | -448 |
+
+## Selected Cross-Doc Page Selection Ablation
+
+The ViDoRe V3 selected run was interrupted at `mmr_docdiv_pool20_b0p05`, so only completed rows should be interpreted.
+
+| Dataset | Variant | delta avg page recall@4 | delta avg doc recall@4 | delta page hit@4 | delta doc hit@4 | Finding |
+|---|---|---:|---:|---:|---:|---|
+| ViDoRe V3 | `max1doc_pool20` | -0.0686 | 0.0000 | -898 | 0 | Harmful over-diversification. |
+| ViDoRe V3 | `max1doc_pool50` | -0.0975 | 0.0000 | -1430 | 0 | Very harmful. |
+| ViDoRe V3 | `mmr_docdiv_pool20_b0p02` | -0.0016 | 0.0000 | +34 | 0 | Hit count up, average recall down; MMR sweep incomplete. |
 
 ## M3DocVQA Latest Focused Update
 

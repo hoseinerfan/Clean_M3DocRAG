@@ -115,6 +115,8 @@ Use this section for datasets with exact page labels. These numbers are **averag
 | MaxSim+ | `33.12%` | `54.31%` | `88.54%` | `98.09%` |
 | Graph Page Preserve (`denseheavy125_medium_both`) | `64.65%` | `82.27%` | `90.99%` | `97.88%` |
 
+Latest selected ablation finding: doc-doc edges did not improve ViDoRe average page recall. Doc-seed RRF gives only tiny average page recall gains and hurts doc recall at higher weights. Hard cross-doc selection (`max1doc`) is harmful.
+
 ### ViDoSeek
 
 | Method | Page recall@4 | Page recall@20 | Doc recall@4 | Doc recall@20 |
@@ -128,6 +130,8 @@ Use this section for datasets with exact page labels. These numbers are **averag
 | --- | ---: | ---: | ---: | ---: |
 | MaxSim+ | `51.22%` | `65.99%` | `53.07%` | `69.55%` |
 | Graph Page Preserve (`denseheavy125_medium_both`) | `58.63%` | `76.62%` | `60.35%` | `79.22%` |
+
+Latest selected ablation finding: `fully_connected_topdocs` is a useful non-hyperlink graph method for OpenDocVQA, improving average page recall@4 from `0.5863` to `0.6003` and average doc recall@4 from `0.6035` to `0.6189`. Doc-seed variants hurt OpenDocVQA and should not be used as the main setting.
 
 ### MMLongBench DocQA
 

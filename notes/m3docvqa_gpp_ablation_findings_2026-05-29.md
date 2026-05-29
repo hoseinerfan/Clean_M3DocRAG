@@ -1,6 +1,6 @@
-# M3DocVQA GPP Ablation Findings 2026-05-29
+# M3DocVQA And Selected External GPP Ablation Findings 2026-05-29
 
-Purpose: consolidate the M3DocVQA/MMQA Graph Page Preserve ablations run today, with separate tables for each experiment family, the current best config, and the artifact paths needed to reproduce or report the results.
+Purpose: consolidate the M3DocVQA/MMQA Graph Page Preserve ablations run today, plus the selected OpenDocVQA and ViDoRe non-hyperlink ablations, with separate tables for each experiment family, the current best config, and the artifact paths needed to reproduce or report the results.
 
 ## Metric Policy
 
@@ -46,6 +46,13 @@ Why this is the current default:
 | Hyperlink-node MMR, target pages per doc 1 | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_gpp_hyperlink_node_ablation_mmr_target1` |
 | Hyperlink effect audit | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_hyperlink_init_ablation/log_count_hyperlink_effect_audit.md` |
 | Dev-split doc fusion probe script | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/examples/run_m3docvqa_doc_fusion_devsplit_probe.sh` |
+| ViDoRe doc-doc ablation | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/doc_doc_edge_ablation` |
+| ViDoRe doc-seed ablation | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/doc_seed_ablation` |
+| ViDoRe cross-doc selection ablation | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/ViDoRe_M3DocRAG/output/vidore-v3/cross_doc_page_selection_ablation` |
+| OpenDocVQA doc-doc ablation | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/OpenDocVQA_M3DocRAG/output/opendocvqa/doc_doc_edge_ablation` |
+| OpenDocVQA doc-seed ablation | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/OpenDocVQA_M3DocRAG/output/opendocvqa/doc_seed_ablation` |
+| Selected doc-doc report | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/doc_doc_edge_ablation_results.md` |
+| Selected doc-seed report | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/doc_seed_ablation_results.md` |
 
 ## Train/Dev Label Audit
 
@@ -214,7 +221,88 @@ The M3DocVQA hyperlink approach depends on mapping extracted PDF links to datase
 
 Conclusion: hyperlink-node GPP is currently a M3DocVQA-only method. For OpenDocVQA/ViDoRe/DUDE/ViDoSeek/SciEGQA, we would need a dataset-specific URL-to-doc mapping before running the same graph edge family.
 
-## Ablation 7: Page Position Priors Status
+## Ablation 7: Selected External Non-Hyperlink Runs
+
+These rows answer the question of whether non-hyperlink graph features help on OpenDocVQA and ViDoRe. They do: OpenDocVQA has a clear positive non-hyperlink result, while ViDoRe remains weak or negative.
+
+### ViDoRe Doc-Doc Edge Ablation
+
+Base: `no_doc_doc`
+
+| Variant | avg page recall@4 | delta | avg doc recall@4 | delta | page hit@4 | doc hit@4 | Conclusion |
+|---|---:|---:|---:|---:|---:|---:|---|
+| base: `no_doc_doc` | 0.3501 | 0.0000 | 0.8967 | 0.0000 | 9,383 | 13,206 | Baseline. |
+| `dense_sparse_agreement` | 0.3497 | -0.0004 | 0.8964 | -0.0003 | 9,384 | 13,202 | No useful gain. |
+| `fully_connected_topdocs` | 0.3490 | -0.0011 | 0.8968 | +0.0000 | 9,372 | 13,208 | Tiny doc hit gain, page recall worse. |
+| `shared_entity_title_topic` | 0.3501 | 0.0000 | 0.8967 | 0.0000 | 9,383 | 13,206 | No-op / same as base. |
+| `semantic_similarity` | 0.3499 | -0.0002 | 0.8964 | -0.0004 | 9,383 | 13,200 | No useful gain. |
+| `all_doc_doc_features` | 0.3498 | -0.0003 | 0.8965 | -0.0003 | 9,385 | 13,201 | No useful gain. |
+
+Conclusion: ViDoRe doc-doc edges are not useful. Keep the base GPP setting for this ablation family.
+
+### OpenDocVQA Doc-Doc Edge Ablation
+
+Base: `no_doc_doc`
+
+| Variant | avg page recall@4 | delta | avg doc recall@4 | delta | page hit@4 | doc hit@4 | Conclusion |
+|---|---:|---:|---:|---:|---:|---:|---|
+| base: `no_doc_doc` | 0.5863 | 0.0000 | 0.6035 | 0.0000 | 26,173 | 26,901 | Baseline. |
+| `dense_sparse_agreement` | 0.5900 | +0.0037 | 0.6077 | +0.0042 | 26,307 | 27,059 | Good gain. |
+| `fully_connected_topdocs` | 0.6003 | +0.0140 | 0.6189 | +0.0153 | 26,798 | 27,585 | Best non-hyperlink result. |
+| `shared_entity_title_topic` | 0.5863 | 0.0000 | 0.6035 | 0.0000 | 26,173 | 26,901 | No-op / same as base. |
+| `semantic_similarity` | 0.5865 | +0.0002 | 0.6039 | +0.0004 | 26,177 | 26,914 | Tiny gain only. |
+| `all_doc_doc_features` | 0.5892 | +0.0029 | 0.6067 | +0.0032 | 26,272 | 27,017 | Positive, below fully connected. |
+
+Conclusion: OpenDocVQA has a clear useful non-hyperlink method: `fully_connected_topdocs`.
+
+### ViDoRe Doc-Seed Ablation
+
+Base: `docseed_none`
+
+| Variant | avg page recall@4 | delta | avg doc recall@4 | delta | page hit@4 | doc hit@4 | Conclusion |
+|---|---:|---:|---:|---:|---:|---:|---|
+| base: `docseed_none` | 0.3501 | 0.0000 | 0.8967 | 0.0000 | 9,383 | 13,206 | Baseline. |
+| `docseed_rrf_0p25` | 0.3506 | +0.0004 | 0.8967 | 0.0000 | 9,393 | 13,206 | Tiny page gain. |
+| `docseed_rrf_0p50` | 0.3507 | +0.0006 | 0.8963 | -0.0004 | 9,405 | 13,201 | Tiny page gain, doc down. |
+| `docseed_rrf_1p00` | 0.3507 | +0.0006 | 0.8951 | -0.0017 | 9,412 | 13,185 | Best page hit, doc worse. |
+| `docseed_graphsize_0p50` | 0.3504 | +0.0003 | 0.8966 | -0.0001 | 9,390 | 13,205 | Tiny gain. |
+| `docseed_avgpage_0p50` | 0.3499 | -0.0002 | 0.8964 | -0.0004 | 9,377 | 13,202 | Worse. |
+| `docseed_avgpage_graphsize_0p50` | 0.3499 | -0.0002 | 0.8963 | -0.0004 | 9,379 | 13,200 | Worse. |
+
+Conclusion: ViDoRe doc-seed is weak. RRF gives tiny page gains, but not enough to be a strong method.
+
+### OpenDocVQA Doc-Seed Ablation
+
+Base: `docseed_none`
+
+| Variant | avg page recall@4 | delta | avg doc recall@4 | delta | page hit@4 | doc hit@4 | Conclusion |
+|---|---:|---:|---:|---:|---:|---:|---|
+| base: `docseed_none` | 0.5863 | 0.0000 | 0.6035 | 0.0000 | 26,173 | 26,901 | Baseline. |
+| `docseed_rrf_0p25` | 0.5845 | -0.0018 | 0.6011 | -0.0024 | 26,086 | 26,789 | Worse. |
+| `docseed_rrf_0p50` | 0.5830 | -0.0033 | 0.5994 | -0.0042 | 26,022 | 26,709 | Worse. |
+| `docseed_rrf_1p00` | 0.5813 | -0.0050 | 0.5970 | -0.0065 | 25,942 | 26,606 | Worse. |
+| `docseed_graphsize_0p50` | 0.5856 | -0.0007 | 0.6027 | -0.0008 | 26,137 | 26,859 | Slightly worse. |
+| `docseed_avgpage_0p50` | 0.5773 | -0.0090 | 0.5936 | -0.0099 | 25,764 | 26,453 | Much worse. |
+| `docseed_avgpage_graphsize_0p50` | 0.5841 | -0.0022 | 0.6012 | -0.0023 | 26,068 | 26,792 | Worse. |
+
+Conclusion: OpenDocVQA doc-seed should not be used.
+
+### ViDoRe Cross-Doc Page Selection Ablation
+
+This run was interrupted at `mmr_docdiv_pool20_b0p05`, so the MMR sweep is incomplete.
+
+Base: `score_baseline`
+
+| Variant | avg page recall@4 | delta | avg doc recall@4 | delta | page hit@4 | doc hit@4 | Conclusion |
+|---|---:|---:|---:|---:|---:|---:|---|
+| base: `score_baseline` | 0.3501 | 0.0000 | 0.8967 | 0.0000 | 9,383 | 13,206 | Baseline. |
+| `max1doc_pool20` | 0.2816 | -0.0686 | 0.8967 | 0.0000 | 8,485 | 13,206 | Bad, over-diversifies. |
+| `max1doc_pool50` | 0.2527 | -0.0975 | 0.8967 | 0.0000 | 7,953 | 13,206 | Very bad. |
+| `mmr_docdiv_pool20_b0p02` | 0.3485 | -0.0016 | 0.8967 | 0.0000 | 9,417 | 13,206 | Hit count up, average recall down. |
+
+Conclusion so far: ViDoRe does not like hard cross-doc page diversity. `max1doc` is harmful; finish the interrupted MMR rows before making a final MMR claim.
+
+## Ablation 8: Page Position Priors Status
 
 Implemented pieces:
 
@@ -260,4 +348,6 @@ Current reporting hierarchy:
 1. Main M3DocVQA GPP hyperlink result: `pagenode_to_hyperlink_pages + log_count + target_pages_per_doc=1 + MMR doc-diverse`.
 2. Conservative alternative: `docnode_to_hyperlink_docs + log_count + MMR doc-diverse`, because it preserves top-1 while improving doc@4/row@4.
 3. Historical comparison: previous hyperlink initialization with `log_count`/`sqrt_count` improves over no hyperlink, but the newer node-level pagenode target-1 setting is better for row/context.
-4. Negative/weak findings: doc-seed page-score, raw/uniform hyperlink weighting, high adjacent-page weights, and external dataset hyperlinks without internal mapping.
+4. Outside hyperlink, the clearest new positive result is OpenDocVQA `fully_connected_topdocs`: average page recall@4 `+0.0140` and average doc recall@4 `+0.0153`.
+5. ViDoRe remains weak for the checked non-hyperlink methods: doc-doc edges do not help, doc-seed is tiny, and hard cross-doc selection is harmful.
+6. Negative/weak M3DocVQA findings: doc-seed page-score, raw/uniform hyperlink weighting, high adjacent-page weights, and external dataset hyperlinks without internal mapping.
