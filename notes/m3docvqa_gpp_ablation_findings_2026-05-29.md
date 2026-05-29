@@ -320,15 +320,18 @@ Conclusion: position priors exist as partial/query-gated features, but today's M
 
 ## Dev-Split Doc Fusion Probe
 
-Implemented but not yet reported from a user-run result:
+This is now reported from a user-run result and is the strongest green-light result for document-level tuning so far.
 
 | Item | Path |
 |---|---|
 | Script | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/scripts/tune_m3docvqa_doc_fusion_split.py` |
 | Runner | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/examples/run_m3docvqa_doc_fusion_devsplit_probe.sh` |
-| Expected output dir | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_doc_fusion_devsplit_probe` |
+| Output dir | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_doc_fusion_devsplit_probe` |
+| Summary JSON | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_doc_fusion_devsplit_probe/mmqa_dev_doc_fusion_devsplit.summary.json` |
+| Table MD | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_doc_fusion_devsplit_probe/mmqa_dev_doc_fusion_devsplit.table.md` |
+| Eval prediction | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/m3docvqa_doc_fusion_devsplit_probe/mmqa_dev_doc_fusion_devsplit.eval.prediction.json` |
 
-Recommended run:
+Completed run:
 
 ```bash
 cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
@@ -337,7 +340,28 @@ source hpc_vital_paths.generated.env
 bash examples/run_m3docvqa_doc_fusion_devsplit_probe.sh
 ```
 
-Use this as the green-light check before doing train-set doc-level tuning. Because train has gold docs but no gold pages, this should tune document-level fusion/graph weights only.
+Best learned/tuned fusion weights:
+
+| Source | Weight |
+|---|---:|
+| dense | 2.00 |
+| splade | 4.00 |
+| gpp_no_hyperlink | 0.00 |
+| gpp_doc_hyperlink | 0.25 |
+| gpp_page_hyperlink | 4.00 |
+
+Eval result:
+
+| Method | eval doc@4 | Delta vs best source eval doc@4 | Interpretation |
+|---|---:|---:|---|
+| best single source | 0.8518 | 0.0000 | Best individual input on the eval split. |
+| tuned doc fusion | 0.8613 | +0.0094 | Clear positive dev-split result. |
+
+Interpretation:
+
+- This is the first strong evidence that document-level fusion/graph tuning can beat the best single M3DocVQA source.
+- The learned weights prefer SPLADE and page-hyperlink GPP strongly, keep a small doc-hyperlink contribution, and ignore the no-hyperlink GPP source.
+- Because M3DocVQA train has gold docs but no gold pages, this supports moving to train-set document-level tuning. It does not support supervised page-level tuning unless pseudo page labels are created.
 
 ## Final Conclusion
 
@@ -347,7 +371,8 @@ Current reporting hierarchy:
 
 1. Main M3DocVQA GPP hyperlink result: `pagenode_to_hyperlink_pages + log_count + target_pages_per_doc=1 + MMR doc-diverse`.
 2. Conservative alternative: `docnode_to_hyperlink_docs + log_count + MMR doc-diverse`, because it preserves top-1 while improving doc@4/row@4.
-3. Historical comparison: previous hyperlink initialization with `log_count`/`sqrt_count` improves over no hyperlink, but the newer node-level pagenode target-1 setting is better for row/context.
-4. Outside hyperlink, the clearest new positive result is OpenDocVQA `fully_connected_topdocs`: average page recall@4 `+0.0140` and average doc recall@4 `+0.0153`.
-5. ViDoRe remains weak for the checked non-hyperlink methods: doc-doc edges do not help, doc-seed is tiny, and hard cross-doc selection is harmful.
-6. Negative/weak M3DocVQA findings: doc-seed page-score, raw/uniform hyperlink weighting, high adjacent-page weights, and external dataset hyperlinks without internal mapping.
+3. Best tuned M3DocVQA document-fusion result: dev-split tuned fusion reaches `eval doc@4=0.8613`, beating the best single eval source by `+0.0094`.
+4. Historical comparison: previous hyperlink initialization with `log_count`/`sqrt_count` improves over no hyperlink, but the newer node-level pagenode target-1 setting is better for row/context.
+5. Outside hyperlink, the clearest new positive result is OpenDocVQA `fully_connected_topdocs`: average page recall@4 `+0.0140` and average doc recall@4 `+0.0153`.
+6. ViDoRe remains weak for the checked non-hyperlink methods: doc-doc edges do not help, doc-seed is tiny, and hard cross-doc selection is harmful.
+7. Negative/weak M3DocVQA findings: doc-seed page-score, raw/uniform hyperlink weighting, high adjacent-page weights, and external dataset hyperlinks without internal mapping.

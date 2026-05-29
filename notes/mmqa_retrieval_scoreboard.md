@@ -73,6 +73,15 @@ Latest focused MMR hyperlink-node rows:
 | `pagenode_to_hyperlink_pages` + `log_count`, target pages 4 | 0.604 | 0.854 | 0.908 | 0.933 | 0.768 | 0.857 | 0.899 | Best doc@4, but row@4 drops. |
 | `pagenode_to_hyperlink_pages` + `log_count`, target pages 1 | 0.600 | 0.853 | 0.911 | 0.936 | 0.804 | 0.864 | 0.905 | Best current context/deeper recall default. |
 
+Dev-split doc-fusion probe:
+
+| Method | eval doc@4 | Delta vs best source | Finding |
+|---|---:|---:|---|
+| best single eval source | 0.8518 | 0.0000 | Best individual source on eval split. |
+| tuned doc fusion | 0.8613 | +0.0094 | Strong green-light result for doc-level tuning. |
+
+Best tuned weights: dense `2.0`, SPLADE `4.0`, no-hyperlink GPP `0.0`, doc-hyperlink GPP `0.25`, page-hyperlink GPP `4.0`.
+
 Older complete-wrapper and doc-doc rows remain useful for historical comparison:
 
 | Method | doc@1 | doc@4 | doc@10 | row@4 | row@10 | Finding |
@@ -86,6 +95,7 @@ Current M3DocVQA recommendations:
 
 - Use `pagenode_to_hyperlink_pages + log_count + PDF_HYPERLINK_TARGET_PAGES_PER_DOC=1 + MMR doc-diverse` as the current best GPP hyperlink config.
 - Use `docnode_to_hyperlink_docs + log_count + MMR doc-diverse` as the conservative alternative when preserving top-1 matters.
+- Treat the dev-split doc-fusion result as the strongest signal that train-set document-level tuning is worth doing next.
 - Do not use doc-seed page-score as a main M3DocVQA setting; it is weaker than hyperlink-node propagation.
 - Keep external hyperlink claims scoped to M3DocVQA until OpenDocVQA/ViDoRe/DUDE/ViDoSeek/SciEGQA have dataset-internal URL-to-doc mappings.
 - M3DocVQA train has gold docs but no gold pages, so train-set tuning should be document-level unless pseudo page labels are created.

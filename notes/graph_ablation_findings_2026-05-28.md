@@ -11,6 +11,7 @@ Latest focused M3DocVQA update: [m3docvqa_gpp_ablation_findings_2026-05-29.md](/
 - New selected-dataset runs show OpenDocVQA doc-seed hurts, ViDoRe doc-seed is only a tiny page gain with doc-rank cost, and ViDoRe hard cross-doc page selection is harmful.
 - M3DocVQA is different: it has document-only gold labels, and the authored PDF/Wikipedia hyperlink graph gives small but real doc/row gains. The latest best GPP hyperlink variant is `pagenode_to_hyperlink_pages + log_count + PDF_HYPERLINK_TARGET_PAGES_PER_DOC=1 + MMR doc-diverse`.
 - The current best M3DocVQA hyperlink-node run reaches `doc@4=0.853`, `doc@20=0.936`, `row@4=0.804`, and `row@20=0.905`. It trades off top-1 recall (`doc@1=0.600` vs `0.608` no-hyperlink), so `docnode_to_hyperlink_docs` remains the conservative alternative.
+- The new M3DocVQA dev-split doc-fusion probe is positive: tuned fusion reaches `eval doc@4=0.8613`, beating the best single eval source by `+0.0094`. The best weights were dense `2.0`, SPLADE `4.0`, no-hyperlink GPP `0.0`, doc-hyperlink GPP `0.25`, and page-hyperlink GPP `4.0`.
 - Cross-doc/final row selection is still important for M3DocVQA: MMR document-diverse selection raises row@4 substantially compared with score-only selection, and the hyperlink-node variants build on that.
 - `shared_entity_title_topic` is currently a no-op on the checked datasets because it emits zero edges.
 - `semantic_similarity` was skipped in the complete M3DocVQA run only because `SPLADE_INDEX_PT` was not pointed at the existing SPLADE index. The full index exists at `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt`.
@@ -145,6 +146,15 @@ Latest MMR hyperlink-node rows:
 | `docnode_to_hyperlink_docs` | 0.608 | 0.851 | 0.907 | 0.930 | 0.798 | 0.855 | 0.898 | Conservative hyperlink gain; preserves top-1. |
 | `pagenode_to_hyperlink_pages`, target pages 4 | 0.604 | 0.854 | 0.908 | 0.933 | 0.768 | 0.857 | 0.899 | Best doc@4, but row@4 drops because target pages are diffuse. |
 | `pagenode_to_hyperlink_pages`, target pages 1 | 0.600 | 0.853 | 0.911 | 0.936 | 0.804 | 0.864 | 0.905 | Best current row/context and deeper recall. |
+
+Dev-split doc-fusion probe:
+
+| Method | eval doc@4 | Delta vs best source | Meaning |
+|---|---:|---:|---|
+| best single eval source | 0.8518 | 0.0000 | Best individual source on the eval split. |
+| tuned doc fusion | 0.8613 | +0.0094 | Positive document-level tuning signal. |
+
+Best tuned weights: dense `2.0`, SPLADE `4.0`, no-hyperlink GPP `0.0`, doc-hyperlink GPP `0.25`, page-hyperlink GPP `4.0`.
 
 Other M3DocVQA findings from today:
 
