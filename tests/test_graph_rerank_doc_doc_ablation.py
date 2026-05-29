@@ -39,6 +39,14 @@ def make_args(**overrides):
         "doc_doc_hyperlink_target_support_floor": 0.5,
         "doc_doc_hyperlink_target_support_scale": 0.75,
         "doc_doc_edge_weight": 0.1,
+        "ppr_iters": 30,
+        "ppr_iteration_mode": "fixed",
+        "ppr_graph_size_metric": "nodes",
+        "ppr_graph_size_reference": 1000.0,
+        "ppr_graph_size_min_iters": 5,
+        "ppr_graph_size_max_iters": 80,
+        "ppr_convergence_tol": 1e-7,
+        "ppr_convergence_min_iters": 5,
         "pdf_hyperlink_edges_jsonl": "links.jsonl",
         "pdf_hyperlink_edge_weight": 0.5,
         "pdf_hyperlink_direction": "source_to_target_doc",
@@ -184,6 +192,46 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
         self.assertAlmostEqual(metadata["doc_seed_graph_size_multiplier"], expected_multiplier)
         self.assertAlmostEqual(doc_seed["doc::A"], expected_multiplier / 11.0)
         self.assertAlmostEqual(doc_seed["doc::B"], expected_multiplier / 12.0)
+
+    def test_graph_size_adaptive_ppr_iteration_budget_scales_with_nodes(self) -> None:
+        graph = {f"n{i}": {} for i in range(25)}
+        args = make_args(
+            ppr_iters=30,
+            ppr_iteration_mode="graph_size",
+            ppr_graph_size_metric="nodes",
+            ppr_graph_size_reference=100.0,
+            ppr_graph_size_min_iters=3,
+            ppr_graph_size_max_iters=80,
+        )
+
+        iters, metadata = MODULE.effective_ppr_iteration_budget(
+            graph=graph,
+            seed={"n0": 1.0},
+            args=args,
+        )
+
+        self.assertEqual(iters, 15)
+        self.assertEqual(metadata["ppr_iteration_mode"], "graph_size")
+        self.assertEqual(metadata["ppr_graph_size_value"], 25.0)
+
+    def test_ppr_convergence_can_stop_before_max_iterations(self) -> None:
+        graph = {
+            "A": {"B": 1.0},
+            "B": {"A": 1.0},
+        }
+
+        _scores, metadata = MODULE.run_ppr(
+            graph=graph,
+            seed={"A": 1.0},
+            restart_prob=0.15,
+            iters=50,
+            convergence_tol=2.0,
+            convergence_min_iters=1,
+            return_metadata=True,
+        )
+
+        self.assertTrue(metadata["ppr_converged"])
+        self.assertLess(metadata["ppr_actual_iters"], 50)
 
     def test_dense_sparse_agreement_only_connects_docs_in_both_sources(self) -> None:
         args = make_args()

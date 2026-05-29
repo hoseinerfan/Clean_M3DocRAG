@@ -1462,6 +1462,37 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--doc-seed-graph-size-max-mult", type=float, default=2.0)
     parser.add_argument("--restart-prob", type=float, default=0.20)
     parser.add_argument("--ppr-iters", type=int, default=30)
+    parser.add_argument(
+        "--ppr-iteration-mode",
+        choices=["fixed", "graph_size", "convergence", "graph_size_convergence"],
+        default="fixed",
+        help=(
+            "How to choose PPR iterations. fixed uses --ppr-iters exactly; graph_size "
+            "scales that budget by query graph size; convergence stops early when the "
+            "L1 residual is below --ppr-convergence-tol; graph_size_convergence uses "
+            "the graph-size budget as the convergence maximum."
+        ),
+    )
+    parser.add_argument(
+        "--ppr-graph-size-metric",
+        choices=["nodes", "edges", "nodes_edges"],
+        default="nodes",
+        help="Graph-size signal used when --ppr-iteration-mode includes graph_size.",
+    )
+    parser.add_argument(
+        "--ppr-graph-size-reference",
+        type=float,
+        default=1000.0,
+        help=(
+            "Reference graph size for graph-size adaptive iterations. The effective "
+            "max iteration budget is ppr_iters * sqrt(size / reference), clamped by "
+            "--ppr-graph-size-min-iters and --ppr-graph-size-max-iters."
+        ),
+    )
+    parser.add_argument("--ppr-graph-size-min-iters", type=int, default=5)
+    parser.add_argument("--ppr-graph-size-max-iters", type=int, default=80)
+    parser.add_argument("--ppr-convergence-tol", type=float, default=1e-7)
+    parser.add_argument("--ppr-convergence-min-iters", type=int, default=5)
     parser.add_argument("--page-doc-edge-weight", type=float, default=1.0)
     parser.add_argument(
         "--page-to-doc-edge-weight",
@@ -7422,9 +7453,19 @@ def run_ppr(
     seed: dict[str, float],
     restart_prob: float,
     iters: int,
+    convergence_tol: float | None = None,
+    convergence_min_iters: int = 0,
+    return_metadata: bool = False,
 ) -> dict[str, float]:
     nodes = sorted(set(graph) | set(seed))
     if not nodes:
+        if return_metadata:
+            return {}, {
+                "ppr_effective_iters": 0,
+                "ppr_actual_iters": 0,
+                "ppr_converged": True,
+                "ppr_final_residual_l1": 0.0,
+            }
         return {}
     normalized_seed = normalize_nonnegative({node: seed.get(node, 0.0) for node in nodes})
     rank = dict(normalized_seed)
@@ -7433,7 +7474,12 @@ def run_ppr(
         for node in nodes
     }
 
-    for _ in range(max(0, int(iters))):
+    max_iters = max(0, int(iters))
+    min_iters = max(0, int(convergence_min_iters))
+    residual_l1 = 0.0
+    actual_iters = 0
+    converged = False
+    for iteration in range(1, max_iters + 1):
         next_rank = {node: float(restart_prob) * normalized_seed[node] for node in nodes}
         dangling_mass = 0.0
         for src in nodes:
@@ -7449,8 +7495,71 @@ def run_ppr(
         if dangling_mass > 0:
             for node in nodes:
                 next_rank[node] += (1.0 - float(restart_prob)) * dangling_mass * normalized_seed[node]
+        residual_l1 = sum(abs(next_rank.get(node, 0.0) - rank.get(node, 0.0)) for node in nodes)
         rank = next_rank
+        actual_iters = iteration
+        if convergence_tol is not None and iteration >= min_iters and residual_l1 <= float(convergence_tol):
+            converged = True
+            break
+    if return_metadata:
+        return rank, {
+            "ppr_effective_iters": max_iters,
+            "ppr_actual_iters": actual_iters,
+            "ppr_converged": converged or actual_iters < max_iters,
+            "ppr_final_residual_l1": residual_l1,
+        }
     return rank
+
+
+def graph_size_for_ppr_iterations(
+    graph: dict[str, dict[str, float]],
+    seed: dict[str, float],
+    metric: str,
+) -> float:
+    nodes = set(graph) | set(seed)
+    directed_edge_count = sum(
+        1
+        for neighbors in graph.values()
+        for weight in neighbors.values()
+        if float(weight) > 0.0
+    )
+    if metric == "edges":
+        return float(max(1, directed_edge_count))
+    if metric == "nodes_edges":
+        return float(max(1, len(nodes) + directed_edge_count))
+    return float(max(1, len(nodes)))
+
+
+def effective_ppr_iteration_budget(
+    *,
+    graph: dict[str, dict[str, float]],
+    seed: dict[str, float],
+    args: argparse.Namespace,
+) -> tuple[int, dict[str, object]]:
+    base_iters = max(0, int(args.ppr_iters))
+    mode = str(getattr(args, "ppr_iteration_mode", "fixed"))
+    metric = str(getattr(args, "ppr_graph_size_metric", "nodes"))
+    graph_size_value = graph_size_for_ppr_iterations(graph, seed, metric)
+    effective_iters = base_iters
+    if mode in {"graph_size", "graph_size_convergence"}:
+        reference = max(1e-12, float(getattr(args, "ppr_graph_size_reference", 1000.0)))
+        min_iters = max(0, int(getattr(args, "ppr_graph_size_min_iters", 0)))
+        max_iters = max(min_iters, int(getattr(args, "ppr_graph_size_max_iters", base_iters)))
+        scaled_iters = int(round(float(base_iters) * math.sqrt(graph_size_value / reference)))
+        effective_iters = max(min_iters, min(max_iters, scaled_iters))
+    metadata = {
+        "ppr_iteration_mode": mode,
+        "ppr_requested_iters": base_iters,
+        "ppr_effective_iters": effective_iters,
+        "ppr_graph_size_metric": metric,
+        "ppr_graph_size_value": graph_size_value,
+        "ppr_graph_size_reference": float(getattr(args, "ppr_graph_size_reference", 1000.0)),
+        "ppr_graph_size_min_iters": int(getattr(args, "ppr_graph_size_min_iters", 0)),
+        "ppr_graph_size_max_iters": int(getattr(args, "ppr_graph_size_max_iters", base_iters)),
+        "ppr_convergence_tol": float(getattr(args, "ppr_convergence_tol", 0.0)),
+        "ppr_convergence_min_iters": int(getattr(args, "ppr_convergence_min_iters", 0)),
+    }
+    return effective_iters, metadata
 
 
 def gold_doc_ids(row: dict) -> set[str]:
@@ -7863,12 +7972,26 @@ def build_qid_graph_ranking(
         policy=entity_alias_policy,
         args=args,
     )
-    ppr = run_ppr(
+    ppr_iters, ppr_metadata = effective_ppr_iteration_budget(
+        graph=graph,
+        seed=restart_vector.seed,
+        args=args,
+    )
+    convergence_tol = (
+        float(args.ppr_convergence_tol)
+        if str(args.ppr_iteration_mode) in {"convergence", "graph_size_convergence"}
+        else None
+    )
+    ppr, ppr_run_metadata = run_ppr(
         graph=graph,
         seed=restart_vector.seed,
         restart_prob=float(args.restart_prob),
-        iters=int(args.ppr_iters),
+        iters=ppr_iters,
+        convergence_tol=convergence_tol,
+        convergence_min_iters=int(args.ppr_convergence_min_iters),
+        return_metadata=True,
     )
+    ppr_metadata.update(ppr_run_metadata)
 
     page_seed_scaled = max_scale({uid: float(score) for uid, score in page_seed.items()})
     page_ppr_scaled = max_scale({uid: ppr.get(uid, 0.0) for uid in records})
@@ -7970,6 +8093,7 @@ def build_qid_graph_ranking(
         **doc_doc_metadata,
         **pdf_hyperlink_metadata,
         **external_page_graph_metadata,
+        **ppr_metadata,
         "position_evidence_restart_seed_node_count": position_seed_node_count,
         "query_anchor_restart_seed_node_count": query_anchor_seed_node_count,
         "heading_breadcrumb_restart_seed_node_count": heading_breadcrumb_seed_node_count,
@@ -8451,6 +8575,13 @@ def main() -> None:
                 "doc_seed_graph_size_max_mult": float(args.doc_seed_graph_size_max_mult),
                 "restart_prob": float(args.restart_prob),
                 "ppr_iters": int(args.ppr_iters),
+                "ppr_iteration_mode": args.ppr_iteration_mode,
+                "ppr_graph_size_metric": args.ppr_graph_size_metric,
+                "ppr_graph_size_reference": float(args.ppr_graph_size_reference),
+                "ppr_graph_size_min_iters": int(args.ppr_graph_size_min_iters),
+                "ppr_graph_size_max_iters": int(args.ppr_graph_size_max_iters),
+                "ppr_convergence_tol": float(args.ppr_convergence_tol),
+                "ppr_convergence_min_iters": int(args.ppr_convergence_min_iters),
                 "page_doc_edge_weight": float(args.page_doc_edge_weight),
                 "page_to_doc_edge_weight": effective_page_to_doc_edge_weight(args),
                 "doc_to_page_edge_weight": effective_doc_to_page_edge_weight(args),
@@ -8748,6 +8879,13 @@ def main() -> None:
         "doc_seed_graph_size_max_mult": float(args.doc_seed_graph_size_max_mult),
         "restart_prob": float(args.restart_prob),
         "ppr_iters": int(args.ppr_iters),
+        "ppr_iteration_mode": args.ppr_iteration_mode,
+        "ppr_graph_size_metric": args.ppr_graph_size_metric,
+        "ppr_graph_size_reference": float(args.ppr_graph_size_reference),
+        "ppr_graph_size_min_iters": int(args.ppr_graph_size_min_iters),
+        "ppr_graph_size_max_iters": int(args.ppr_graph_size_max_iters),
+        "ppr_convergence_tol": float(args.ppr_convergence_tol),
+        "ppr_convergence_min_iters": int(args.ppr_convergence_min_iters),
         "page_doc_edge_weight": float(args.page_doc_edge_weight),
         "page_to_doc_edge_weight": effective_page_to_doc_edge_weight(args),
         "doc_to_page_edge_weight": effective_doc_to_page_edge_weight(args),
@@ -8774,6 +8912,26 @@ def main() -> None:
         ),
         "mean_candidate_doc_count": (
             statistics.fmean(float(row["graph"]["candidate_doc_count"]) for row in per_qid)
+            if per_qid
+            else None
+        ),
+        "mean_ppr_effective_iters": (
+            statistics.fmean(float(row["graph"].get("ppr_effective_iters", 0.0)) for row in per_qid)
+            if per_qid
+            else None
+        ),
+        "mean_ppr_actual_iters": (
+            statistics.fmean(float(row["graph"].get("ppr_actual_iters", 0.0)) for row in per_qid)
+            if per_qid
+            else None
+        ),
+        "ppr_converged_qid_count": sum(
+            1 for row in per_qid if row["graph"].get("ppr_converged") is True
+        ),
+        "mean_ppr_final_residual_l1": (
+            statistics.fmean(
+                float(row["graph"].get("ppr_final_residual_l1", 0.0)) for row in per_qid
+            )
             if per_qid
             else None
         ),
