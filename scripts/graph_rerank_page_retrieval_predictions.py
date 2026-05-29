@@ -1090,8 +1090,36 @@ def parse_args() -> argparse.Namespace:
         choices=["source_to_target_doc", "bidirectional_doc"],
         default="source_to_target_doc",
         help=(
-            "source_to_target_doc adds source_page -> target_doc edges. "
-            "bidirectional_doc also adds target_doc -> source_page reverse edges."
+            "source_to_target_doc adds source_page -> target edges. "
+            "bidirectional_doc also adds reverse transitions."
+        ),
+    )
+    parser.add_argument(
+        "--pdf-hyperlink-target-mode",
+        choices=["target_doc", "target_pages"],
+        default="target_doc",
+        help=(
+            "Whether PDF hyperlink transitions point to the linked target document node "
+            "or to retrieved candidate page nodes from that target document."
+        ),
+    )
+    parser.add_argument(
+        "--pdf-hyperlink-target-pages-per-doc",
+        type=int,
+        default=1,
+        help=(
+            "When --pdf-hyperlink-target-mode=target_pages, connect to this many "
+            "best-ranked retrieved candidate pages from the linked target document. "
+            "Use 0 for all retrieved candidate pages in the target document."
+        ),
+    )
+    parser.add_argument(
+        "--pdf-hyperlink-target-page-weight-mode",
+        choices=["split", "copy"],
+        default="split",
+        help=(
+            "When linking to target pages, split preserves the total hyperlink mass "
+            "across target pages; copy gives each target page the full edge weight."
         ),
     )
     parser.add_argument(
@@ -6457,8 +6485,14 @@ def add_pdf_hyperlink_edges(
         return {
             "pdf_hyperlink_edge_count_directed": 0,
             "pdf_hyperlink_source_page_count": 0,
+            "pdf_hyperlink_target_page_count": 0,
             "pdf_hyperlink_target_doc_count": 0,
             "pdf_hyperlink_raw_link_count": 0,
+            "pdf_hyperlink_target_mode": str(args.pdf_hyperlink_target_mode),
+            "pdf_hyperlink_target_pages_per_doc": int(args.pdf_hyperlink_target_pages_per_doc),
+            "pdf_hyperlink_target_page_weight_mode": str(
+                args.pdf_hyperlink_target_page_weight_mode
+            ),
             "pdf_hyperlink_source_top_k": int(args.pdf_hyperlink_source_top_k),
             "pdf_hyperlink_target_doc_top_k": int(args.pdf_hyperlink_target_doc_top_k),
             "pdf_hyperlink_query_support_weight_mode": str(
@@ -6472,14 +6506,31 @@ def add_pdf_hyperlink_edges(
         }
 
     candidate_doc_ids = {record.doc_id for record in records.values()}
+    candidate_pages_by_doc: dict[str, list[PageRecord]] = defaultdict(list)
+    for record in records.values():
+        candidate_pages_by_doc[record.doc_id].append(record)
+    for pages in candidate_pages_by_doc.values():
+        pages.sort(
+            key=lambda record: (
+                page_record_best_rank(record)
+                if page_record_best_rank(record) is not None
+                else 10**9,
+                record.page_idx,
+                record.page_uid,
+            )
+        )
     doc_best_ranks = pdf_hyperlink_doc_best_ranks(records)
     used_source_pages: set[str] = set()
+    used_target_pages: set[str] = set()
     used_target_docs: set[str] = set()
     edge_count = 0
     raw_link_count = 0
     max_edges_per_source = max(0, int(args.pdf_hyperlink_max_edges_per_source))
     source_top_k = max(0, int(args.pdf_hyperlink_source_top_k))
     target_doc_top_k = max(0, int(args.pdf_hyperlink_target_doc_top_k))
+    target_mode = str(args.pdf_hyperlink_target_mode)
+    target_pages_per_doc = max(0, int(args.pdf_hyperlink_target_pages_per_doc))
+    target_page_weight_mode = str(args.pdf_hyperlink_target_page_weight_mode)
     skipped_source_rank_gate = 0
     skipped_target_doc_rank_gate = 0
 
@@ -6515,6 +6566,32 @@ def add_pdf_hyperlink_edges(
         if max_edges_per_source > 0:
             ordered_edges = ordered_edges[:max_edges_per_source]
         for edge, weight, _target_doc_rank in ordered_edges:
+            if target_mode == "target_pages":
+                target_records = candidate_pages_by_doc.get(edge.target_doc_id, [])
+                if not target_records:
+                    continue
+                if target_pages_per_doc > 0:
+                    target_records = target_records[:target_pages_per_doc]
+                if not target_records:
+                    continue
+                page_weight = (
+                    weight / float(len(target_records))
+                    if target_page_weight_mode == "split"
+                    else weight
+                )
+                raw_link_count += int(edge.raw_link_count)
+                used_source_pages.add(source_uid)
+                used_target_docs.add(edge.target_doc_id)
+                for target_record in target_records:
+                    target_node = target_record.page_uid
+                    add_directed_edge(graph, source_uid, target_node, page_weight)
+                    edge_count += 1
+                    used_target_pages.add(target_node)
+                    if str(args.pdf_hyperlink_direction) == "bidirectional_doc":
+                        add_directed_edge(graph, target_node, source_uid, page_weight)
+                        edge_count += 1
+                continue
+
             target_doc_node = f"doc::{edge.target_doc_id}"
             add_directed_edge(graph, source_uid, target_doc_node, weight)
             edge_count += 1
@@ -6528,6 +6605,7 @@ def add_pdf_hyperlink_edges(
     return {
         "pdf_hyperlink_edge_count_directed": edge_count,
         "pdf_hyperlink_source_page_count": len(used_source_pages),
+        "pdf_hyperlink_target_page_count": len(used_target_pages),
         "pdf_hyperlink_target_doc_count": len(used_target_docs),
         "pdf_hyperlink_raw_link_count": raw_link_count,
         "pdf_hyperlink_loaded_edge_count": pdf_hyperlink_graph.edge_count,
@@ -6535,6 +6613,9 @@ def add_pdf_hyperlink_edges(
         "pdf_hyperlink_loaded_target_doc_count": pdf_hyperlink_graph.target_doc_count,
         "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
         "pdf_hyperlink_direction": str(args.pdf_hyperlink_direction),
+        "pdf_hyperlink_target_mode": target_mode,
+        "pdf_hyperlink_target_pages_per_doc": target_pages_per_doc,
+        "pdf_hyperlink_target_page_weight_mode": target_page_weight_mode,
         "pdf_hyperlink_weight_mode": str(args.pdf_hyperlink_weight_mode),
         "pdf_hyperlink_max_edges_per_source": int(args.pdf_hyperlink_max_edges_per_source),
         "pdf_hyperlink_source_top_k": int(args.pdf_hyperlink_source_top_k),
@@ -8307,6 +8388,13 @@ def main() -> None:
                 "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
                 "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
                 "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
+                "pdf_hyperlink_target_mode": args.pdf_hyperlink_target_mode,
+                "pdf_hyperlink_target_pages_per_doc": int(
+                    args.pdf_hyperlink_target_pages_per_doc
+                ),
+                "pdf_hyperlink_target_page_weight_mode": (
+                    args.pdf_hyperlink_target_page_weight_mode
+                ),
                 "pdf_hyperlink_weight_mode": args.pdf_hyperlink_weight_mode,
                 "pdf_hyperlink_max_edges_per_source": int(args.pdf_hyperlink_max_edges_per_source),
                 "pdf_hyperlink_source_top_k": int(args.pdf_hyperlink_source_top_k),
@@ -8586,6 +8674,9 @@ def main() -> None:
         "pdf_hyperlink_edges_jsonl": args.pdf_hyperlink_edges_jsonl,
         "pdf_hyperlink_edge_weight": float(args.pdf_hyperlink_edge_weight),
         "pdf_hyperlink_direction": args.pdf_hyperlink_direction,
+        "pdf_hyperlink_target_mode": args.pdf_hyperlink_target_mode,
+        "pdf_hyperlink_target_pages_per_doc": int(args.pdf_hyperlink_target_pages_per_doc),
+        "pdf_hyperlink_target_page_weight_mode": args.pdf_hyperlink_target_page_weight_mode,
         "pdf_hyperlink_weight_mode": args.pdf_hyperlink_weight_mode,
         "pdf_hyperlink_max_edges_per_source": int(args.pdf_hyperlink_max_edges_per_source),
         "pdf_hyperlink_source_top_k": int(args.pdf_hyperlink_source_top_k),
@@ -9278,6 +9369,14 @@ def main() -> None:
         "mean_pdf_hyperlink_source_page_count": (
             statistics.fmean(
                 float(row["graph"].get("pdf_hyperlink_source_page_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_pdf_hyperlink_target_page_count": (
+            statistics.fmean(
+                float(row["graph"].get("pdf_hyperlink_target_page_count", 0.0))
                 for row in per_qid
             )
             if per_qid

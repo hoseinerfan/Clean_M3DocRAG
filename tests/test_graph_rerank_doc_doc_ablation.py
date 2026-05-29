@@ -39,6 +39,17 @@ def make_args(**overrides):
         "doc_doc_hyperlink_target_support_floor": 0.5,
         "doc_doc_hyperlink_target_support_scale": 0.75,
         "doc_doc_edge_weight": 0.1,
+        "pdf_hyperlink_edges_jsonl": "links.jsonl",
+        "pdf_hyperlink_edge_weight": 0.5,
+        "pdf_hyperlink_direction": "source_to_target_doc",
+        "pdf_hyperlink_target_mode": "target_doc",
+        "pdf_hyperlink_target_pages_per_doc": 1,
+        "pdf_hyperlink_target_page_weight_mode": "split",
+        "pdf_hyperlink_weight_mode": "uniform",
+        "pdf_hyperlink_max_edges_per_source": 0,
+        "pdf_hyperlink_source_top_k": 0,
+        "pdf_hyperlink_target_doc_top_k": 0,
+        "pdf_hyperlink_query_support_weight_mode": "none",
         "heading_breadcrumb_min_token_len": 3,
     }
     defaults.update(overrides)
@@ -351,6 +362,81 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
             MODULE.hyperlink_citation_initial_score(4, "log_count"),
             math.log1p(4),
         )
+
+    def test_pdf_hyperlink_edges_default_to_target_doc_node(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0, dense_rank=1),
+            "B_page0": MODULE.PageRecord(doc_id="B", page_idx=0, dense_rank=2),
+        }
+        hyperlink_graph = MODULE.PdfHyperlinkGraph(
+            by_source_page={
+                "A_page0": [
+                    MODULE.PdfHyperlinkEdge(
+                        source_page_uid="A_page0",
+                        target_doc_id="B",
+                        raw_link_count=1,
+                    )
+                ]
+            },
+            edge_count=1,
+            source_page_count=1,
+            target_doc_count=1,
+        )
+        graph: dict[str, dict[str, float]] = {}
+
+        metadata = MODULE.add_pdf_hyperlink_edges(
+            graph=graph,
+            records=records,
+            pdf_hyperlink_graph=hyperlink_graph,
+            args=make_args(),
+        )
+
+        self.assertAlmostEqual(graph["A_page0"]["doc::B"], 0.5)
+        self.assertEqual(metadata["pdf_hyperlink_target_mode"], "target_doc")
+        self.assertEqual(metadata["pdf_hyperlink_target_page_count"], 0)
+        self.assertEqual(metadata["pdf_hyperlink_target_doc_count"], 1)
+
+    def test_pdf_hyperlink_edges_can_target_best_retrieved_pages(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0, dense_rank=1),
+            "B_page0": MODULE.PageRecord(doc_id="B", page_idx=0, dense_rank=3),
+            "B_page1": MODULE.PageRecord(doc_id="B", page_idx=1, sparse_rank=2),
+            "B_page2": MODULE.PageRecord(doc_id="B", page_idx=2, dense_rank=10),
+        }
+        hyperlink_graph = MODULE.PdfHyperlinkGraph(
+            by_source_page={
+                "A_page0": [
+                    MODULE.PdfHyperlinkEdge(
+                        source_page_uid="A_page0",
+                        target_doc_id="B",
+                        raw_link_count=1,
+                    )
+                ]
+            },
+            edge_count=1,
+            source_page_count=1,
+            target_doc_count=1,
+        )
+        graph: dict[str, dict[str, float]] = {}
+
+        metadata = MODULE.add_pdf_hyperlink_edges(
+            graph=graph,
+            records=records,
+            pdf_hyperlink_graph=hyperlink_graph,
+            args=make_args(
+                pdf_hyperlink_target_mode="target_pages",
+                pdf_hyperlink_target_pages_per_doc=2,
+                pdf_hyperlink_target_page_weight_mode="split",
+            ),
+        )
+
+        self.assertNotIn("doc::B", graph["A_page0"])
+        self.assertAlmostEqual(graph["A_page0"]["B_page1"], 0.25)
+        self.assertAlmostEqual(graph["A_page0"]["B_page0"], 0.25)
+        self.assertNotIn("B_page2", graph["A_page0"])
+        self.assertEqual(metadata["pdf_hyperlink_edge_count_directed"], 2)
+        self.assertEqual(metadata["pdf_hyperlink_target_page_count"], 2)
+        self.assertEqual(metadata["pdf_hyperlink_target_doc_count"], 1)
 
     def test_shared_entity_title_topic_scores_shared_signals(self) -> None:
         records = {
