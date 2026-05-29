@@ -2,12 +2,15 @@
 
 Purpose: consolidate the recent Graph-PPR ablations so the main notes and generated result tables have a stable interpretation layer. The raw generated tables remain in dataset output folders; this file records the conclusions that should guide the next runs and thesis writeup.
 
+Latest focused M3DocVQA update: [m3docvqa_gpp_ablation_findings_2026-05-29.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/m3docvqa_gpp_ablation_findings_2026-05-29.md:1)
+
 ## Executive Summary
 
 - For MMDocIR, SciEGQA, and ViDoSeek page-labeled retrieval, doc-doc edges are not a reliable page@4 improvement. The safest page-labeled default remains `denseheavy125_medium_both` with `DOC_DOC_EDGE_MODE=none`.
 - Doc-seed restart helps SciEGQA but not MMDocIR or ViDoSeek. The best SciEGQA doc-seed row was `docseed_rrf_1p00`, improving page@4 by `+12` and doc@4 by `+4`.
-- M3DocVQA is different: it has document-only gold labels, and the authored PDF/Wikipedia hyperlink graph gives small but real doc/row gains. The best balanced hyperlink weight observed so far is `DOC_DOC_EDGE_WEIGHT=2.25`.
-- Cross-doc page selection is the strongest M3DocVQA row-rank improvement: `select_mmr_docdiv_pool20_b0p10` raises row@4 from `0.758` to `0.799` while leaving doc@4 unchanged.
+- M3DocVQA is different: it has document-only gold labels, and the authored PDF/Wikipedia hyperlink graph gives small but real doc/row gains. The latest best GPP hyperlink variant is `pagenode_to_hyperlink_pages + log_count + PDF_HYPERLINK_TARGET_PAGES_PER_DOC=1 + MMR doc-diverse`.
+- The current best M3DocVQA hyperlink-node run reaches `doc@4=0.853`, `doc@20=0.936`, `row@4=0.804`, and `row@20=0.905`. It trades off top-1 recall (`doc@1=0.600` vs `0.608` no-hyperlink), so `docnode_to_hyperlink_docs` remains the conservative alternative.
+- Cross-doc/final row selection is still important for M3DocVQA: MMR document-diverse selection raises row@4 substantially compared with score-only selection, and the hyperlink-node variants build on that.
 - `shared_entity_title_topic` is currently a no-op on the checked datasets because it emits zero edges.
 - `semantic_similarity` was skipped in the complete M3DocVQA run only because `SPLADE_INDEX_PT` was not pointed at the existing SPLADE index. The full index exists at `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt`.
 
@@ -78,7 +81,38 @@ SciEGQA doc-seed progression:
 | docseed_rrf_0p50 | 1328 | +5 | 1511 | +3 |
 | docseed_rrf_1p00 | 1335 | +12 | 1512 | +4 |
 
-## M3DocVQA Hyperlink Graph
+## M3DocVQA Latest Focused Update
+
+Detailed note: [m3docvqa_gpp_ablation_findings_2026-05-29.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/m3docvqa_gpp_ablation_findings_2026-05-29.md:1)
+
+Current best config:
+
+```bash
+PDF_HYPERLINK_WEIGHT_MODE=log_count
+PDF_HYPERLINK_TARGET_MODE=target_pages
+PDF_HYPERLINK_TARGET_PAGES_PER_DOC=1
+FINAL_SELECTION_MODE=mmr_doc_diverse
+FINAL_SELECTION_NEW_DOC_BONUS=0.10
+FINAL_SELECTION_SAME_DOC_PENALTY=0.05
+```
+
+Latest MMR hyperlink-node rows:
+
+| Method | doc@1 | doc@4 | doc@10 | doc@20 | row@4 | row@10 | row@20 | Main reading |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| no hyperlink MMR | 0.608 | 0.846 | 0.903 | 0.927 | 0.788 | 0.849 | 0.893 | Current no-hyperlink baseline. |
+| `docnode_to_hyperlink_docs` | 0.608 | 0.851 | 0.907 | 0.930 | 0.798 | 0.855 | 0.898 | Conservative hyperlink gain; preserves top-1. |
+| `pagenode_to_hyperlink_pages`, target pages 4 | 0.604 | 0.854 | 0.908 | 0.933 | 0.768 | 0.857 | 0.899 | Best doc@4, but row@4 drops because target pages are diffuse. |
+| `pagenode_to_hyperlink_pages`, target pages 1 | 0.600 | 0.853 | 0.911 | 0.936 | 0.804 | 0.864 | 0.905 | Best current row/context and deeper recall. |
+
+Other M3DocVQA findings from today:
+
+- Doc-seed page-score variants do not beat the no-docseed baseline in a useful way. Sum scoring gives only tiny `doc@4` gains and hurts `row@4`.
+- Adjacent-page edge weight is weak on M3DocVQA. Higher weights slightly improve some doc@4 rows, but hurt row context for multi-gold-doc qids.
+- M3DocVQA train has qids and gold docs, but no gold pages. It can support doc-level tuning, not true page-level supervised tuning.
+- OpenDocVQA, ViDoRe, DUDE, ViDoSeek, and SciEGQA do not yet have usable mapped dataset-internal hyperlink edges from the sanity checks. The hyperlink method is currently M3DocVQA-only.
+
+## M3DocVQA Historical Hyperlink Graph
 
 The M3DocVQA hyperlink file is valid and useful:
 
@@ -105,14 +139,14 @@ The tuned hyperlink weight sweep used the same `no_doc_doc` baseline:
 | 10.00 | 0.602 | 0.849 | 0.908 | 0.770 | 0.857 | 50 / 76 |
 | 20.00 | 0.603 | 0.846 | 0.907 | 0.771 | 0.857 | 55 / 84 |
 
-Recommended M3DocVQA hyperlink setting:
+Historical M3DocVQA hyperlink setting before the newer hyperlink-node target-page runs:
 
 ```bash
 DOC_DOC_EDGE_MODE=hyperlink_citation
 DOC_DOC_EDGE_WEIGHT=2.25
 ```
 
-Rationale: `2.25` keeps doc@1 unchanged, reaches the best observed doc@4 band, improves row@4 to `0.770`, and has the best movement balance in the `1.75-3.00` local sweep.
+Rationale: `2.25` keeps doc@1 unchanged, reaches the best observed doc@4 band in that older doc-doc edge sweep, improves row@4 to `0.770`, and has the best movement balance in the `1.75-3.00` local sweep. For current GPP reporting, prefer the newer hyperlink-node target-page MMR result above.
 
 ## M3DocVQA Complete Ablation
 
@@ -129,7 +163,7 @@ The complete wrapper was run with the default doc-doc edge weight (`0.10`) unles
 | `select_max1doc_pool50` | 0.846 | 0.845 | Strong row diversity effect, doc@4 unchanged. |
 | `select_mmr_docdiv_pool20_b0p10` | 0.846 | 0.799 | Best row@4 among complete rows, doc@4 unchanged. |
 
-Recommended combined M3DocVQA test:
+Historical combined M3DocVQA test from the older doc-doc sweep:
 
 ```bash
 DOC_DOC_EDGE_WEIGHT=2.25 \
@@ -152,8 +186,9 @@ and explicit dense/sparse prediction paths if running the lower-level pipeline d
 
 - For MMDocIR/SciEGQA/ViDoSeek page-labeled retrieval, report `denseheavy125_medium_both` with `DOC_DOC_EDGE_MODE=none` as the main page-preserving graph result.
 - For SciEGQA only, report `docseed_rrf_1p00` as a useful doc-seed ablation.
-- For M3DocVQA, report hyperlink doc-doc edges and final selection separately:
-  - hyperlink edges improve document retrieval modestly
-  - MMR/max-one-doc final selection improves row diversity strongly
+- For M3DocVQA, report the latest hyperlink-node result as the main GPP hyperlink result:
+  - current best: `pagenode_to_hyperlink_pages + log_count + PDF_HYPERLINK_TARGET_PAGES_PER_DOC=1 + MMR doc-diverse`
+  - conservative alternative: `docnode_to_hyperlink_docs + log_count + MMR doc-diverse`
+  - older `DOC_DOC_EDGE_WEIGHT=2.25` remains useful historical comparison, but it is superseded for current GPP hyperlink reporting
 - Do not claim `shared_entity_title_topic` helped; it emitted zero edges.
 - Do not claim M3DocVQA semantic-similarity failed until rerunning with the found SPLADE index.

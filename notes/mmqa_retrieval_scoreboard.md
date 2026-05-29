@@ -57,31 +57,38 @@ Interpretation:
   - `MaxSim+` is slightly better at `recall@4`.
   - `Graph Page Preserve` is clearly better at `recall@20`.
 
-## M3DocVQA Complete Graph Ablation 2026-05-28
+## M3DocVQA GPP Hyperlink Ablations 2026-05-29
 
 Detailed interpretation note: [graph_ablation_findings_2026-05-28.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/graph_ablation_findings_2026-05-28.md:1)
+Focused M3DocVQA note: [m3docvqa_gpp_ablation_findings_2026-05-29.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/m3docvqa_gpp_ablation_findings_2026-05-29.md:1)
 
-The table below reports the latest M3DocVQA/MMQA retrieval rows from the complete graph ablation and the focused hyperlink weight sweep. M3DocVQA has document-only gold in this setup, so `row@k` is a returned-row diagnostic rather than exact page-gold recall.
+M3DocVQA has document-only gold in this setup, so `doc@k` is primary and `row@k` is a returned-row diagnostic rather than exact page-gold recall.
+
+Latest focused MMR hyperlink-node rows:
+
+| Method | doc@1 | doc@4 | doc@10 | doc@20 | row@4 | row@10 | row@20 | Finding |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| no hyperlink MMR | 0.608 | 0.846 | 0.903 | 0.927 | 0.788 | 0.849 | 0.893 | Current MMR baseline. |
+| `docnode_to_hyperlink_docs` + `log_count` | 0.608 | 0.851 | 0.907 | 0.930 | 0.798 | 0.855 | 0.898 | Conservative hyperlink gain, preserves top-1. |
+| `pagenode_to_hyperlink_pages` + `log_count`, target pages 4 | 0.604 | 0.854 | 0.908 | 0.933 | 0.768 | 0.857 | 0.899 | Best doc@4, but row@4 drops. |
+| `pagenode_to_hyperlink_pages` + `log_count`, target pages 1 | 0.600 | 0.853 | 0.911 | 0.936 | 0.804 | 0.864 | 0.905 | Best current context/deeper recall default. |
+
+Older complete-wrapper and doc-doc rows remain useful for historical comparison:
 
 | Method | doc@1 | doc@4 | doc@10 | row@4 | row@10 | Finding |
 |---|---:|---:|---:|---:|---:|---|
-| `docdoc_no_doc_doc` / score baseline | 0.608 | 0.846 | 0.903 | 0.758 | 0.848 | Baseline for the complete ablation. |
-| `docdoc_hyperlink_citation`, default `w0.10` | 0.608 | 0.847 | 0.904 | 0.759 | 0.849 | Small gain only; complete wrapper default is not tuned. |
-| `docdoc_hyperlink_citation`, tuned `w2.25` | 0.608 | 0.851 | 0.907 | 0.770 | 0.854 | Best balanced hyperlink weight from focused sweep. |
-| `docdoc_dense_sparse_agreement` | 0.609 | 0.845 | 0.902 | 0.758 | 0.847 | Does not beat baseline doc@4. |
-| `docdoc_fully_connected_topdocs` | 0.607 | 0.847 | 0.902 | 0.758 | 0.849 | Small doc@4 gain, no row@4 gain. |
-| `docdoc_all_doc_doc_features` | 0.609 | 0.847 | 0.903 | 0.759 | 0.848 | Small gain, below tuned hyperlink. |
-| `docseed_rrf_1p00` | 0.605 | 0.840 | 0.900 | 0.761 | 0.846 | Row@4 improves slightly, but doc retrieval degrades. |
-| `select_max1doc_pool50` | 0.608 | 0.846 | 0.903 | 0.845 | 0.870 | Strong row diversity, doc@4 unchanged. |
-| `select_mmr_docdiv_pool20_b0p10` | 0.608 | 0.846 | 0.903 | 0.799 | 0.850 | Best complete-wrapper row@4 selection gain. |
+| `docdoc_no_doc_doc` / score baseline | 0.608 | 0.846 | 0.903 | 0.758 | 0.848 | Score-only baseline for the older complete ablation. |
+| `docdoc_hyperlink_citation`, tuned `w2.25` | 0.608 | 0.851 | 0.907 | 0.770 | 0.854 | Best older doc-doc hyperlink weight. |
+| `select_mmr_docdiv_pool20_b0p10` | 0.608 | 0.846 | 0.903 | 0.799 | 0.850 | Older final-selection-only row@4 gain. |
+| `docseed_page_sum_0p50` | 0.609 | 0.847 | 0.903 | 0.756 | 0.845 | Tiny doc@4 gain, worse row@4; not a main setting. |
 
 Current M3DocVQA recommendations:
 
-- Use `DOC_DOC_EDGE_WEIGHT=2.25` for the M3DocVQA hyperlink-citation graph when optimizing document retrieval.
-- Use `FINAL_SELECTION_MODE=mmr_doc_diverse` with `FINAL_SELECTION_NEW_DOC_BONUS=0.10` when optimizing returned-row diversity.
-- Test the combined setting next; the complete wrapper tested these effects separately.
-- Do not report `shared_entity_title_topic` as a failed useful method on M3DocVQA: its audit showed zero active edge qids.
-- Rerun `semantic_similarity` with `SPLADE_INDEX_PT=/mmfs1/scratch/jacks.local/aerfanshekooh/custom/outputs/m3docvqa_splade/m3docvqa_dev_splade.pt` before drawing conclusions about semantic doc-doc edges.
+- Use `pagenode_to_hyperlink_pages + log_count + PDF_HYPERLINK_TARGET_PAGES_PER_DOC=1 + MMR doc-diverse` as the current best GPP hyperlink config.
+- Use `docnode_to_hyperlink_docs + log_count + MMR doc-diverse` as the conservative alternative when preserving top-1 matters.
+- Do not use doc-seed page-score as a main M3DocVQA setting; it is weaker than hyperlink-node propagation.
+- Keep external hyperlink claims scoped to M3DocVQA until OpenDocVQA/ViDoRe/DUDE/ViDoSeek/SciEGQA have dataset-internal URL-to-doc mappings.
+- M3DocVQA train has gold docs but no gold pages, so train-set tuning should be document-level unless pseudo page labels are created.
 
 ## Table C: External Page-Labeled Method Tables
 
