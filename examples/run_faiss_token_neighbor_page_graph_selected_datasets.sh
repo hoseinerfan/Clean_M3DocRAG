@@ -48,6 +48,13 @@ TOKEN_GRAPH_QUERY_EMBEDDING_KEY="${TOKEN_GRAPH_QUERY_EMBEDDING_KEY:-embeddings}"
 TOKEN_GRAPH_RETRIEVAL_MODEL_NAME_OR_PATH="${TOKEN_GRAPH_RETRIEVAL_MODEL_NAME_OR_PATH:-colpaligemma-3b-pt-448-base}"
 TOKEN_GRAPH_RETRIEVAL_ADAPTER_MODEL_NAME_OR_PATH="${TOKEN_GRAPH_RETRIEVAL_ADAPTER_MODEL_NAME_OR_PATH:-colpali-v1.2}"
 TOKEN_GRAPH_QUERY_EXPORT_DEVICE="${TOKEN_GRAPH_QUERY_EXPORT_DEVICE:-auto}"
+TOKEN_GRAPH_RUN_EDGE_VARIANTS="${TOKEN_GRAPH_RUN_EDGE_VARIANTS:-1}"
+TOKEN_GRAPH_RUN_CANDIDATE_EXPANSION="${TOKEN_GRAPH_RUN_CANDIDATE_EXPANSION:-1}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_MAX_NEW_PAGES="${TOKEN_GRAPH_CANDIDATE_EXPANSION_MAX_NEW_PAGES:-50}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_MIN_SCORE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_MIN_SCORE:-0.0}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_AGGREGATION="${TOKEN_GRAPH_CANDIDATE_EXPANSION_AGGREGATION:-log_count}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_SCORE_MODE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_SCORE_MODE:-below_min}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K="${TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K:-0}"
 
 require_value() {
   local name="$1"
@@ -234,6 +241,29 @@ run_graph_variant() {
   bash "$REPO_ROOT/scripts/run_external_graph_ppr_pipeline.sh"
 }
 
+build_expanded_prediction() {
+  local dense_pred="$1"
+  local token_graph_jsonl="$2"
+  local expanded_pred="$3"
+  local expanded_summary="$4"
+
+  if [[ ! -s "$expanded_pred" || "$TOKEN_GRAPH_REBUILD" == "1" ]]; then
+    "$PYTHON_BIN" "$REPO_ROOT/scripts/expand_prediction_with_external_page_graph.py" \
+      --prediction-json "$dense_pred" \
+      --external-page-graph-jsonl "$token_graph_jsonl" \
+      --output-json "$expanded_pred" \
+      --summary-json "$expanded_summary" \
+      --max-new-pages-per-qid "$TOKEN_GRAPH_CANDIDATE_EXPANSION_MAX_NEW_PAGES" \
+      --min-score "$TOKEN_GRAPH_CANDIDATE_EXPANSION_MIN_SCORE" \
+      --aggregation "$TOKEN_GRAPH_CANDIDATE_EXPANSION_AGGREGATION" \
+      --synthetic-score-mode "$TOKEN_GRAPH_CANDIDATE_EXPANSION_SCORE_MODE" \
+      --append-after-top-k "$TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K"
+  else
+    echo "reusing_expanded_prediction=$expanded_pred"
+    echo "set TOKEN_GRAPH_REBUILD=1 to rebuild candidate expansion prediction"
+  fi
+}
+
 build_token_graph() {
   local dense_pred="$1"
   local query_embedding_dir="$2"
@@ -325,6 +355,8 @@ run_dataset() {
   local token_graph_dir
   local token_graph_jsonl
   local token_graph_summary
+  local expanded_dense_pred
+  local expanded_dense_summary
 
   data_root="$(dirname "$gold")"
   embedding_root="${TOKEN_GRAPH_EMBEDDINGS_ROOT:-$work_root/embeddings}"
@@ -336,6 +368,8 @@ run_dataset() {
   token_graph_dir="$work_root/output/$output_slug/faiss_token_neighbor_page_graph"
   token_graph_jsonl="$token_graph_dir/${label_prefix}_faiss_token_neighbor_pages.edges.jsonl"
   token_graph_summary="$token_graph_dir/${label_prefix}_faiss_token_neighbor_pages.summary.json"
+  expanded_dense_pred="$token_graph_dir/${label_prefix}_faiss_token_neighbor_expanded_dense_top${TOKEN_GRAPH_CANDIDATE_EXPANSION_MAX_NEW_PAGES}.prediction.json"
+  expanded_dense_summary="$token_graph_dir/${label_prefix}_faiss_token_neighbor_expanded_dense_top${TOKEN_GRAPH_CANDIDATE_EXPANSION_MAX_NEW_PAGES}.summary.json"
 
   require_file gold "$gold"
   require_file doc_pages "$doc_pages"
@@ -366,12 +400,21 @@ run_dataset() {
   build_token_graph "$dense_pred" "$query_embedding_dir" "$page_embedding_dir" \
     "$doc_ids_json" "$faiss_index" "$token_graph_jsonl" "$token_graph_summary"
 
-  run_graph_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-    "$out_dir" "$label_prefix" no_external_graph "" 0.0 as_directed 0
-  run_graph_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-    "$out_dir" "$label_prefix" faiss_w0p05_directed_top5 "$token_graph_jsonl" 0.05 as_directed 5
-  run_graph_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-    "$out_dir" "$label_prefix" faiss_w0p05_bidir_top5 "$token_graph_jsonl" 0.05 bidirectional 5
+  if [[ "$TOKEN_GRAPH_RUN_EDGE_VARIANTS" == "1" ]]; then
+    run_graph_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+      "$out_dir" "$label_prefix" no_external_graph "" 0.0 as_directed 0
+    run_graph_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+      "$out_dir" "$label_prefix" faiss_w0p05_directed_top5 "$token_graph_jsonl" 0.05 as_directed 5
+    run_graph_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+      "$out_dir" "$label_prefix" faiss_w0p05_bidir_top5 "$token_graph_jsonl" 0.05 bidirectional 5
+  fi
+
+  if [[ "$TOKEN_GRAPH_RUN_CANDIDATE_EXPANSION" == "1" ]]; then
+    build_expanded_prediction "$dense_pred" "$token_graph_jsonl" \
+      "$expanded_dense_pred" "$expanded_dense_summary"
+    run_graph_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$expanded_dense_pred" "$sparse_pred" \
+      "$out_dir" "$label_prefix" "faiss_candidate_expand_top${TOKEN_GRAPH_CANDIDATE_EXPANSION_MAX_NEW_PAGES}" "" 0.0 as_directed 0
+  fi
 
   summary_paths=( "$out_dir/${label_prefix}_"*.summary.json )
   if [[ -e "${summary_paths[0]}" ]]; then
@@ -394,6 +437,10 @@ run_dataset() {
 
   echo "saved_token_graph_jsonl=$token_graph_jsonl"
   echo "saved_token_graph_summary=$token_graph_summary"
+  if [[ "$TOKEN_GRAPH_RUN_CANDIDATE_EXPANSION" == "1" ]]; then
+    echo "saved_expanded_dense_prediction=$expanded_dense_pred"
+    echo "saved_expanded_dense_summary=$expanded_dense_summary"
+  fi
 }
 
 init_reports

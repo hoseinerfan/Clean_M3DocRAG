@@ -37,6 +37,12 @@ DOC_DOC_EMBEDDING_POOLING="${DOC_DOC_EMBEDDING_POOLING:-page_seed_weighted_mean}
 DOC_DOC_EMBEDDING_PAGE_TOP_K="${DOC_DOC_EMBEDDING_PAGE_TOP_K:-3}"
 DOC_DOC_EMBEDDING_CACHE_DOCS="${DOC_DOC_EMBEDDING_CACHE_DOCS:-128}"
 DOC_DOC_MIN_SEMANTIC_SIMILARITY="${DOC_DOC_MIN_SEMANTIC_SIMILARITY:-0.35}"
+DOC_DOC_EMBEDDING_MUTUAL_TOP_K="${DOC_DOC_EMBEDDING_MUTUAL_TOP_K:-3}"
+DOC_DOC_RESCUE_ANCHOR_TOP_K="${DOC_DOC_RESCUE_ANCHOR_TOP_K:-4}"
+DOC_DOC_RESCUE_RANK_MIN="${DOC_DOC_RESCUE_RANK_MIN:-5}"
+DOC_DOC_RESCUE_RANK_MAX="${DOC_DOC_RESCUE_RANK_MAX:-20}"
+DOC_DOC_CONFIDENCE_MODE="${DOC_DOC_CONFIDENCE_MODE:-top_disagreement_or_margin}"
+DOC_DOC_CONFIDENCE_MARGIN="${DOC_DOC_CONFIDENCE_MARGIN:-0.05}"
 
 require_value() {
   local name="$1"
@@ -175,6 +181,12 @@ run_variant() {
   DOC_DOC_EMBEDDING_PAGE_TOP_K="$DOC_DOC_EMBEDDING_PAGE_TOP_K" \
   DOC_DOC_EMBEDDING_MIN_SIMILARITY="$min_similarity" \
   DOC_DOC_EMBEDDING_CACHE_DOCS="$DOC_DOC_EMBEDDING_CACHE_DOCS" \
+  DOC_DOC_EMBEDDING_MUTUAL_TOP_K="$DOC_DOC_EMBEDDING_MUTUAL_TOP_K" \
+  DOC_DOC_RESCUE_ANCHOR_TOP_K="$DOC_DOC_RESCUE_ANCHOR_TOP_K" \
+  DOC_DOC_RESCUE_RANK_MIN="$DOC_DOC_RESCUE_RANK_MIN" \
+  DOC_DOC_RESCUE_RANK_MAX="$DOC_DOC_RESCUE_RANK_MAX" \
+  DOC_DOC_CONFIDENCE_MODE="$DOC_DOC_CONFIDENCE_MODE" \
+  DOC_DOC_CONFIDENCE_MARGIN="$DOC_DOC_CONFIDENCE_MARGIN" \
   DOC_DOC_MIN_SEMANTIC_SIMILARITY="$DOC_DOC_MIN_SEMANTIC_SIMILARITY" \
   SPLADE_INDEX_PT="$splade_index" \
   EXPANSION_TOP_PAGES=0 \
@@ -220,6 +232,7 @@ run_dataset() {
   echo "using_splade_index=$splade_index"
   echo "using_doc_doc_embedding_pooling=$DOC_DOC_EMBEDDING_POOLING"
   echo "using_doc_doc_embedding_page_top_k=$DOC_DOC_EMBEDDING_PAGE_TOP_K"
+  echo "using_doc_doc_rescue_gate=mutual_top_k:$DOC_DOC_EMBEDDING_MUTUAL_TOP_K anchor_top_k:$DOC_DOC_RESCUE_ANCHOR_TOP_K rescue_rank:${DOC_DOC_RESCUE_RANK_MIN}-${DOC_DOC_RESCUE_RANK_MAX} confidence:$DOC_DOC_CONFIDENCE_MODE margin:$DOC_DOC_CONFIDENCE_MARGIN"
 
   run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
     "$out_dir" "$label_prefix" no_doc_embed none 0.0 "" 0.0
@@ -237,6 +250,9 @@ run_dataset() {
   else
     echo "skip_doc_embed_cosine_semantic_gated_missing_splade_index: $splade_index" >&2
   fi
+  run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+    "$out_dir" "$label_prefix" doc_embed_cosine_rescue_gated_sim0p50 \
+    page_embedding_cosine_rescue_gated "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50
 
   summary_paths=( "$out_dir/${label_prefix}_"*.summary.json )
   if [[ -e "${summary_paths[0]}" ]]; then

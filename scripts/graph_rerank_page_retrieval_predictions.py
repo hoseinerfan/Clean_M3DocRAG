@@ -1229,6 +1229,7 @@ def parse_args() -> argparse.Namespace:
             "page_embedding_cosine",
             "page_embedding_cosine_dense_sparse_gated",
             "page_embedding_cosine_semantic_gated",
+            "page_embedding_cosine_rescue_gated",
             "hyperlink_citation",
             "fully_connected",
             "all",
@@ -1242,6 +1243,8 @@ def parse_args() -> argparse.Namespace:
             "dense and sparse retrieved the doc pair, "
             "'page_embedding_cosine_semantic_gated' keeps them only when SPLADE page-term "
             "semantic overlap also supports the pair, "
+            "'page_embedding_cosine_rescue_gated' keeps only confidence-triggered mutual-neighbor "
+            "cosine pairs from a strong anchor doc to a lower-rank rescue doc, "
             "'fully_connected' links all selected docs, and 'all' combines the historical "
             "evidence families."
         ),
@@ -1319,6 +1322,49 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=128,
         help="LRU cache size for loaded safetensors document embedding files.",
+    )
+    parser.add_argument(
+        "--doc-doc-embedding-mutual-top-k",
+        type=int,
+        default=3,
+        help=(
+            "For rescue-gated page-embedding cosine edges, keep only doc pairs where each "
+            "doc is in the other's top-K embedding neighbors. Use 0 to disable this gate."
+        ),
+    )
+    parser.add_argument(
+        "--doc-doc-rescue-anchor-top-k",
+        type=int,
+        default=4,
+        help="Strong-anchor doc rank cutoff for rescue-gated doc-doc cosine edges.",
+    )
+    parser.add_argument(
+        "--doc-doc-rescue-rank-min",
+        type=int,
+        default=5,
+        help="Minimum best doc/page rank for a rescue target doc in rescue-gated cosine edges.",
+    )
+    parser.add_argument(
+        "--doc-doc-rescue-rank-max",
+        type=int,
+        default=20,
+        help="Maximum best doc/page rank for a rescue target doc in rescue-gated cosine edges. Use 0 for no cap.",
+    )
+    parser.add_argument(
+        "--doc-doc-confidence-mode",
+        choices=["none", "top_disagreement", "support_margin", "top_disagreement_or_margin"],
+        default="none",
+        help=(
+            "Optional query-level trigger for rescue-gated doc-doc cosine edges. "
+            "top_disagreement fires when dense and SPLADE top docs differ; support_margin "
+            "fires when the top two normalized doc support values are close."
+        ),
+    )
+    parser.add_argument(
+        "--doc-doc-confidence-margin",
+        type=float,
+        default=0.05,
+        help="Maximum normalized top-two doc support gap for --doc-doc-confidence-mode support_margin.",
     )
     parser.add_argument(
         "--doc-doc-hyperlink-weight-mode",
@@ -7322,6 +7368,129 @@ def page_embedding_cosine_doc_doc_scores(
     return pair_scores, metadata
 
 
+def mutual_top_embedding_pairs(
+    pair_scores: dict[tuple[str, str], float],
+    *,
+    top_k: int,
+) -> set[tuple[str, str]]:
+    if top_k <= 0:
+        return set(pair_scores)
+
+    neighbors: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    for (left_doc_id, right_doc_id), score in pair_scores.items():
+        neighbors[left_doc_id].append((right_doc_id, float(score)))
+        neighbors[right_doc_id].append((left_doc_id, float(score)))
+
+    top_neighbors: dict[str, set[str]] = {}
+    for doc_id, items in neighbors.items():
+        ranked = sorted(items, key=lambda item: (-item[1], item[0]))
+        top_neighbors[doc_id] = {neighbor_doc_id for neighbor_doc_id, _score in ranked[:top_k]}
+
+    mutual_pairs: set[tuple[str, str]] = set()
+    for left_doc_id, right_doc_id in pair_scores:
+        if (
+            right_doc_id in top_neighbors.get(left_doc_id, set())
+            and left_doc_id in top_neighbors.get(right_doc_id, set())
+        ):
+            mutual_pairs.add((left_doc_id, right_doc_id))
+    return mutual_pairs
+
+
+def filter_doc_doc_pairs_by_rescue_band(
+    pair_scores: dict[tuple[str, str], float],
+    *,
+    doc_best_ranks: dict[str, int | None],
+    anchor_top_k: int,
+    rescue_rank_min: int,
+    rescue_rank_max: int,
+) -> dict[tuple[str, str], float]:
+    if not pair_scores:
+        return {}
+    if anchor_top_k <= 0 and rescue_rank_min <= 0 and rescue_rank_max <= 0:
+        return dict(pair_scores)
+
+    filtered: dict[tuple[str, str], float] = {}
+    for pair, score in pair_scores.items():
+        left_doc_id, right_doc_id = pair
+        left_rank = doc_best_ranks.get(left_doc_id)
+        right_rank = doc_best_ranks.get(right_doc_id)
+        if left_rank is None or right_rank is None:
+            continue
+
+        def is_anchor(rank: int) -> bool:
+            return anchor_top_k <= 0 or rank <= anchor_top_k
+
+        def is_rescue(rank: int) -> bool:
+            if rescue_rank_min > 0 and rank < rescue_rank_min:
+                return False
+            if rescue_rank_max > 0 and rank > rescue_rank_max:
+                return False
+            return True
+
+        if (is_anchor(left_rank) and is_rescue(right_rank)) or (
+            is_anchor(right_rank) and is_rescue(left_rank)
+        ):
+            filtered[pair] = score
+    return filtered
+
+
+def doc_doc_confidence_triggered(
+    *,
+    selected_doc_ids: set[str],
+    dense_doc_ranks: dict[str, int],
+    sparse_doc_ranks: dict[str, int],
+    source_weights: SourceWeights,
+    args: argparse.Namespace,
+) -> tuple[bool, dict[str, object]]:
+    mode = str(args.doc_doc_confidence_mode)
+    metadata: dict[str, object] = {
+        "doc_doc_confidence_mode": mode,
+        "doc_doc_confidence_triggered": True,
+        "doc_doc_confidence_top_dense_doc": None,
+        "doc_doc_confidence_top_sparse_doc": None,
+        "doc_doc_confidence_top_disagreement": False,
+        "doc_doc_confidence_support_margin": None,
+        "doc_doc_confidence_margin_threshold": float(args.doc_doc_confidence_margin),
+    }
+    if mode == "none":
+        return True, metadata
+
+    top_dense_doc = min(dense_doc_ranks, key=dense_doc_ranks.get) if dense_doc_ranks else None
+    top_sparse_doc = min(sparse_doc_ranks, key=sparse_doc_ranks.get) if sparse_doc_ranks else None
+    top_disagreement = bool(top_dense_doc and top_sparse_doc and top_dense_doc != top_sparse_doc)
+    metadata["doc_doc_confidence_top_dense_doc"] = top_dense_doc
+    metadata["doc_doc_confidence_top_sparse_doc"] = top_sparse_doc
+    metadata["doc_doc_confidence_top_disagreement"] = top_disagreement
+
+    supports = doc_doc_support_values(
+        doc_ids=selected_doc_ids,
+        dense_doc_ranks=dense_doc_ranks,
+        sparse_doc_ranks=sparse_doc_ranks,
+        source_weights=source_weights,
+        args=args,
+    )
+    ranked_supports = sorted(supports.values(), reverse=True)
+    support_margin = (
+        float(ranked_supports[0] - ranked_supports[1])
+        if len(ranked_supports) >= 2
+        else None
+    )
+    margin_triggered = (
+        support_margin is not None
+        and support_margin <= float(args.doc_doc_confidence_margin)
+    )
+    metadata["doc_doc_confidence_support_margin"] = support_margin
+
+    if mode == "top_disagreement":
+        triggered = top_disagreement
+    elif mode == "support_margin":
+        triggered = bool(margin_triggered)
+    else:
+        triggered = bool(top_disagreement or margin_triggered)
+    metadata["doc_doc_confidence_triggered"] = triggered
+    return triggered, metadata
+
+
 def hyperlink_citation_initial_score(raw_link_count: int, mode: str) -> float:
     count = max(1, int(raw_link_count))
     if mode == "uniform":
@@ -7528,6 +7697,15 @@ def add_doc_doc_edges(
         "doc_doc_embedding_gate_mode": "none",
         "doc_doc_embedding_gate_pair_count": 0,
         "doc_doc_embedding_gated_pair_count": 0,
+        "doc_doc_embedding_mutual_top_k": int(args.doc_doc_embedding_mutual_top_k),
+        "doc_doc_embedding_mutual_pair_count": 0,
+        "doc_doc_rescue_anchor_top_k": int(args.doc_doc_rescue_anchor_top_k),
+        "doc_doc_rescue_rank_min": int(args.doc_doc_rescue_rank_min),
+        "doc_doc_rescue_rank_max": int(args.doc_doc_rescue_rank_max),
+        "doc_doc_embedding_rescue_pair_count": 0,
+        "doc_doc_confidence_mode": str(args.doc_doc_confidence_mode),
+        "doc_doc_confidence_triggered": False,
+        "doc_doc_confidence_support_margin": None,
         "doc_doc_hyperlink_pair_count": 0,
         "doc_doc_fully_connected_pair_count": 0,
     }
@@ -7606,6 +7784,7 @@ def add_doc_doc_edges(
         "page_embedding_cosine",
         "page_embedding_cosine_dense_sparse_gated",
         "page_embedding_cosine_semantic_gated",
+        "page_embedding_cosine_rescue_gated",
     }:
         embedding_scores, embedding_metadata = page_embedding_cosine_doc_doc_scores(
             selected_doc_ids=selected_doc_ids,
@@ -7649,6 +7828,52 @@ def add_doc_doc_edges(
                 if pair in gate_scores
             }
             metadata["doc_doc_embedding_gated_pair_count"] = len(embedding_scores)
+        elif mode == "page_embedding_cosine_rescue_gated":
+            triggered, confidence_metadata = doc_doc_confidence_triggered(
+                selected_doc_ids=selected_doc_ids,
+                dense_doc_ranks=dense_doc_ranks,
+                sparse_doc_ranks=sparse_doc_ranks,
+                source_weights=source_weights,
+                args=args,
+            )
+            metadata.update(confidence_metadata)
+            if not triggered:
+                embedding_scores = {}
+            else:
+                mutual_pairs = mutual_top_embedding_pairs(
+                    embedding_scores,
+                    top_k=int(args.doc_doc_embedding_mutual_top_k),
+                )
+                metadata["doc_doc_embedding_mutual_pair_count"] = len(mutual_pairs)
+                embedding_scores = {
+                    pair: score
+                    for pair, score in embedding_scores.items()
+                    if pair in mutual_pairs
+                }
+                gate_scores = dense_sparse_agreement_doc_doc_scores(
+                    selected_doc_ids=selected_doc_ids,
+                    dense_doc_ranks=dense_doc_ranks,
+                    sparse_doc_ranks=sparse_doc_ranks,
+                    source_weights=source_weights,
+                    args=args,
+                )
+                metadata["doc_doc_dense_sparse_agreement_pair_count"] = len(gate_scores)
+                metadata["doc_doc_embedding_gate_mode"] = "dense_sparse_agreement_rescue"
+                metadata["doc_doc_embedding_gate_pair_count"] = len(gate_scores)
+                embedding_scores = {
+                    pair: score * gate_scores[pair]
+                    for pair, score in embedding_scores.items()
+                    if pair in gate_scores
+                }
+                metadata["doc_doc_embedding_gated_pair_count"] = len(embedding_scores)
+                embedding_scores = filter_doc_doc_pairs_by_rescue_band(
+                    embedding_scores,
+                    doc_best_ranks=doc_best_ranks,
+                    anchor_top_k=int(args.doc_doc_rescue_anchor_top_k),
+                    rescue_rank_min=int(args.doc_doc_rescue_rank_min),
+                    rescue_rank_max=int(args.doc_doc_rescue_rank_max),
+                )
+                metadata["doc_doc_embedding_rescue_pair_count"] = len(embedding_scores)
 
         for pair, score in embedding_scores.items():
             pair_scores[pair] = pair_scores.get(pair, 0.0) + score
@@ -8917,6 +9142,12 @@ def main() -> None:
                     args.doc_doc_embedding_min_similarity
                 ),
                 "doc_doc_embedding_cache_docs": int(args.doc_doc_embedding_cache_docs),
+                "doc_doc_embedding_mutual_top_k": int(args.doc_doc_embedding_mutual_top_k),
+                "doc_doc_rescue_anchor_top_k": int(args.doc_doc_rescue_anchor_top_k),
+                "doc_doc_rescue_rank_min": int(args.doc_doc_rescue_rank_min),
+                "doc_doc_rescue_rank_max": int(args.doc_doc_rescue_rank_max),
+                "doc_doc_confidence_mode": args.doc_doc_confidence_mode,
+                "doc_doc_confidence_margin": float(args.doc_doc_confidence_margin),
                 "doc_doc_hyperlink_weight_mode": args.doc_doc_hyperlink_weight_mode,
                 "doc_doc_hyperlink_init_mode": args.doc_doc_hyperlink_init_mode,
                 "doc_doc_hyperlink_source_seed_floor": float(
@@ -9230,6 +9461,12 @@ def main() -> None:
         "doc_doc_embedding_page_top_k": int(args.doc_doc_embedding_page_top_k),
         "doc_doc_embedding_min_similarity": float(args.doc_doc_embedding_min_similarity),
         "doc_doc_embedding_cache_docs": int(args.doc_doc_embedding_cache_docs),
+        "doc_doc_embedding_mutual_top_k": int(args.doc_doc_embedding_mutual_top_k),
+        "doc_doc_rescue_anchor_top_k": int(args.doc_doc_rescue_anchor_top_k),
+        "doc_doc_rescue_rank_min": int(args.doc_doc_rescue_rank_min),
+        "doc_doc_rescue_rank_max": int(args.doc_doc_rescue_rank_max),
+        "doc_doc_confidence_mode": args.doc_doc_confidence_mode,
+        "doc_doc_confidence_margin": float(args.doc_doc_confidence_margin),
         "doc_doc_hyperlink_weight_mode": args.doc_doc_hyperlink_weight_mode,
         "doc_doc_hyperlink_init_mode": args.doc_doc_hyperlink_init_mode,
         "doc_doc_hyperlink_source_seed_floor": float(args.doc_doc_hyperlink_source_seed_floor),
@@ -9546,6 +9783,31 @@ def main() -> None:
             statistics.fmean(
                 float(row["graph"].get("doc_doc_embedding_gated_pair_count", 0.0))
                 for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_embedding_mutual_pair_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_embedding_mutual_pair_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_embedding_rescue_pair_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_embedding_rescue_pair_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "doc_doc_confidence_triggered_qid_count": (
+            sum(
+                1
+                for row in per_qid
+                if bool(row["graph"].get("doc_doc_confidence_triggered", False))
             )
             if per_qid
             else None

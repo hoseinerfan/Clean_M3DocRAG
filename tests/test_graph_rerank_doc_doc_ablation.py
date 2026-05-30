@@ -37,6 +37,12 @@ def make_args(**overrides):
         "doc_doc_embedding_page_top_k": 0,
         "doc_doc_embedding_min_similarity": 0.0,
         "doc_doc_embedding_cache_docs": 128,
+        "doc_doc_embedding_mutual_top_k": 3,
+        "doc_doc_rescue_anchor_top_k": 4,
+        "doc_doc_rescue_rank_min": 5,
+        "doc_doc_rescue_rank_max": 20,
+        "doc_doc_confidence_mode": "none",
+        "doc_doc_confidence_margin": 0.05,
         "doc_doc_hyperlink_weight_mode": "log_count",
         "doc_doc_hyperlink_init_mode": "log_count",
         "doc_doc_hyperlink_source_seed_floor": 0.5,
@@ -362,6 +368,52 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
         self.assertEqual(pair_scores, {})
         self.assertFalse(metadata["doc_doc_embedding_available"])
         self.assertEqual(metadata["doc_doc_embedding_missing_doc_count"], 2)
+
+    def test_rescue_gated_page_embedding_cosine_keeps_mutual_anchor_to_rescue_pair(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0, dense_rank=1),
+            "B_page0": MODULE.PageRecord(doc_id="B", page_idx=0, dense_rank=6),
+            "C_page0": MODULE.PageRecord(doc_id="C", page_idx=0, dense_rank=7),
+        }
+        provider = FakePageEmbeddingProvider(
+            {
+                ("A", 0): [1.0, 0.0],
+                ("B", 0): [0.99, 0.01],
+                ("C", 0): [0.9, -0.1],
+            }
+        )
+        graph = {}
+
+        metadata = MODULE.add_doc_doc_edges(
+            graph=graph,
+            records=records,
+            page_seed={"A_page0": 1.0, "B_page0": 0.5, "C_page0": 0.4},
+            dense_doc_ranks={"A": 1, "B": 6, "C": 7},
+            sparse_doc_ranks={"A": 1, "B": 6, "C": 7},
+            source_weights=MODULE.SourceWeights(1.25, 0.75, {}),
+            sparse_index=None,
+            page_embedding_provider=provider,
+            page_breadcrumbs={},
+            page_entities={},
+            pdf_hyperlink_graph=None,
+            args=make_args(
+                doc_doc_edge_mode="page_embedding_cosine_rescue_gated",
+                doc_doc_page_embedding_dir="embeddings",
+                doc_doc_embedding_min_similarity=0.8,
+                doc_doc_embedding_mutual_top_k=1,
+                doc_doc_rescue_anchor_top_k=4,
+                doc_doc_rescue_rank_min=5,
+                doc_doc_rescue_rank_max=20,
+                doc_doc_confidence_mode="none",
+            ),
+        )
+
+        self.assertIn(MODULE.doc_node_id("A"), graph)
+        self.assertIn(MODULE.doc_node_id("B"), graph[MODULE.doc_node_id("A")])
+        self.assertNotIn(MODULE.doc_node_id("C"), graph[MODULE.doc_node_id("A")])
+        self.assertEqual(metadata["doc_doc_edge_pair_count"], 1)
+        self.assertEqual(metadata["doc_doc_embedding_mutual_pair_count"], 1)
+        self.assertEqual(metadata["doc_doc_embedding_rescue_pair_count"], 1)
 
     def test_hyperlink_citation_target_support_adapts_pair_weights(self) -> None:
         records = {
