@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
 
-if [[ -n "${M3DOCVQA_INTERNAL_ENV_LOADED:-}" && -n "${PYTHON_BIN:-}" && -n "${LOCAL_OUTPUT_DIR:-}" ]]; then
+if [[
+  -n "${M3DOCVQA_INTERNAL_ENV_LOADED:-}" &&
+  -n "${PYTHON_BIN:-}" &&
+  -n "${LOCAL_OUTPUT_DIR:-}" &&
+  -n "${SPLIT:-}" &&
+  -n "${GOLD:-}" &&
+  -n "${INDEX_NAME:-}"
+]]; then
   return 0 2>/dev/null || exit 0
 fi
 export M3DOCVQA_INTERNAL_ENV_LOADED=1
