@@ -170,6 +170,7 @@ class ExternalPageGraphEdge:
     source_page_uid: str
     target_page_uid: str | None = None
     target_doc_id: str | None = None
+    qid: str | None = None
     score: float = 1.0
     raw_weight: float = 1.0
     edge_type: str = ""
@@ -1168,6 +1169,7 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Optional page graph edge JSONL. Rows may contain source_page_uid and "
             "target_page_uid for page-page edges, or target_doc_id for page-doc edges. "
+            "Rows may also contain qid for query-specific edges. "
             "This is intended for learned layout/semantic graph edges such as "
             "LayoutLMv3 or DocGraphLM kNN links."
         ),
@@ -1654,6 +1656,7 @@ def load_external_page_graph(path: Path) -> ExternalPageGraph:
             if not line:
                 continue
             row = json.loads(line)
+            qid = str(row.get("qid", "")).strip() or None
             source_page_uid = str(row.get("source_page_uid", "")).strip()
             target_page_uid = str(row.get("target_page_uid", "")).strip() or None
             target_doc_id = str(row.get("target_doc_id", "")).strip() or None
@@ -1673,6 +1676,7 @@ def load_external_page_graph(path: Path) -> ExternalPageGraph:
                     source_page_uid=source_page_uid,
                     target_page_uid=target_page_uid,
                     target_doc_id=target_doc_id,
+                    qid=qid,
                     score=max(0.0, score),
                     raw_weight=max(0.0, raw_weight),
                     edge_type=edge_type,
@@ -6725,6 +6729,7 @@ def add_external_page_graph_edges(
     graph: dict[str, dict[str, float]],
     records: dict[str, PageRecord],
     external_page_graph: ExternalPageGraph | None,
+    qid: str | None = None,
     args: argparse.Namespace,
 ) -> dict[str, object]:
     if (
@@ -6741,6 +6746,7 @@ def add_external_page_graph_edges(
             "external_page_graph_target_top_k": int(args.external_page_graph_target_top_k),
             "external_page_graph_skipped_source_rank_gate": 0,
             "external_page_graph_skipped_target_rank_gate": 0,
+            "external_page_graph_skipped_qid_mismatch": 0,
             "external_page_graph_loaded_edge_count": (
                 external_page_graph.edge_count if external_page_graph is not None else 0
             ),
@@ -6756,6 +6762,7 @@ def add_external_page_graph_edges(
     target_top_k = max(0, int(args.external_page_graph_target_top_k))
     skipped_source_rank_gate = 0
     skipped_target_rank_gate = 0
+    skipped_qid_mismatch = 0
 
     for source_uid in sorted(records):
         source_edges = external_page_graph.by_source_page.get(source_uid, [])
@@ -6765,8 +6772,16 @@ def add_external_page_graph_edges(
         if not external_page_graph_passes_rank_gate(source_record, source_top_k):
             skipped_source_rank_gate += 1
             continue
+        filtered_edges: list[ExternalPageGraphEdge] = []
+        for edge in source_edges:
+            if edge.qid is not None and qid is not None and edge.qid != qid:
+                skipped_qid_mismatch += 1
+                continue
+            filtered_edges.append(edge)
+        if not filtered_edges:
+            continue
         ordered_edges = sorted(
-            source_edges,
+            filtered_edges,
             key=lambda edge: (
                 -external_page_graph_edge_weight(edge, args),
                 edge.target_page_uid or "",
@@ -6821,6 +6836,7 @@ def add_external_page_graph_edges(
         "external_page_graph_target_top_k": int(args.external_page_graph_target_top_k),
         "external_page_graph_skipped_source_rank_gate": skipped_source_rank_gate,
         "external_page_graph_skipped_target_rank_gate": skipped_target_rank_gate,
+        "external_page_graph_skipped_qid_mismatch": skipped_qid_mismatch,
     }
 
 
@@ -8195,6 +8211,7 @@ def build_qid_graph_ranking(
         graph=graph,
         records=records,
         external_page_graph=external_page_graph,
+        qid=qid,
         args=args,
     )
     same_doc_window = int(args.same_doc_window)

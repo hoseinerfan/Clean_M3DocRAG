@@ -63,6 +63,13 @@ def make_args(**overrides):
         "pdf_hyperlink_source_top_k": 0,
         "pdf_hyperlink_target_doc_top_k": 0,
         "pdf_hyperlink_query_support_weight_mode": "none",
+        "external_page_graph_jsonl": "external.jsonl",
+        "external_page_graph_edge_weight": 0.5,
+        "external_page_graph_direction": "as_directed",
+        "external_page_graph_weight_mode": "score",
+        "external_page_graph_max_edges_per_source": 0,
+        "external_page_graph_source_top_k": 0,
+        "external_page_graph_target_top_k": 0,
         "heading_breadcrumb_min_token_len": 3,
     }
     defaults.update(overrides)
@@ -576,6 +583,49 @@ class GraphRerankDocDocAblationTests(unittest.TestCase):
         self.assertEqual(metadata["pdf_hyperlink_edge_count_directed"], 2)
         self.assertEqual(metadata["pdf_hyperlink_target_page_count"], 2)
         self.assertEqual(metadata["pdf_hyperlink_target_doc_count"], 1)
+
+    def test_external_page_graph_edges_can_be_filtered_by_qid(self) -> None:
+        records = {
+            "A_page0": MODULE.PageRecord(doc_id="A", page_idx=0, dense_rank=1),
+            "B_page0": MODULE.PageRecord(doc_id="B", page_idx=0, dense_rank=2),
+            "C_page0": MODULE.PageRecord(doc_id="C", page_idx=0, dense_rank=3),
+        }
+        external_graph = MODULE.ExternalPageGraph(
+            by_source_page={
+                "A_page0": [
+                    MODULE.ExternalPageGraphEdge(
+                        source_page_uid="A_page0",
+                        target_page_uid="B_page0",
+                        qid="q1",
+                        score=1.0,
+                    ),
+                    MODULE.ExternalPageGraphEdge(
+                        source_page_uid="A_page0",
+                        target_page_uid="C_page0",
+                        qid="q2",
+                        score=1.0,
+                    ),
+                ]
+            },
+            edge_count=2,
+            source_page_count=1,
+            target_page_count=2,
+            target_doc_count=0,
+        )
+        graph: dict[str, dict[str, float]] = {}
+
+        metadata = MODULE.add_external_page_graph_edges(
+            graph=graph,
+            records=records,
+            external_page_graph=external_graph,
+            qid="q1",
+            args=make_args(),
+        )
+
+        self.assertAlmostEqual(graph["A_page0"]["B_page0"], 0.5)
+        self.assertNotIn("C_page0", graph["A_page0"])
+        self.assertEqual(metadata["external_page_graph_edge_count_directed"], 1)
+        self.assertEqual(metadata["external_page_graph_skipped_qid_mismatch"], 1)
 
     def test_shared_entity_title_topic_scores_shared_signals(self) -> None:
         records = {
