@@ -27,26 +27,32 @@ echo "using_page_embedding_dir=$PAGE_EMBEDDING_DIR"
 echo "using_query_embedding_dir=$QUERY_EMBEDDING_DIR"
 echo "saving_token_graph_jsonl=$TOKEN_GRAPH_JSONL"
 
-"$PYTHON_BIN" "$REPO_ROOT/scripts/build_faiss_token_neighbor_page_graph.py" \
-  --prediction-json "$DENSE_PRED" \
-  --query-embedding-dir "$QUERY_EMBEDDING_DIR" \
-  --page-embedding-dir "$PAGE_EMBEDDING_DIR" \
-  --doc-ids-json "$DOC_IDS_JSON" \
-  --faiss-index "$FAISS_TOKEN_INDEX" \
-  --faiss-nprobe "${TOKEN_GRAPH_FAISS_NPROBE:-$FAISS_NPROBE}" \
-  --output-jsonl "$TOKEN_GRAPH_JSONL" \
-  --summary-json "$TOKEN_GRAPH_SUMMARY" \
-  --source-page-top-k "${TOKEN_GRAPH_SOURCE_PAGE_TOP_K:-1000}" \
-  --target-page-top-k "${TOKEN_GRAPH_TARGET_PAGE_TOP_K:-1000}" \
-  --query-faiss-hit-k "${TOKEN_GRAPH_QUERY_FAISS_HIT_K:-224}" \
-  --source-token-top-k "${TOKEN_GRAPH_SOURCE_TOKEN_TOP_K:-128}" \
-  --neighbor-token-k "${TOKEN_GRAPH_NEIGHBOR_TOKEN_K:-10}" \
-  --max-edges-per-source-page "${TOKEN_GRAPH_MAX_EDGES_PER_SOURCE_PAGE:-10}" \
-  --min-source-score "${TOKEN_GRAPH_MIN_SOURCE_SCORE:-0.0}" \
-  --min-neighbor-score "${TOKEN_GRAPH_MIN_NEIGHBOR_SCORE:-0.0}" \
-  --edge-value-mode "${TOKEN_GRAPH_EDGE_VALUE_MODE:-neighbor}" \
-  --edge-aggregation "${TOKEN_GRAPH_EDGE_AGGREGATION:-log_count}" \
-  --score-normalization "${TOKEN_GRAPH_SCORE_NORMALIZATION:-per_source_page}"
+TOKEN_GRAPH_REBUILD="${TOKEN_GRAPH_REBUILD:-0}"
+if [[ "$TOKEN_GRAPH_REBUILD" == "1" || ! -s "$TOKEN_GRAPH_JSONL" ]]; then
+  "$PYTHON_BIN" "$REPO_ROOT/scripts/build_faiss_token_neighbor_page_graph.py" \
+    --prediction-json "$DENSE_PRED" \
+    --query-embedding-dir "$QUERY_EMBEDDING_DIR" \
+    --page-embedding-dir "$PAGE_EMBEDDING_DIR" \
+    --doc-ids-json "$DOC_IDS_JSON" \
+    --faiss-index "$FAISS_TOKEN_INDEX" \
+    --faiss-nprobe "${TOKEN_GRAPH_FAISS_NPROBE:-$FAISS_NPROBE}" \
+    --output-jsonl "$TOKEN_GRAPH_JSONL" \
+    --summary-json "$TOKEN_GRAPH_SUMMARY" \
+    --source-page-top-k "${TOKEN_GRAPH_SOURCE_PAGE_TOP_K:-1000}" \
+    --target-page-top-k "${TOKEN_GRAPH_TARGET_PAGE_TOP_K:-1000}" \
+    --query-faiss-hit-k "${TOKEN_GRAPH_QUERY_FAISS_HIT_K:-224}" \
+    --source-token-top-k "${TOKEN_GRAPH_SOURCE_TOKEN_TOP_K:-128}" \
+    --neighbor-token-k "${TOKEN_GRAPH_NEIGHBOR_TOKEN_K:-10}" \
+    --max-edges-per-source-page "${TOKEN_GRAPH_MAX_EDGES_PER_SOURCE_PAGE:-10}" \
+    --min-source-score "${TOKEN_GRAPH_MIN_SOURCE_SCORE:-0.0}" \
+    --min-neighbor-score "${TOKEN_GRAPH_MIN_NEIGHBOR_SCORE:-0.0}" \
+    --edge-value-mode "${TOKEN_GRAPH_EDGE_VALUE_MODE:-neighbor}" \
+    --edge-aggregation "${TOKEN_GRAPH_EDGE_AGGREGATION:-log_count}" \
+    --score-normalization "${TOKEN_GRAPH_SCORE_NORMALIZATION:-per_source_page}"
+else
+  echo "reusing_token_graph_jsonl=$TOKEN_GRAPH_JSONL"
+  echo "set TOKEN_GRAPH_REBUILD=1 to rebuild the FAISS token-neighbor edges"
+fi
 
 EXTERNAL_PAGE_GRAPH_JSONL="$TOKEN_GRAPH_JSONL" \
 EXTERNAL_PAGE_GRAPH_EDGE_WEIGHT="${EXTERNAL_PAGE_GRAPH_EDGE_WEIGHT:-0.10}" \
