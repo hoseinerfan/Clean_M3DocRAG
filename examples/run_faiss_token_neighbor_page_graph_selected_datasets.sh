@@ -41,6 +41,13 @@ TOKEN_GRAPH_EDGE_AGGREGATION="${TOKEN_GRAPH_EDGE_AGGREGATION:-log_count}"
 TOKEN_GRAPH_SCORE_NORMALIZATION="${TOKEN_GRAPH_SCORE_NORMALIZATION:-per_source_page}"
 TOKEN_GRAPH_REBUILD="${TOKEN_GRAPH_REBUILD:-0}"
 TOKEN_GRAPH_PREFLIGHT_ONLY="${TOKEN_GRAPH_PREFLIGHT_ONLY:-0}"
+TOKEN_GRAPH_AUTO_EXPORT_QUERY_EMBEDDINGS="${TOKEN_GRAPH_AUTO_EXPORT_QUERY_EMBEDDINGS:-1}"
+TOKEN_GRAPH_QUERY_BATCH_SIZE="${TOKEN_GRAPH_QUERY_BATCH_SIZE:-16}"
+TOKEN_GRAPH_QUERY_TOKEN_FILTER="${TOKEN_GRAPH_QUERY_TOKEN_FILTER:-full}"
+TOKEN_GRAPH_QUERY_EMBEDDING_KEY="${TOKEN_GRAPH_QUERY_EMBEDDING_KEY:-embeddings}"
+TOKEN_GRAPH_RETRIEVAL_MODEL_NAME_OR_PATH="${TOKEN_GRAPH_RETRIEVAL_MODEL_NAME_OR_PATH:-colpaligemma-3b-pt-448-base}"
+TOKEN_GRAPH_RETRIEVAL_ADAPTER_MODEL_NAME_OR_PATH="${TOKEN_GRAPH_RETRIEVAL_ADAPTER_MODEL_NAME_OR_PATH:-colpali-v1.2}"
+TOKEN_GRAPH_QUERY_EXPORT_DEVICE="${TOKEN_GRAPH_QUERY_EXPORT_DEVICE:-auto}"
 
 require_value() {
   local name="$1"
@@ -261,6 +268,41 @@ build_token_graph() {
   fi
 }
 
+ensure_query_embeddings() {
+  local gold="$1"
+  local query_embedding_dir="$2"
+  local label_prefix="$3"
+
+  if [[ -d "$query_embedding_dir" ]] && has_safetensor_files "$query_embedding_dir"; then
+    return
+  fi
+
+  if [[ "$TOKEN_GRAPH_AUTO_EXPORT_QUERY_EMBEDDINGS" != "1" ]]; then
+    require_dir query_embedding_dir "$query_embedding_dir"
+    if ! has_safetensor_files "$query_embedding_dir"; then
+      echo "missing_query_embedding_files: $query_embedding_dir" >&2
+      exit 1
+    fi
+    return
+  fi
+
+  echo "query_embeddings_missing_or_empty=$query_embedding_dir"
+  echo "exporting_query_embeddings=$query_embedding_dir"
+  mkdir -p "$query_embedding_dir"
+  "$PYTHON_BIN" "$REPO_ROOT/scripts/export_colpali_query_embeddings.py" \
+    --gold-jsonl "$gold" \
+    --output-dir "$query_embedding_dir" \
+    --batch-size "$TOKEN_GRAPH_QUERY_BATCH_SIZE" \
+    --query-token-filter "$TOKEN_GRAPH_QUERY_TOKEN_FILTER" \
+    --embedding-key "$TOKEN_GRAPH_QUERY_EMBEDDING_KEY" \
+    --retrieval-model-name-or-path "$TOKEN_GRAPH_RETRIEVAL_MODEL_NAME_OR_PATH" \
+    --retrieval-adapter-model-name-or-path "$TOKEN_GRAPH_RETRIEVAL_ADAPTER_MODEL_NAME_OR_PATH" \
+    --device "$TOKEN_GRAPH_QUERY_EXPORT_DEVICE" \
+    --resume \
+    --summary-json "$query_embedding_dir/${label_prefix}_query_embedding_export.summary.json" \
+    --metadata-jsonl "$query_embedding_dir/${label_prefix}_query_embedding_export.metadata.jsonl"
+}
+
 run_dataset() {
   local display_name="$1"
   local data_name="$2"
@@ -302,12 +344,7 @@ run_dataset() {
   require_file doc_ids_json "$doc_ids_json"
   require_file faiss_index "$faiss_index"
   require_dir page_embedding_dir "$page_embedding_dir"
-  require_dir query_embedding_dir "$query_embedding_dir"
-  if ! has_safetensor_files "$query_embedding_dir"; then
-    echo "missing_query_embedding_files: $query_embedding_dir" >&2
-    echo "Set QUERY_EMBEDDING_DIR, TOKEN_GRAPH_QUERY_EMBEDDING_DIR, or ${upper}_QUERY_EMBEDDING_DIR to saved ColPali query embeddings." >&2
-    exit 1
-  fi
+  ensure_query_embeddings "$gold" "$query_embedding_dir" "$label_prefix"
 
   mkdir -p "$out_dir" "$token_graph_dir"
 
