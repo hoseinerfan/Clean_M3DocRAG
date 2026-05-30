@@ -67,6 +67,8 @@ RECALL_TABLE_COLUMNS = [
     "mean_doc_doc_embedding_vector_doc_count",
     "mean_doc_doc_embedding_page_vector_count",
     "mean_doc_doc_embedding_pair_count",
+    "mean_doc_doc_embedding_gate_pair_count",
+    "mean_doc_doc_embedding_gated_pair_count",
     "mean_doc_doc_embedding_similarity",
     *[f"page@{k}" for k in RECALL_K_VALUES],
     *[f"doc@{k}" for k in RECALL_K_VALUES],

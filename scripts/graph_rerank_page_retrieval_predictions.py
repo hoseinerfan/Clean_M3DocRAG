@@ -1227,6 +1227,8 @@ def parse_args() -> argparse.Namespace:
             "shared_entity_title_topic",
             "semantic_similarity",
             "page_embedding_cosine",
+            "page_embedding_cosine_dense_sparse_gated",
+            "page_embedding_cosine_semantic_gated",
             "hyperlink_citation",
             "fully_connected",
             "all",
@@ -1236,6 +1238,10 @@ def parse_args() -> argparse.Namespace:
             "Optional direct doc-doc transitions for ablations. Each non-none mode links "
             "candidate document nodes using exactly one evidence family; "
             "'page_embedding_cosine' links docs by query-local pooled page embeddings, "
+            "'page_embedding_cosine_dense_sparse_gated' keeps those edges only when both "
+            "dense and sparse retrieved the doc pair, "
+            "'page_embedding_cosine_semantic_gated' keeps them only when SPLADE page-term "
+            "semantic overlap also supports the pair, "
             "'fully_connected' links all selected docs, and 'all' combines the historical "
             "evidence families."
         ),
@@ -7519,6 +7525,9 @@ def add_doc_doc_edges(
         "mean_doc_doc_embedding_similarity": None,
         "max_doc_doc_embedding_similarity": None,
         "doc_doc_embedding_error": None,
+        "doc_doc_embedding_gate_mode": "none",
+        "doc_doc_embedding_gate_pair_count": 0,
+        "doc_doc_embedding_gated_pair_count": 0,
         "doc_doc_hyperlink_pair_count": 0,
         "doc_doc_fully_connected_pair_count": 0,
     }
@@ -7593,7 +7602,11 @@ def add_doc_doc_edges(
         for pair, score in semantic_scores.items():
             pair_scores[pair] = pair_scores.get(pair, 0.0) + score
 
-    if mode == "page_embedding_cosine":
+    if mode in {
+        "page_embedding_cosine",
+        "page_embedding_cosine_dense_sparse_gated",
+        "page_embedding_cosine_semantic_gated",
+    }:
         embedding_scores, embedding_metadata = page_embedding_cosine_doc_doc_scores(
             selected_doc_ids=selected_doc_ids,
             records=records,
@@ -7602,6 +7615,41 @@ def add_doc_doc_edges(
             args=args,
         )
         metadata.update(embedding_metadata)
+        if mode == "page_embedding_cosine_dense_sparse_gated":
+            gate_scores = dense_sparse_agreement_doc_doc_scores(
+                selected_doc_ids=selected_doc_ids,
+                dense_doc_ranks=dense_doc_ranks,
+                sparse_doc_ranks=sparse_doc_ranks,
+                source_weights=source_weights,
+                args=args,
+            )
+            metadata["doc_doc_dense_sparse_agreement_pair_count"] = len(gate_scores)
+            metadata["doc_doc_embedding_gate_mode"] = "dense_sparse_agreement"
+            metadata["doc_doc_embedding_gate_pair_count"] = len(gate_scores)
+            embedding_scores = {
+                pair: score * gate_scores[pair]
+                for pair, score in embedding_scores.items()
+                if pair in gate_scores
+            }
+            metadata["doc_doc_embedding_gated_pair_count"] = len(embedding_scores)
+        elif mode == "page_embedding_cosine_semantic_gated":
+            gate_scores, semantic_metadata = semantic_similarity_doc_doc_scores(
+                selected_doc_ids=selected_doc_ids,
+                records=records,
+                page_seed=page_seed,
+                sparse_index=sparse_index,
+                args=args,
+            )
+            metadata.update(semantic_metadata)
+            metadata["doc_doc_embedding_gate_mode"] = "semantic_similarity"
+            metadata["doc_doc_embedding_gate_pair_count"] = len(gate_scores)
+            embedding_scores = {
+                pair: score * gate_scores[pair]
+                for pair, score in embedding_scores.items()
+                if pair in gate_scores
+            }
+            metadata["doc_doc_embedding_gated_pair_count"] = len(embedding_scores)
+
         for pair, score in embedding_scores.items():
             pair_scores[pair] = pair_scores.get(pair, 0.0) + score
 
@@ -8456,7 +8504,11 @@ def main() -> None:
     dense_pred = load_prediction(Path(args.dense_prediction_json))
     sparse_pred = load_prediction(Path(args.sparse_prediction_json))
     sparse_index = None
-    needs_doc_doc_semantic = str(args.doc_doc_edge_mode) in {"semantic_similarity", "all"}
+    needs_doc_doc_semantic = str(args.doc_doc_edge_mode) in {
+        "semantic_similarity",
+        "page_embedding_cosine_semantic_gated",
+        "all",
+    }
     need_sparse_index = bool(args.splade_index_pt) and (
         int(args.expansion_top_pages) > 0 or int(args.neighbor_expansion_window) > 0
         or needs_doc_doc_semantic
@@ -9477,6 +9529,22 @@ def main() -> None:
         "mean_doc_doc_embedding_pair_count": (
             statistics.fmean(
                 float(row["graph"].get("doc_doc_embedding_pair_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_embedding_gate_pair_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_embedding_gate_pair_count", 0.0))
+                for row in per_qid
+            )
+            if per_qid
+            else None
+        ),
+        "mean_doc_doc_embedding_gated_pair_count": (
+            statistics.fmean(
+                float(row["graph"].get("doc_doc_embedding_gated_pair_count", 0.0))
                 for row in per_qid
             )
             if per_qid
