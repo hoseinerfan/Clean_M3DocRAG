@@ -173,6 +173,16 @@ def run_model(
 def evaluate(data_loader, rag_model, index=None, data_len=None, args=None, **kwargs):
     if data_len is not None:
         logger.info(f"eval on the first {data_len} items")
+    if args.eval_num_shards < 1:
+        raise ValueError(f"eval_num_shards must be >= 1, got {args.eval_num_shards}")
+    if args.eval_shard_id < 0 or args.eval_shard_id >= args.eval_num_shards:
+        raise ValueError(
+            f"eval_shard_id must be in [0, {args.eval_num_shards}), got {args.eval_shard_id}"
+        )
+    if args.eval_num_shards > 1:
+        logger.info(
+            f"eval shard enabled: shard_id={args.eval_shard_id} num_shards={args.eval_num_shards}"
+        )
 
     # docid2embs = data_loader.dataset.load_all_embeddings()
 
@@ -242,7 +252,12 @@ def evaluate(data_loader, rag_model, index=None, data_len=None, args=None, **kwa
     total_time_retrieval = 0
     total_time_qa = 0
 
+    processed_count = 0
+    skipped_count = 0
     for batch_idx, batch in enumerate(tqdm(data_loader)):
+        if args.eval_num_shards > 1 and batch_idx % args.eval_num_shards != args.eval_shard_id:
+            skipped_count += 1
+            continue
         bs = len(batch["question"])
 
         # Single batch
@@ -272,12 +287,16 @@ def evaluate(data_loader, rag_model, index=None, data_len=None, args=None, **kwa
             total_time_retrieval += outputs["time_retrieval"]
 
         qid2result[qid] = outputs
+        processed_count += 1
 
     logger.info(total_time_qa)
     logger.info(total_time_retrieval)
+    logger.info(f"processed_count={processed_count}")
+    logger.info(f"skipped_count={skipped_count}")
 
-    avg_time_qa = total_time_qa / len(data_loader)
-    avg_time_retrieval = total_time_retrieval / len(data_loader)
+    avg_denominator = max(processed_count, 1)
+    avg_time_qa = total_time_qa / avg_denominator
+    avg_time_retrieval = total_time_retrieval / avg_denominator
     logger.info(avg_time_qa)
     logger.info(avg_time_retrieval)
 

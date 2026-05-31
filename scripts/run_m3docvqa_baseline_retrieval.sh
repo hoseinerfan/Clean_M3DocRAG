@@ -12,7 +12,14 @@ FAISS_TOKEN_TABLE_MODE="${FAISS_TOKEN_TABLE_MODE:-load_embeddings}"
 FAISS_INDEX_SCORE_SOURCE="${FAISS_INDEX_SCORE_SOURCE:-embedding}"
 BASELINE_RETR_OUT_DIR="${BASELINE_RETR_OUT_DIR:-$LOCAL_OUTPUT_DIR/m3docvqa_baseline_mmqa_${SPLIT}}"
 BASELINE_RUN_DIR="${BASELINE_RUN_DIR:-$BASELINE_RETR_OUT_DIR/raw_run_outputs}"
-BASELINE_LABEL="${BASELINE_LABEL:-mmqa_${SPLIT}_baseline_ret${N_RETRIEVAL_PAGES}_${FAISS_INDEX_TYPE}_nprobe${FAISS_NPROBE}}"
+SHARD_ID="${SHARD_ID:-0}"
+NUM_SHARDS="${NUM_SHARDS:-1}"
+if [[ "$NUM_SHARDS" -gt 1 ]]; then
+  DEFAULT_BASELINE_LABEL="mmqa_${SPLIT}_baseline_ret${N_RETRIEVAL_PAGES}_${FAISS_INDEX_TYPE}_nprobe${FAISS_NPROBE}_shard${SHARD_ID}_of_${NUM_SHARDS}"
+else
+  DEFAULT_BASELINE_LABEL="mmqa_${SPLIT}_baseline_ret${N_RETRIEVAL_PAGES}_${FAISS_INDEX_TYPE}_nprobe${FAISS_NPROBE}"
+fi
+BASELINE_LABEL="${BASELINE_LABEL:-$DEFAULT_BASELINE_LABEL}"
 OUTPUT_PRED="${OUTPUT_PRED:-$BASELINE_RETR_OUT_DIR/${BASELINE_LABEL}.prediction.json}"
 OUTPUT_EVAL="${OUTPUT_EVAL:-$BASELINE_RETR_OUT_DIR/${BASELINE_LABEL}.eval.json}"
 
@@ -30,6 +37,8 @@ echo "using_n_retrieval_pages=$N_RETRIEVAL_PAGES"
 echo "using_ignore_pad_scores=${IGNORE_PAD_SCORES_IN_FINAL_RANKING}"
 echo "using_faiss_token_table_mode=$FAISS_TOKEN_TABLE_MODE"
 echo "using_faiss_index_score_source=$FAISS_INDEX_SCORE_SOURCE"
+echo "using_shard_id=$SHARD_ID"
+echo "using_num_shards=$NUM_SHARDS"
 echo "using_baseline_run_dir=$BASELINE_RUN_DIR"
 echo "using_output_pred=$OUTPUT_PRED"
 echo "using_output_eval=$OUTPUT_EVAL"
@@ -50,6 +59,8 @@ ARGS=(
   --faiss_nprobe="$FAISS_NPROBE"
   --faiss_token_table_mode="$FAISS_TOKEN_TABLE_MODE"
   --faiss_index_score_source="$FAISS_INDEX_SCORE_SOURCE"
+  --eval_shard_id="$SHARD_ID"
+  --eval_num_shards="$NUM_SHARDS"
   --output_dir="$BASELINE_RUN_DIR"
 )
 if [[ "$IGNORE_PAD_SCORES_IN_FINAL_RANKING" == "1" ]]; then

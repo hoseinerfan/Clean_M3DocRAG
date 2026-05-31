@@ -26,6 +26,8 @@ class TrainingArguments(transformers.TrainingArguments):
     split: str = 'train'
     data_name: str = field(default='m3-docvqa', metadata={"help": "Local name to be stored at LOCAL_DATA_DIR"})
     data_len: int = field(default=None, metadata={"help": "number of examples to subsample from dataset"})
+    eval_num_shards: int = field(default=1, metadata={"help": "Number of modulo shards for retrieval evaluation."})
+    eval_shard_id: int = field(default=0, metadata={"help": "Modulo shard id to evaluate when eval_num_shards > 1."})
     use_dummy_images: bool = field(default=False, metadata={"help": "if true, skip downloading images"})
     load_embedding: bool = False
     embedding_name: str = "colpali-v1.2_m3-docvqa_dev"
