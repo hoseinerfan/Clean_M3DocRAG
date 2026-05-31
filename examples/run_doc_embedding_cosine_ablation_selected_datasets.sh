@@ -43,6 +43,13 @@ DOC_DOC_RESCUE_RANK_MIN="${DOC_DOC_RESCUE_RANK_MIN:-5}"
 DOC_DOC_RESCUE_RANK_MAX="${DOC_DOC_RESCUE_RANK_MAX:-20}"
 DOC_DOC_CONFIDENCE_MODE="${DOC_DOC_CONFIDENCE_MODE:-top_disagreement_or_margin}"
 DOC_DOC_CONFIDENCE_MARGIN="${DOC_DOC_CONFIDENCE_MARGIN:-0.05}"
+DOC_EMBED_RUN_BASELINE="${DOC_EMBED_RUN_BASELINE:-1}"
+DOC_EMBED_RUN_RAW_VARIANTS="${DOC_EMBED_RUN_RAW_VARIANTS:-1}"
+DOC_EMBED_RUN_DENSE_SPARSE_GATED="${DOC_EMBED_RUN_DENSE_SPARSE_GATED:-1}"
+DOC_EMBED_RUN_SEMANTIC_GATED="${DOC_EMBED_RUN_SEMANTIC_GATED:-1}"
+DOC_EMBED_RUN_RESCUE_GATED="${DOC_EMBED_RUN_RESCUE_GATED:-1}"
+DOC_EMBED_OUTPUT_SUBDIR="${DOC_EMBED_OUTPUT_SUBDIR:-doc_embedding_cosine_ablation}"
+DOC_EMBED_LABEL_SUFFIX="${DOC_EMBED_LABEL_SUFFIX:-}"
 
 require_value() {
   local name="$1"
@@ -213,8 +220,9 @@ run_dataset() {
   local sparse_dir
   local splade_index
 
+  label_prefix="${label_prefix}${DOC_EMBED_LABEL_SUFFIX}"
   data_root="$(dirname "$gold")"
-  out_dir="$work_root/output/$output_slug/doc_embedding_cosine_ablation"
+  out_dir="$work_root/output/$output_slug/$DOC_EMBED_OUTPUT_SUBDIR"
   page_embedding_dir="$(resolve_embedding_dir "$upper" "$work_root/embeddings/$embedding_name")"
   sparse_dir="$(cd "$(dirname "$sparse_pred")" && pwd)"
   splade_index="${SPLADE_INDEX_PT:-$sparse_dir/${data_name}_splade_page_index.pt}"
@@ -234,25 +242,35 @@ run_dataset() {
   echo "using_doc_doc_embedding_page_top_k=$DOC_DOC_EMBEDDING_PAGE_TOP_K"
   echo "using_doc_doc_rescue_gate=mutual_top_k:$DOC_DOC_EMBEDDING_MUTUAL_TOP_K anchor_top_k:$DOC_DOC_RESCUE_ANCHOR_TOP_K rescue_rank:${DOC_DOC_RESCUE_RANK_MIN}-${DOC_DOC_RESCUE_RANK_MAX} confidence:$DOC_DOC_CONFIDENCE_MODE margin:$DOC_DOC_CONFIDENCE_MARGIN"
 
-  run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-    "$out_dir" "$label_prefix" no_doc_embed none 0.0 "" 0.0
-  run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-    "$out_dir" "$label_prefix" doc_embed_cosine_sim0p00 page_embedding_cosine "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.0
-  run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-    "$out_dir" "$label_prefix" doc_embed_cosine_sim0p50 page_embedding_cosine "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50
-  run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-    "$out_dir" "$label_prefix" doc_embed_cosine_dense_sparse_gated_sim0p50 \
-    page_embedding_cosine_dense_sparse_gated "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50
-  if [[ -f "$splade_index" ]]; then
+  if [[ "$DOC_EMBED_RUN_BASELINE" == "1" ]]; then
     run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-      "$out_dir" "$label_prefix" doc_embed_cosine_semantic_gated_sim0p50 \
-      page_embedding_cosine_semantic_gated "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50 "$splade_index"
-  else
-    echo "skip_doc_embed_cosine_semantic_gated_missing_splade_index: $splade_index" >&2
+      "$out_dir" "$label_prefix" no_doc_embed none 0.0 "" 0.0
   fi
-  run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
-    "$out_dir" "$label_prefix" doc_embed_cosine_rescue_gated_sim0p50 \
-    page_embedding_cosine_rescue_gated "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50
+  if [[ "$DOC_EMBED_RUN_RAW_VARIANTS" == "1" ]]; then
+    run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+      "$out_dir" "$label_prefix" doc_embed_cosine_sim0p00 page_embedding_cosine "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.0
+    run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+      "$out_dir" "$label_prefix" doc_embed_cosine_sim0p50 page_embedding_cosine "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50
+  fi
+  if [[ "$DOC_EMBED_RUN_DENSE_SPARSE_GATED" == "1" ]]; then
+    run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+      "$out_dir" "$label_prefix" doc_embed_cosine_dense_sparse_gated_sim0p50 \
+      page_embedding_cosine_dense_sparse_gated "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50
+  fi
+  if [[ "$DOC_EMBED_RUN_SEMANTIC_GATED" == "1" ]]; then
+    if [[ -f "$splade_index" ]]; then
+      run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+        "$out_dir" "$label_prefix" doc_embed_cosine_semantic_gated_sim0p50 \
+        page_embedding_cosine_semantic_gated "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50 "$splade_index"
+    else
+      echo "skip_doc_embed_cosine_semantic_gated_missing_splade_index: $splade_index" >&2
+    fi
+  fi
+  if [[ "$DOC_EMBED_RUN_RESCUE_GATED" == "1" ]]; then
+    run_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
+      "$out_dir" "$label_prefix" doc_embed_cosine_rescue_gated_sim0p50 \
+      page_embedding_cosine_rescue_gated "$DOC_DOC_EDGE_WEIGHT" "$page_embedding_dir" 0.50
+  fi
 
   summary_paths=( "$out_dir/${label_prefix}_"*.summary.json )
   if [[ -e "${summary_paths[0]}" ]]; then

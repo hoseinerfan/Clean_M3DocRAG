@@ -55,6 +55,9 @@ TOKEN_GRAPH_CANDIDATE_EXPANSION_MIN_SCORE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_MIN
 TOKEN_GRAPH_CANDIDATE_EXPANSION_AGGREGATION="${TOKEN_GRAPH_CANDIDATE_EXPANSION_AGGREGATION:-log_count}"
 TOKEN_GRAPH_CANDIDATE_EXPANSION_SCORE_MODE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_SCORE_MODE:-below_min}"
 TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K="${TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K:-0}"
+TOKEN_GRAPH_OUTPUT_SUBDIR="${TOKEN_GRAPH_OUTPUT_SUBDIR:-faiss_token_neighbor_page_graph_ablation}"
+TOKEN_GRAPH_GRAPH_SUBDIR="${TOKEN_GRAPH_GRAPH_SUBDIR:-faiss_token_neighbor_page_graph}"
+TOKEN_GRAPH_LABEL_SUFFIX="${TOKEN_GRAPH_LABEL_SUFFIX:-}"
 
 require_value() {
   local name="$1"
@@ -358,14 +361,15 @@ run_dataset() {
   local expanded_dense_pred
   local expanded_dense_summary
 
+  label_prefix="${label_prefix}${TOKEN_GRAPH_LABEL_SUFFIX}"
   data_root="$(dirname "$gold")"
   embedding_root="${TOKEN_GRAPH_EMBEDDINGS_ROOT:-$work_root/embeddings}"
   page_embedding_dir="$(resolve_override_path "$upper" PAGE_EMBEDDING_DIR "$embedding_root/$embedding_name")"
   faiss_index="$(resolve_override_path "$upper" FAISS_INDEX "$embedding_root/${embedding_name}_pageindex_ivfflat/index.bin")"
   doc_ids_json="$(resolve_override_path "$upper" DOC_IDS_JSON "$data_root/dev_doc_ids.json")"
   query_embedding_dir="$(resolve_query_embedding_dir "$data_name" "$upper" "$work_root" "$embedding_root")"
-  out_dir="$work_root/output/$output_slug/faiss_token_neighbor_page_graph_ablation"
-  token_graph_dir="$work_root/output/$output_slug/faiss_token_neighbor_page_graph"
+  out_dir="$work_root/output/$output_slug/$TOKEN_GRAPH_OUTPUT_SUBDIR"
+  token_graph_dir="$work_root/output/$output_slug/$TOKEN_GRAPH_GRAPH_SUBDIR"
   token_graph_jsonl="$token_graph_dir/${label_prefix}_faiss_token_neighbor_pages.edges.jsonl"
   token_graph_summary="$token_graph_dir/${label_prefix}_faiss_token_neighbor_pages.summary.json"
   expanded_dense_pred="$token_graph_dir/${label_prefix}_faiss_token_neighbor_expanded_dense_top${TOKEN_GRAPH_CANDIDATE_EXPANSION_MAX_NEW_PAGES}.prediction.json"
