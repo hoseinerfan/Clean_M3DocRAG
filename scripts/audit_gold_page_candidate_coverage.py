@@ -192,6 +192,11 @@ def first_rank(ranked: list[str], gold: set[str]) -> int | None:
     return None
 
 
+def rank_map(ranked: list[str], gold: set[str]) -> dict[str, int | None]:
+    ranks = {item: idx for idx, item in enumerate(ranked, start=1)}
+    return {item: ranks.get(item) for item in sorted(gold)}
+
+
 def metadata_value(row: dict[str, Any], field: str) -> str:
     current: Any = row
     for part in field.split("."):
@@ -280,12 +285,18 @@ def main() -> None:
         pred_row = prediction.get(qid)
         dense_row = dense.get(qid)
         sparse_row = sparse.get(qid)
-        pred_rank = first_rank(ranked_pages(pred_row), gold_pages)
-        dense_rank = first_rank(ranked_pages(dense_row), gold_pages) if dense else None
-        sparse_rank = first_rank(ranked_pages(sparse_row), gold_pages) if sparse else None
-        pred_doc_rank = first_rank(ranked_docs(pred_row), gold_docs)
-        dense_doc_rank = first_rank(ranked_docs(dense_row), gold_docs) if dense else None
-        sparse_doc_rank = first_rank(ranked_docs(sparse_row), gold_docs) if sparse else None
+        pred_pages = ranked_pages(pred_row)
+        dense_pages = ranked_pages(dense_row) if dense else []
+        sparse_pages = ranked_pages(sparse_row) if sparse else []
+        pred_docs = ranked_docs(pred_row)
+        dense_docs = ranked_docs(dense_row) if dense else []
+        sparse_docs = ranked_docs(sparse_row) if sparse else []
+        pred_rank = first_rank(pred_pages, gold_pages)
+        dense_rank = first_rank(dense_pages, gold_pages) if dense else None
+        sparse_rank = first_rank(sparse_pages, gold_pages) if sparse else None
+        pred_doc_rank = first_rank(pred_docs, gold_docs)
+        dense_doc_rank = first_rank(dense_docs, gold_docs) if dense else None
+        sparse_doc_rank = first_rank(sparse_docs, gold_docs) if sparse else None
 
         classification = classify_failure(pred_rank, dense_rank, sparse_rank, args.hit_k)
         bucket = rank_bucket(pred_rank, args.hit_k, rank_bins)
@@ -312,6 +323,9 @@ def main() -> None:
             "metadata_domain": metadata_value(gold_row, "metadata.domain"),
             "gold_page_uids": sorted(gold_pages),
             "gold_doc_ids": sorted(gold_docs),
+            "prediction_gold_page_ranks": rank_map(pred_pages, gold_pages),
+            "dense_gold_page_ranks": rank_map(dense_pages, gold_pages) if dense else {},
+            "sparse_gold_page_ranks": rank_map(sparse_pages, gold_pages) if sparse else {},
             "prediction_first_gold_page_rank": pred_rank,
             "dense_first_gold_page_rank": dense_rank,
             "sparse_first_gold_page_rank": sparse_rank,
