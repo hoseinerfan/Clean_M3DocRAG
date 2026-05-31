@@ -147,17 +147,34 @@ def top_rows(pred_row: Any, limit: int) -> list[dict[str, Any]]:
 
 
 def gold_page_uids(row: dict[str, Any]) -> list[str]:
-    metadata = row.get("metadata", {})
+    metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
     uids = []
     seen = set()
-    for value in metadata.get("gold_page_uids", []):
+    for value in metadata.get("gold_page_uids", []) or row.get("gold_page_uids", []) or []:
         uid = str(value).strip()
         if uid and uid not in seen:
             seen.add(uid)
             uids.append(uid)
+    doc_ids = metadata.get("gold_doc_ids") or row.get("gold_doc_ids") or []
+    page_ids = metadata.get("gold_page_ids") or row.get("gold_page_ids") or []
+    if not isinstance(doc_ids, list):
+        doc_ids = [doc_ids]
+    if not isinstance(page_ids, list):
+        page_ids = [page_ids]
+    if len(doc_ids) == 1 and len(page_ids) > 1:
+        doc_ids = doc_ids * len(page_ids)
+    for doc_id, page_idx in zip(doc_ids, page_ids):
+        if doc_id is None or page_idx is None:
+            continue
+        uid = page_uid(str(doc_id).strip(), int(page_idx))
+        if uid not in seen:
+            seen.add(uid)
+            uids.append(uid)
     for ctx in row.get("supporting_context", []):
-        doc_id = str(ctx.get("doc_id", "")).strip()
-        page_idx = ctx.get("page_idx", ctx.get("page_id"))
+        if not isinstance(ctx, dict):
+            continue
+        doc_id = str(ctx.get("doc_id", ctx.get("doc_name", ""))).strip()
+        page_idx = ctx.get("page_idx", ctx.get("page_id", ctx.get("page")))
         if doc_id and page_idx is not None:
             uid = page_uid(doc_id, int(page_idx))
             if uid not in seen:
@@ -167,10 +184,21 @@ def gold_page_uids(row: dict[str, Any]) -> list[str]:
 
 
 def gold_doc_ids(row: dict[str, Any]) -> list[str]:
+    metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
     docs = []
     seen = set()
+    values = metadata.get("gold_doc_ids") or row.get("gold_doc_ids") or []
+    if not isinstance(values, list):
+        values = [values]
+    for value in values:
+        doc_id = str(value).strip()
+        if doc_id and doc_id not in seen:
+            seen.add(doc_id)
+            docs.append(doc_id)
     for ctx in row.get("supporting_context", []):
-        doc_id = str(ctx.get("doc_id", "")).strip()
+        if not isinstance(ctx, dict):
+            continue
+        doc_id = str(ctx.get("doc_id", ctx.get("doc_name", ""))).strip()
         if doc_id and doc_id not in seen:
             seen.add(doc_id)
             docs.append(doc_id)
