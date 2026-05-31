@@ -94,6 +94,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-table-md", default="")
     parser.add_argument("--output-train-features-jsonl", default="")
     parser.add_argument("--output-eval-features-jsonl", default="")
+    parser.add_argument(
+        "--output-eval-prior-jsonl",
+        default="",
+        help=(
+            "Optional JSONL page-prior file for graph reranking. Each row contains "
+            "qid/page_uid/base_rank plus learned_score and learned_score_norm."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -697,6 +705,33 @@ def write_feature_jsonl(path: str, rows_by_qid: dict[str, list[dict[str, Any]]])
                 handle.write(json.dumps(row, ensure_ascii=False) + "\n")
 
 
+def write_prior_jsonl(path: str, rows_by_qid: dict[str, list[dict[str, Any]]]) -> None:
+    if not path:
+        return
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with out.open("w", encoding="utf-8") as handle:
+        for qid in sorted(rows_by_qid):
+            rows = rows_by_qid[qid]
+            scores = [float(row["learned_score"]) for row in rows]
+            lo = min(scores) if scores else 0.0
+            hi = max(scores) if scores else 0.0
+            for row in rows:
+                score = float(row["learned_score"])
+                norm = (score - lo) / (hi - lo) if hi > lo else 0.0
+                item = {
+                    "qid": qid,
+                    "page_uid": row["uid"],
+                    "doc_id": row["doc_id"],
+                    "page_idx": int(row["page_idx"]),
+                    "base_rank": int(row["base_rank"]),
+                    "base_score": float(row["raw_score"]),
+                    "learned_score": score,
+                    "learned_score_norm": float(norm),
+                }
+                handle.write(json.dumps(item, ensure_ascii=False) + "\n")
+
+
 def main() -> None:
     args = parse_args()
     if torch is None or F is None:
@@ -833,6 +868,7 @@ def main() -> None:
     output_prediction: dict[str, dict[str, Any]] = {}
     promotion_stats = Counter()
     eval_feature_rows: dict[str, list[dict[str, Any]]] = {}
+    eval_prior_rows: dict[str, list[dict[str, Any]]] = {}
     for qid in sorted(eval_base):
         reranked, stats = apply_reranker_to_qid(
             qid=qid,
@@ -847,8 +883,8 @@ def main() -> None:
         promotion_stats["qid_count"] += 1
         promotion_stats["promotion_count"] += int(stats.get("promotion_count", 0))
         promotion_stats["qid_with_promotion_count"] += int(int(stats.get("promotion_count", 0)) > 0)
-        if args.output_eval_features_jsonl:
-            eval_feature_rows[qid] = build_candidates_for_qid(
+        if args.output_eval_features_jsonl or args.output_eval_prior_jsonl:
+            candidates = build_candidates_for_qid(
                 base_row=eval_base.get(qid),
                 source_rows_by_label=eval_source_preds,
                 source_labels=source_labels,
@@ -856,8 +892,16 @@ def main() -> None:
                 candidate_top_k=int(args.candidate_top_k),
                 anchor_top_k=int(args.anchor_top_k),
                 promotion_rank_min=int(args.promotion_rank_min),
-            )[: max(20, int(args.anchor_top_k))]
+            )
+            scores = model_scores(candidates, feature_names, model)
+            for row, score in zip(candidates, scores):
+                row["learned_score"] = float(score)
+            if args.output_eval_features_jsonl:
+                eval_feature_rows[qid] = candidates[: max(20, int(args.anchor_top_k))]
+            if args.output_eval_prior_jsonl:
+                eval_prior_rows[qid] = candidates
     write_feature_jsonl(args.output_eval_features_jsonl, eval_feature_rows)
+    write_prior_jsonl(args.output_eval_prior_jsonl, eval_prior_rows)
 
     base_eval = evaluate_ranking(eval_base, eval_gold, args.recall_k)
     rerank_eval = evaluate_ranking(output_prediction, eval_gold, args.recall_k)
@@ -905,6 +949,8 @@ def main() -> None:
     print(f"saved_summary={summary_path}")
     if args.output_table_md:
         print(f"saved_table={args.output_table_md}")
+    if args.output_eval_prior_jsonl:
+        print(f"saved_eval_prior={args.output_eval_prior_jsonl}")
     print(f"train_qid_count={len(train_rows_by_qid)}")
     print(f"train_row_count={len(all_train_rows)}")
     print(f"movement_vs_base={movement}")

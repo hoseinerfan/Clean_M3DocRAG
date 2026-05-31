@@ -129,4 +129,5 @@ echo "using_out_dir=$OUT_DIR"
   --output-model-json "$OUT_DIR/${LABEL}.model.json" \
   --output-prediction-json "$OUT_DIR/${LABEL}.dev.prediction.json" \
   --output-summary-json "$OUT_DIR/${LABEL}.summary.json" \
-  --output-table-md "$OUT_DIR/${LABEL}.table.md"
+  --output-table-md "$OUT_DIR/${LABEL}.table.md" \
+  --output-eval-prior-jsonl "$OUT_DIR/${LABEL}.dev.learned_prior.jsonl"

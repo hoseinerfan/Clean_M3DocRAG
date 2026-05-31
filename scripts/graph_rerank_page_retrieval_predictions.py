@@ -47,6 +47,8 @@ class PageRecord:
     sparse_score: float | None = None
     expansion_score: float | None = None
     neighbor_seed_score: float = 0.0
+    learned_page_prior_raw_score: float | None = None
+    learned_page_prior_score: float = 0.0
 
     @property
     def page_uid(self) -> str:
@@ -183,6 +185,14 @@ class ExternalPageGraph:
     source_page_count: int
     target_page_count: int
     target_doc_count: int
+
+
+@dataclass
+class LearnedPagePrior:
+    by_qid: dict[str, dict[str, dict[str, float]]]
+    row_count: int
+    qid_count: int
+    page_count: int
 
 
 @dataclass
@@ -1476,6 +1486,57 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--learned-page-prior-jsonl",
+        default="",
+        help=(
+            "Optional JSONL learned page prior, typically emitted by "
+            "train_rank_band_page_promotion_reranker.py. Rows need qid, page_uid or "
+            "doc_id/page_idx, and a numeric score field."
+        ),
+    )
+    parser.add_argument(
+        "--learned-page-prior-score-field",
+        default="learned_score",
+        help="Numeric field used from --learned-page-prior-jsonl before optional per-qid normalization.",
+    )
+    parser.add_argument(
+        "--learned-page-prior-seed-weight",
+        type=float,
+        default=0.0,
+        help="Add this weight times the learned prior to the page restart seed. Use 0 to disable.",
+    )
+    parser.add_argument(
+        "--learned-page-prior-min-base-rank",
+        type=int,
+        default=1,
+        help="Only inject learned-prior rows with base_rank >= this value.",
+    )
+    parser.add_argument(
+        "--learned-page-prior-max-base-rank",
+        type=int,
+        default=1000,
+        help="Only inject learned-prior rows with base_rank <= this value. Use 0 for no upper bound.",
+    )
+    parser.add_argument(
+        "--learned-page-prior-top-k",
+        type=int,
+        default=0,
+        help="Keep only the top K prior-scored pages per query after filtering. Use 0 for all.",
+    )
+    parser.add_argument(
+        "--learned-page-prior-normalize",
+        dest="learned_page_prior_normalize",
+        action="store_true",
+        default=True,
+        help="Min-max normalize the selected learned-prior scores per query before seed injection.",
+    )
+    parser.add_argument(
+        "--no-learned-page-prior-normalize",
+        dest="learned_page_prior_normalize",
+        action="store_false",
+        help="Use raw learned-prior scores directly.",
+    )
+    parser.add_argument(
         "--neighbor-expansion-window",
         type=int,
         default=0,
@@ -1745,6 +1806,57 @@ def load_external_page_graph(path: Path) -> ExternalPageGraph:
         source_page_count=len(by_source_page),
         target_page_count=len(target_page_uids),
         target_doc_count=len(target_doc_ids),
+    )
+
+
+def learned_prior_page_uid(row: dict[str, object]) -> str | None:
+    uid = str(row.get("page_uid", "")).strip()
+    if uid:
+        return uid
+    doc_id = str(row.get("doc_id", row.get("docid", row.get("document_id", "")))).strip()
+    page_idx = row.get("page_idx", row.get("page_id", row.get("page")))
+    if not doc_id or page_idx is None:
+        return None
+    try:
+        return page_uid(doc_id, int(page_idx))
+    except (TypeError, ValueError):
+        return None
+
+
+def load_learned_page_prior(path: Path) -> LearnedPagePrior:
+    by_qid: dict[str, dict[str, dict[str, float]]] = defaultdict(dict)
+    page_uids: set[str] = set()
+    row_count = 0
+    if not path.exists():
+        raise FileNotFoundError(f"Learned page prior JSONL does not exist: {path}")
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                continue
+            qid = str(row.get("qid", "")).strip()
+            uid = learned_prior_page_uid(row)
+            if not qid or not uid:
+                continue
+            item: dict[str, float] = {}
+            for key, value in row.items():
+                if key in {"qid", "page_uid", "doc_id", "docid", "document_id"}:
+                    continue
+                try:
+                    item[str(key)] = float(value)
+                except (TypeError, ValueError):
+                    continue
+            by_qid[qid][uid] = item
+            page_uids.add(uid)
+            row_count += 1
+    return LearnedPagePrior(
+        by_qid={qid: dict(values) for qid, values in by_qid.items()},
+        row_count=row_count,
+        qid_count=len(by_qid),
+        page_count=len(page_uids),
     )
 
 
@@ -2981,6 +3093,93 @@ def build_neighbor_expansion_pages(
     ]
     neighbor_pages.sort(key=lambda item: (-item[2], item[0], item[1]))
     return neighbor_pages, dict(neighbor_seed)
+
+
+def add_learned_page_prior_seed(
+    *,
+    qid: str,
+    records: dict[str, PageRecord],
+    page_seed: dict[str, float],
+    learned_page_prior: LearnedPagePrior | None,
+    args: argparse.Namespace,
+) -> dict[str, object]:
+    seed_weight = float(getattr(args, "learned_page_prior_seed_weight", 0.0))
+    score_field = str(getattr(args, "learned_page_prior_score_field", "learned_score"))
+    metadata: dict[str, object] = {
+        "learned_page_prior_active": False,
+        "learned_page_prior_seed_weight": seed_weight,
+        "learned_page_prior_score_field": score_field,
+        "learned_page_prior_normalize": bool(getattr(args, "learned_page_prior_normalize", True)),
+        "learned_page_prior_min_base_rank": int(getattr(args, "learned_page_prior_min_base_rank", 1)),
+        "learned_page_prior_max_base_rank": int(getattr(args, "learned_page_prior_max_base_rank", 1000)),
+        "learned_page_prior_top_k": int(getattr(args, "learned_page_prior_top_k", 0)),
+        "learned_page_prior_qid_row_count": 0,
+        "learned_page_prior_matched_page_count": 0,
+        "learned_page_prior_seed_total": 0.0,
+        "mean_learned_page_prior_score": None,
+    }
+    if learned_page_prior is None or seed_weight <= 0:
+        return metadata
+
+    qid_rows = learned_page_prior.by_qid.get(qid, {})
+    metadata["learned_page_prior_active"] = True
+    metadata["learned_page_prior_qid_row_count"] = len(qid_rows)
+    if not qid_rows:
+        return metadata
+
+    min_base_rank = max(1, int(getattr(args, "learned_page_prior_min_base_rank", 1)))
+    max_base_rank = int(getattr(args, "learned_page_prior_max_base_rank", 1000))
+    filtered: list[tuple[str, float, int]] = []
+    for uid, item in qid_rows.items():
+        if uid not in records:
+            continue
+        raw_rank = item.get("base_rank")
+        base_rank = int(raw_rank) if raw_rank is not None and raw_rank > 0 else 10**9
+        if base_rank < min_base_rank:
+            continue
+        if max_base_rank > 0 and base_rank > max_base_rank:
+            continue
+        raw_score = item.get(score_field)
+        if raw_score is None:
+            raw_score = item.get("learned_score_norm", item.get("learned_score", item.get("score")))
+        if raw_score is None:
+            continue
+        filtered.append((uid, float(raw_score), base_rank))
+
+    filtered.sort(key=lambda item: (-item[1], item[2], item[0]))
+    top_k = int(getattr(args, "learned_page_prior_top_k", 0))
+    if top_k > 0:
+        filtered = filtered[:top_k]
+    if not filtered:
+        return metadata
+
+    raw_scores = [score for _uid, score, _rank in filtered]
+    lo = min(raw_scores)
+    hi = max(raw_scores)
+    added_values = []
+    for uid, raw_score, _base_rank in filtered:
+        if bool(getattr(args, "learned_page_prior_normalize", True)):
+            prior_score = (raw_score - lo) / (hi - lo) if hi > lo else (1.0 if len(filtered) == 1 else 0.0)
+        else:
+            prior_score = max(0.0, raw_score)
+        prior_score = max(0.0, float(prior_score))
+        contribution = seed_weight * prior_score
+        if contribution <= 0:
+            continue
+        page_seed[uid] += contribution
+        records[uid].learned_page_prior_raw_score = float(raw_score)
+        records[uid].learned_page_prior_score = float(prior_score)
+        added_values.append(float(prior_score))
+
+    metadata.update(
+        {
+            "learned_page_prior_matched_page_count": len(added_values),
+            "learned_page_prior_seed_total": seed_weight * sum(added_values),
+            "mean_learned_page_prior_score": statistics.fmean(added_values) if added_values else None,
+            "max_learned_page_prior_score": max(added_values) if added_values else None,
+        }
+    )
+    return metadata
 
 
 def build_restart_vector(
@@ -8223,6 +8422,7 @@ def build_qid_graph_ranking(
     doc_page_catalog: DocPageCatalog | None = None,
     pdf_hyperlink_graph: PdfHyperlinkGraph | None = None,
     external_page_graph: ExternalPageGraph | None = None,
+    learned_page_prior: LearnedPagePrior | None = None,
     page_embedding_provider: SafetensorPageEmbeddingProvider | object | None = None,
 ) -> tuple[list[list[object]], dict]:
     question = str(dense_row.get("question") or sparse_row.get("question", ""))
@@ -8311,6 +8511,14 @@ def build_qid_graph_ranking(
             records[uid] = record
         record.neighbor_seed_score += float(seed_score)
         page_seed[uid] += float(seed_score)
+
+    learned_page_prior_metadata = add_learned_page_prior_seed(
+        qid=qid,
+        records=records,
+        page_seed=page_seed,
+        learned_page_prior=learned_page_prior,
+        args=args,
+    )
 
     doc_seed, doc_seed_metadata = build_doc_seed(
         records=records,
@@ -8628,6 +8836,8 @@ def build_qid_graph_ranking(
             "sparse_rank": record.sparse_rank,
             "expansion_rank": record.expansion_rank,
             "neighbor_seed_score": record.neighbor_seed_score,
+            "learned_page_prior_raw_score": record.learned_page_prior_raw_score,
+            "learned_page_prior_norm": record.learned_page_prior_score,
         }
         for record, final_score, seed_component, page_ppr_component, doc_ppr_component in ranked_records[:20]
     ]
@@ -8656,6 +8866,7 @@ def build_qid_graph_ranking(
         ),
         "top_graph_pages": trace_top,
         **source_weights.metadata,
+        **learned_page_prior_metadata,
         **doc_seed_metadata,
         **restart_vector.metadata,
         **transition_policy.metadata,
@@ -8751,6 +8962,9 @@ def main() -> None:
     external_page_graph = None
     if args.external_page_graph_jsonl:
         external_page_graph = load_external_page_graph(Path(args.external_page_graph_jsonl))
+    learned_page_prior = None
+    if args.learned_page_prior_jsonl:
+        learned_page_prior = load_learned_page_prior(Path(args.learned_page_prior_jsonl))
     page_embedding_provider = None
     if args.doc_doc_page_embedding_dir:
         page_embedding_provider = SafetensorPageEmbeddingProvider(
@@ -8810,6 +9024,7 @@ def main() -> None:
             doc_page_catalog=doc_page_catalog,
             pdf_hyperlink_graph=pdf_hyperlink_graph,
             external_page_graph=external_page_graph,
+            learned_page_prior=learned_page_prior,
             page_embedding_provider=page_embedding_provider,
         )
         question = dense_pred[qid].get("question") or sparse_pred[qid].get("question", "")
@@ -9171,6 +9386,13 @@ def main() -> None:
                 "expansion_query_topk_terms": int(args.expansion_query_topk_terms),
                 "expansion_min_score": float(args.expansion_min_score),
                 "score_seed_weight": float(args.score_seed_weight),
+                "learned_page_prior_jsonl": args.learned_page_prior_jsonl,
+                "learned_page_prior_score_field": args.learned_page_prior_score_field,
+                "learned_page_prior_seed_weight": float(args.learned_page_prior_seed_weight),
+                "learned_page_prior_min_base_rank": int(args.learned_page_prior_min_base_rank),
+                "learned_page_prior_max_base_rank": int(args.learned_page_prior_max_base_rank),
+                "learned_page_prior_top_k": int(args.learned_page_prior_top_k),
+                "learned_page_prior_normalize": bool(args.learned_page_prior_normalize),
                 "doc_seed_weight": float(args.doc_seed_weight),
                 "doc_seed_mode": args.doc_seed_mode,
                 "doc_seed_page_score_mode": args.doc_seed_page_score_mode,
@@ -9486,6 +9708,16 @@ def main() -> None:
         "expansion_query_topk_terms": int(args.expansion_query_topk_terms),
         "expansion_min_score": float(args.expansion_min_score),
         "score_seed_weight": float(args.score_seed_weight),
+        "learned_page_prior_jsonl": args.learned_page_prior_jsonl,
+        "learned_page_prior_row_count": learned_page_prior.row_count if learned_page_prior is not None else 0,
+        "learned_page_prior_qid_count": learned_page_prior.qid_count if learned_page_prior is not None else 0,
+        "learned_page_prior_page_count": learned_page_prior.page_count if learned_page_prior is not None else 0,
+        "learned_page_prior_score_field": args.learned_page_prior_score_field,
+        "learned_page_prior_seed_weight": float(args.learned_page_prior_seed_weight),
+        "learned_page_prior_min_base_rank": int(args.learned_page_prior_min_base_rank),
+        "learned_page_prior_max_base_rank": int(args.learned_page_prior_max_base_rank),
+        "learned_page_prior_top_k": int(args.learned_page_prior_top_k),
+        "learned_page_prior_normalize": bool(args.learned_page_prior_normalize),
         "doc_seed_weight": float(args.doc_seed_weight),
         "doc_seed_mode": args.doc_seed_mode,
         "doc_seed_page_score_mode": args.doc_seed_page_score_mode,
