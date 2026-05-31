@@ -347,7 +347,10 @@ def build_edges_for_qid(
     args: argparse.Namespace,
 ) -> tuple[list[dict], dict[str, object]]:
     source_page_list = prediction_page_uids(row, int(args.source_page_top_k))
-    target_page_list = prediction_page_uids(row, int(args.target_page_top_k))
+    target_page_top_k = int(args.target_page_top_k)
+    target_page_list = (
+        prediction_page_uids(row, target_page_top_k) if target_page_top_k > 0 else []
+    )
     source_page_uids = set(source_page_list)
     target_page_uids = set(target_page_list)
     source_hits = select_source_token_hits(
