@@ -265,7 +265,7 @@ build_expanded_prediction() {
       --verify-page-embedding-dir "$page_embedding_dir"
       --verify-query-embedding-key "$TOKEN_GRAPH_QUERY_EMBEDDING_KEY"
       --verify-page-embedding-key "$TOKEN_GRAPH_PAGE_EMBEDDING_KEY"
-      --verification-min-score "$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MIN_SCORE"
+      "--verification-min-score=$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MIN_SCORE"
       --verification-candidate-pool "$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_CANDIDATE_POOL"
       --verified-score-mode "$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFIED_SCORE_MODE"
     )
