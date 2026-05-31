@@ -8,11 +8,29 @@ if [[ ! -x "$PYTHON_BIN" ]]; then
   PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python}"
 fi
 
+declare -A USER_DENSE_PRED_OVERRIDES=()
+for name in \
+  MMDOCIR_DENSE_PRED \
+  SCIEGQA_DENSE_PRED \
+  VIDOSEEK_DENSE_PRED \
+  DUDE_DENSE_PRED \
+  VIDORE_DENSE_PRED \
+  OPENDOCVQA_DENSE_PRED \
+  MMLONGBENCH_DENSE_PRED; do
+  if [[ -n "${!name:-}" ]]; then
+    USER_DENSE_PRED_OVERRIDES["$name"]="${!name}"
+  fi
+done
+
 VITAL_PATHS_ENV="${VITAL_PATHS_ENV:-$REPO_ROOT/hpc_vital_paths.generated.env}"
 if [[ -f "$VITAL_PATHS_ENV" ]]; then
   # shellcheck disable=SC1090
   source "$VITAL_PATHS_ENV"
 fi
+for name in "${!USER_DENSE_PRED_OVERRIDES[@]}"; do
+  export "$name=${USER_DENSE_PRED_OVERRIDES[$name]}"
+done
+unset name USER_DENSE_PRED_OVERRIDES
 
 DATASETS="${DATASETS:-dude sciegqa mmdocir}"
 REPORT_OUT="${REPORT_OUT:-$REPO_ROOT/doc_embedding_cosine_ablation_results.md}"
