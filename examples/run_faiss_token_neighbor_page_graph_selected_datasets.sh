@@ -45,6 +45,7 @@ TOKEN_GRAPH_AUTO_EXPORT_QUERY_EMBEDDINGS="${TOKEN_GRAPH_AUTO_EXPORT_QUERY_EMBEDD
 TOKEN_GRAPH_QUERY_BATCH_SIZE="${TOKEN_GRAPH_QUERY_BATCH_SIZE:-16}"
 TOKEN_GRAPH_QUERY_TOKEN_FILTER="${TOKEN_GRAPH_QUERY_TOKEN_FILTER:-full}"
 TOKEN_GRAPH_QUERY_EMBEDDING_KEY="${TOKEN_GRAPH_QUERY_EMBEDDING_KEY:-embeddings}"
+TOKEN_GRAPH_PAGE_EMBEDDING_KEY="${TOKEN_GRAPH_PAGE_EMBEDDING_KEY:-embeddings}"
 TOKEN_GRAPH_RETRIEVAL_MODEL_NAME_OR_PATH="${TOKEN_GRAPH_RETRIEVAL_MODEL_NAME_OR_PATH:-colpaligemma-3b-pt-448-base}"
 TOKEN_GRAPH_RETRIEVAL_ADAPTER_MODEL_NAME_OR_PATH="${TOKEN_GRAPH_RETRIEVAL_ADAPTER_MODEL_NAME_OR_PATH:-colpali-v1.2}"
 TOKEN_GRAPH_QUERY_EXPORT_DEVICE="${TOKEN_GRAPH_QUERY_EXPORT_DEVICE:-auto}"
@@ -55,6 +56,10 @@ TOKEN_GRAPH_CANDIDATE_EXPANSION_MIN_SCORE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_MIN
 TOKEN_GRAPH_CANDIDATE_EXPANSION_AGGREGATION="${TOKEN_GRAPH_CANDIDATE_EXPANSION_AGGREGATION:-log_count}"
 TOKEN_GRAPH_CANDIDATE_EXPANSION_SCORE_MODE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_SCORE_MODE:-below_min}"
 TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K="${TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K:-0}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MODE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MODE:-none}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MIN_SCORE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MIN_SCORE:--1e30}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_CANDIDATE_POOL="${TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_CANDIDATE_POOL:-0}"
+TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFIED_SCORE_MODE="${TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFIED_SCORE_MODE:-verified}"
 TOKEN_GRAPH_OUTPUT_SUBDIR="${TOKEN_GRAPH_OUTPUT_SUBDIR:-faiss_token_neighbor_page_graph_ablation}"
 TOKEN_GRAPH_GRAPH_SUBDIR="${TOKEN_GRAPH_GRAPH_SUBDIR:-faiss_token_neighbor_page_graph}"
 TOKEN_GRAPH_LABEL_SUFFIX="${TOKEN_GRAPH_LABEL_SUFFIX:-}"
@@ -249,6 +254,22 @@ build_expanded_prediction() {
   local token_graph_jsonl="$2"
   local expanded_pred="$3"
   local expanded_summary="$4"
+  local query_embedding_dir="$5"
+  local page_embedding_dir="$6"
+  local verify_args=()
+
+  if [[ "$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MODE" != "none" ]]; then
+    verify_args=(
+      --verification-mode "$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MODE"
+      --verify-query-embedding-dir "$query_embedding_dir"
+      --verify-page-embedding-dir "$page_embedding_dir"
+      --verify-query-embedding-key "$TOKEN_GRAPH_QUERY_EMBEDDING_KEY"
+      --verify-page-embedding-key "$TOKEN_GRAPH_PAGE_EMBEDDING_KEY"
+      --verification-min-score "$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_MIN_SCORE"
+      --verification-candidate-pool "$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFICATION_CANDIDATE_POOL"
+      --verified-score-mode "$TOKEN_GRAPH_CANDIDATE_EXPANSION_VERIFIED_SCORE_MODE"
+    )
+  fi
 
   if [[ ! -s "$expanded_pred" || "$TOKEN_GRAPH_REBUILD" == "1" ]]; then
     "$PYTHON_BIN" "$REPO_ROOT/scripts/expand_prediction_with_external_page_graph.py" \
@@ -260,7 +281,8 @@ build_expanded_prediction() {
       --min-score "$TOKEN_GRAPH_CANDIDATE_EXPANSION_MIN_SCORE" \
       --aggregation "$TOKEN_GRAPH_CANDIDATE_EXPANSION_AGGREGATION" \
       --synthetic-score-mode "$TOKEN_GRAPH_CANDIDATE_EXPANSION_SCORE_MODE" \
-      --append-after-top-k "$TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K"
+      --append-after-top-k "$TOKEN_GRAPH_CANDIDATE_EXPANSION_APPEND_AFTER_TOP_K" \
+      "${verify_args[@]}"
   else
     echo "reusing_expanded_prediction=$expanded_pred"
     echo "set TOKEN_GRAPH_REBUILD=1 to rebuild candidate expansion prediction"
@@ -415,7 +437,8 @@ run_dataset() {
 
   if [[ "$TOKEN_GRAPH_RUN_CANDIDATE_EXPANSION" == "1" ]]; then
     build_expanded_prediction "$dense_pred" "$token_graph_jsonl" \
-      "$expanded_dense_pred" "$expanded_dense_summary"
+      "$expanded_dense_pred" "$expanded_dense_summary" \
+      "$query_embedding_dir" "$page_embedding_dir"
     run_graph_variant "$data_name" "$data_root" "$gold" "$doc_pages" "$expanded_dense_pred" "$sparse_pred" \
       "$out_dir" "$label_prefix" "faiss_candidate_expand_top${TOKEN_GRAPH_CANDIDATE_EXPANSION_MAX_NEW_PAGES}" "" 0.0 as_directed 0
   fi

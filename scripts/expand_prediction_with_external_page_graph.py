@@ -9,6 +9,8 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -39,6 +41,34 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=0,
         help="Insert new pages after this many original pages. Use 0 to append after all original pages.",
+    )
+    parser.add_argument(
+        "--verification-mode",
+        choices=["none", "exact_maxsim"],
+        default="none",
+        help="Optionally rescore candidate pages against the original query before insertion.",
+    )
+    parser.add_argument("--verify-query-embedding-dir", default="")
+    parser.add_argument("--verify-page-embedding-dir", default="")
+    parser.add_argument("--verify-query-embedding-key", default="embeddings")
+    parser.add_argument("--verify-page-embedding-key", default="embeddings")
+    parser.add_argument(
+        "--verification-min-score",
+        type=float,
+        default=-1e30,
+        help="Keep verified candidates only when exact verification score is at least this value.",
+    )
+    parser.add_argument(
+        "--verification-candidate-pool",
+        type=int,
+        default=0,
+        help="Verify only the top-N graph candidates per qid before final selection. Use 0 for all.",
+    )
+    parser.add_argument(
+        "--verified-score-mode",
+        choices=["verified", "graph", "verified_plus_graph"],
+        default="verified",
+        help="Score used to sort candidates after verification.",
     )
     return parser.parse_args()
 
@@ -116,6 +146,96 @@ def row_score(raw: object) -> float:
         return 0.0
 
 
+def load_safetensor_array(path: Path, key: str) -> np.ndarray:
+    import torch
+    from safetensors import safe_open
+
+    with safe_open(path, framework="pt", device="cpu") as handle:
+        tensor_key = key if key in handle.keys() else next(iter(handle.keys()))
+        tensor = handle.get_tensor(tensor_key)
+    if tensor.dtype in {torch.bfloat16, torch.float16}:
+        tensor = tensor.float()
+    return tensor.detach().cpu().numpy().astype(np.float32, copy=False)
+
+
+def load_query_embedding(path: Path, key: str) -> np.ndarray:
+    array = load_safetensor_array(path, key)
+    if array.ndim == 3 and array.shape[0] == 1:
+        array = array[0]
+    if array.ndim == 1:
+        array = array.reshape(1, -1)
+    if array.ndim != 2:
+        raise ValueError(f"Query embedding must be 2-D after squeeze: {path} shape={array.shape}")
+    return np.ascontiguousarray(array, dtype=np.float32)
+
+
+class ExactMaxSimVerifier:
+    def __init__(
+        self,
+        *,
+        query_embedding_dir: Path,
+        page_embedding_dir: Path,
+        query_embedding_key: str,
+        page_embedding_key: str,
+    ) -> None:
+        self.query_embedding_dir = query_embedding_dir
+        self.page_embedding_dir = page_embedding_dir
+        self.query_embedding_key = query_embedding_key
+        self.page_embedding_key = page_embedding_key
+        self.query_cache: dict[str, np.ndarray] = {}
+        self.doc_cache: dict[str, np.ndarray] = {}
+        self.missing_query_count = 0
+        self.missing_page_count = 0
+
+    def query_embedding(self, qid: str) -> np.ndarray | None:
+        if qid in self.query_cache:
+            return self.query_cache[qid]
+        path = self.query_embedding_dir / f"{qid}.safetensors"
+        if not path.exists():
+            self.missing_query_count += 1
+            return None
+        query_emb = load_query_embedding(path, self.query_embedding_key)
+        self.query_cache[qid] = query_emb
+        return query_emb
+
+    def doc_embedding(self, doc_id: str) -> np.ndarray | None:
+        if doc_id in self.doc_cache:
+            return self.doc_cache[doc_id]
+        path = self.page_embedding_dir / f"{doc_id}.safetensors"
+        if not path.exists():
+            self.missing_page_count += 1
+            return None
+        doc_emb = load_safetensor_array(path, self.page_embedding_key)
+        if doc_emb.ndim != 3:
+            raise ValueError(
+                "Expected ColPali document embeddings shaped "
+                f"[n_pages, n_tokens, dim], got {doc_emb.shape} for {path}"
+            )
+        self.doc_cache[doc_id] = doc_emb
+        return doc_emb
+
+    def score_page(self, qid: str, page_uid_value: str) -> float | None:
+        parsed = parse_page_uid(page_uid_value)
+        if parsed is None:
+            return None
+        doc_id, page_idx = parsed
+        query_emb = self.query_embedding(qid)
+        doc_emb = self.doc_embedding(doc_id)
+        if query_emb is None or doc_emb is None:
+            return None
+        if page_idx < 0 or page_idx >= doc_emb.shape[0]:
+            self.missing_page_count += 1
+            return None
+        page_emb = np.ascontiguousarray(doc_emb[page_idx], dtype=np.float32)
+        if query_emb.shape[-1] != page_emb.shape[-1]:
+            raise ValueError(
+                "Query/page embedding dimension mismatch: "
+                f"qid={qid} page={page_uid_value} query={query_emb.shape} page={page_emb.shape}"
+            )
+        sim = np.matmul(query_emb, page_emb.T)
+        return float(sim.max(axis=1).sum())
+
+
 def load_external_targets(
     path: Path,
     *,
@@ -155,13 +275,18 @@ def load_external_targets(
 
 
 def expanded_rows(
+    *,
+    qid: str,
     rows: list[Any],
     target_scores: dict[str, float],
-    *,
     max_new_pages: int,
     synthetic_score_mode: str,
     append_after_top_k: int,
-) -> tuple[list[Any], int, int]:
+    verifier: ExactMaxSimVerifier | None,
+    verification_min_score: float,
+    verification_candidate_pool: int,
+    verified_score_mode: str,
+) -> tuple[list[Any], dict[str, Any]]:
     existing_uids = {uid for raw in rows if (uid := row_page_uid(raw))}
     candidates = [
         (uid, score)
@@ -169,20 +294,69 @@ def expanded_rows(
         if uid not in existing_uids and parse_page_uid(uid) is not None
     ]
     candidates.sort(key=lambda item: (-item[1], item[0]))
+    raw_candidate_count = len(candidates)
+
+    scored_candidates: list[dict[str, float | str]] = []
+    verified_scores: list[float] = []
+    verification_attempted_count = 0
+    verification_rejected_count = 0
+    if verifier is not None:
+        if verification_candidate_pool > 0:
+            candidates = candidates[:verification_candidate_pool]
+        for uid, graph_score in candidates:
+            verification_attempted_count += 1
+            verified_score = verifier.score_page(qid, uid)
+            if verified_score is None or verified_score < verification_min_score:
+                verification_rejected_count += 1
+                continue
+            verified_scores.append(float(verified_score))
+            if verified_score_mode == "graph":
+                final_score = float(graph_score)
+            elif verified_score_mode == "verified_plus_graph":
+                final_score = float(verified_score) + float(graph_score)
+            else:
+                final_score = float(verified_score)
+            scored_candidates.append(
+                {
+                    "uid": uid,
+                    "graph_score": float(graph_score),
+                    "verified_score": float(verified_score),
+                    "final_score": float(final_score),
+                }
+            )
+        scored_candidates.sort(
+            key=lambda item: (
+                -float(item["final_score"]),
+                -float(item["graph_score"]),
+                str(item["uid"]),
+            )
+        )
+    else:
+        scored_candidates = [
+            {
+                "uid": uid,
+                "graph_score": float(score),
+                "verified_score": float("nan"),
+                "final_score": float(score),
+            }
+            for uid, score in candidates
+        ]
+
     if max_new_pages > 0:
-        candidates = candidates[:max_new_pages]
+        scored_candidates = scored_candidates[:max_new_pages]
 
     original_scores = [row_score(raw) for raw in rows]
     min_original_score = min(original_scores) if original_scores else 0.0
-    max_candidate_score = max((score for _uid, score in candidates), default=0.0)
+    max_candidate_score = max((float(item["final_score"]) for item in scored_candidates), default=0.0)
     new_rows: list[list[object]] = []
-    for idx, (uid, score) in enumerate(candidates, start=1):
+    for idx, item in enumerate(scored_candidates, start=1):
+        uid = str(item["uid"])
         parsed = parse_page_uid(uid)
         if parsed is None:
             continue
         doc_id, page_idx = parsed
         if synthetic_score_mode == "normalized" and max_candidate_score > 0:
-            synthetic_score = float(score / max_candidate_score)
+            synthetic_score = float(float(item["final_score"]) / max_candidate_score)
         else:
             synthetic_score = float(min_original_score - 1e-6 * idx)
         new_rows.append([doc_id, int(page_idx), synthetic_score])
@@ -190,8 +364,22 @@ def expanded_rows(
     if append_after_top_k > 0:
         prefix = rows[:append_after_top_k]
         suffix = rows[append_after_top_k:]
-        return [*prefix, *new_rows, *suffix], len(new_rows), len(candidates)
-    return [*rows, *new_rows], len(new_rows), len(candidates)
+        expanded = [*prefix, *new_rows, *suffix]
+    else:
+        expanded = [*rows, *new_rows]
+
+    stats = {
+        "candidate_target_page_count": int(raw_candidate_count),
+        "verified_candidate_attempted_count": int(verification_attempted_count),
+        "verified_candidate_kept_count": int(len(verified_scores)),
+        "verification_rejected_count": int(verification_rejected_count),
+        "added_page_count": int(len(new_rows)),
+        "mean_verified_score": (
+            float(sum(verified_scores) / len(verified_scores)) if verified_scores else None
+        ),
+        "max_verified_score": max(verified_scores) if verified_scores else None,
+    }
+    return expanded, stats
 
 
 def main() -> None:
@@ -202,19 +390,42 @@ def main() -> None:
         min_score=float(args.min_score),
         aggregation=str(args.aggregation),
     )
+    verifier = None
+    if str(args.verification_mode) == "exact_maxsim":
+        if not args.verify_query_embedding_dir or not args.verify_page_embedding_dir:
+            raise ValueError(
+                "--verification-mode=exact_maxsim requires "
+                "--verify-query-embedding-dir and --verify-page-embedding-dir."
+            )
+        verifier = ExactMaxSimVerifier(
+            query_embedding_dir=Path(args.verify_query_embedding_dir),
+            page_embedding_dir=Path(args.verify_page_embedding_dir),
+            query_embedding_key=str(args.verify_query_embedding_key),
+            page_embedding_key=str(args.verify_page_embedding_key),
+        )
 
     output_rows: dict[str, dict[str, Any]] = {}
     added_counts: list[int] = []
+    candidate_counts: list[int] = []
+    verified_attempted_counts: list[int] = []
+    verified_kept_counts: list[int] = []
+    verified_scores: list[float] = []
     for qid, row in rows_by_qid.items():
         copied = dict(row)
         page_rows = list(copied.get("page_retrieval_results", []))
-        expanded, added_count, candidate_count = expanded_rows(
-            page_rows,
-            target_scores_by_qid.get(qid, {}),
+        expanded, expansion_stats = expanded_rows(
+            qid=qid,
+            rows=page_rows,
+            target_scores=target_scores_by_qid.get(qid, {}),
             max_new_pages=int(args.max_new_pages_per_qid),
             synthetic_score_mode=str(args.synthetic_score_mode),
             append_after_top_k=int(args.append_after_top_k),
+            verifier=verifier,
+            verification_min_score=float(args.verification_min_score),
+            verification_candidate_pool=int(args.verification_candidate_pool),
+            verified_score_mode=str(args.verified_score_mode),
         )
+        added_count = int(expansion_stats["added_page_count"])
         copied["page_retrieval_results"] = expanded
         copied["faiss_token_neighbor_candidate_expansion"] = {
             "source_external_page_graph_jsonl": str(args.external_page_graph_jsonl),
@@ -223,11 +434,19 @@ def main() -> None:
             "aggregation": str(args.aggregation),
             "synthetic_score_mode": str(args.synthetic_score_mode),
             "append_after_top_k": int(args.append_after_top_k),
-            "candidate_target_page_count": int(candidate_count),
-            "added_page_count": int(added_count),
+            "verification_mode": str(args.verification_mode),
+            "verification_min_score": float(args.verification_min_score),
+            "verification_candidate_pool": int(args.verification_candidate_pool),
+            "verified_score_mode": str(args.verified_score_mode),
+            **expansion_stats,
         }
         output_rows[qid] = copied
         added_counts.append(added_count)
+        candidate_counts.append(int(expansion_stats["candidate_target_page_count"]))
+        verified_attempted_counts.append(int(expansion_stats["verified_candidate_attempted_count"]))
+        verified_kept_counts.append(int(expansion_stats["verified_candidate_kept_count"]))
+        if expansion_stats["mean_verified_score"] is not None:
+            verified_scores.append(float(expansion_stats["mean_verified_score"]))
 
     output_payload: Any
     if isinstance(payload, dict) and "predictions" in payload:
@@ -247,11 +466,40 @@ def main() -> None:
         "qid_count": len(output_rows),
         "external_qid_count": len(target_scores_by_qid),
         "max_new_pages_per_qid": int(args.max_new_pages_per_qid),
+        "verification_mode": str(args.verification_mode),
+        "verification_min_score": float(args.verification_min_score),
+        "verification_candidate_pool": int(args.verification_candidate_pool),
+        "verified_score_mode": str(args.verified_score_mode),
         "total_added_page_count": int(sum(added_counts)),
         "mean_added_page_count": (
             float(sum(added_counts) / len(added_counts)) if added_counts else 0.0
         ),
         "qid_with_added_page_count": int(sum(1 for count in added_counts if count > 0)),
+        "total_candidate_target_page_count": int(sum(candidate_counts)),
+        "mean_candidate_target_page_count": (
+            float(sum(candidate_counts) / len(candidate_counts)) if candidate_counts else 0.0
+        ),
+        "total_verified_candidate_attempted_count": int(sum(verified_attempted_counts)),
+        "mean_verified_candidate_attempted_count": (
+            float(sum(verified_attempted_counts) / len(verified_attempted_counts))
+            if verified_attempted_counts
+            else 0.0
+        ),
+        "total_verified_candidate_kept_count": int(sum(verified_kept_counts)),
+        "mean_verified_candidate_kept_count": (
+            float(sum(verified_kept_counts) / len(verified_kept_counts))
+            if verified_kept_counts
+            else 0.0
+        ),
+        "mean_qid_mean_verified_score": (
+            float(sum(verified_scores) / len(verified_scores)) if verified_scores else None
+        ),
+        "missing_query_embedding_count": (
+            int(verifier.missing_query_count) if verifier is not None else 0
+        ),
+        "missing_page_embedding_count": (
+            int(verifier.missing_page_count) if verifier is not None else 0
+        ),
     }
     if args.summary_json:
         summary_path = Path(args.summary_json)
