@@ -53,6 +53,27 @@ class TrainingArguments(transformers.TrainingArguments):
         default=1,
         metadata={"help": "FAISS IVF nprobe used at retrieval time. Ignored for flat indexes."},
     )
+    faiss_token_table_mode: str = field(
+        default="load_embeddings",
+        metadata={
+            "help": (
+                "How to build the token-to-page table for FAISS retrieval. "
+                "'load_embeddings' preserves the original behavior and loads all embeddings; "
+                "'shape_only' reads only safetensor shapes and must be paired with "
+                "faiss_index_score_source='faiss_distance'."
+            )
+        },
+    )
+    faiss_index_score_source: str = field(
+        default="embedding",
+        metadata={
+            "help": (
+                "Source for final token scores after FAISS search. 'embedding' recomputes dot "
+                "products from all_token_embeddings; 'faiss_distance' uses returned FAISS inner "
+                "products and avoids materializing the full token matrix."
+            )
+        },
+    )
 
 
     # Local paths

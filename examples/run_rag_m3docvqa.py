@@ -51,6 +51,39 @@ from m3docrag.utils.tar import extract_tarfile
 from m3docrag.vqa import VQAModel
 
 
+def _read_embedding_shape(emb_path: Path) -> tuple[int, ...]:
+    import safetensors
+
+    with safetensors.safe_open(emb_path, framework="pt", device="cpu") as handle:
+        tensor_key = "embeddings" if "embeddings" in handle.keys() else next(iter(handle.keys()))
+        if hasattr(handle, "get_slice"):
+            return tuple(handle.get_slice(tensor_key).get_shape())
+        return tuple(handle.get_tensor(tensor_key).shape)
+
+
+def build_token2pageuid_from_embedding_shapes(
+    *,
+    embedding_dir: Path,
+    doc_ids: list[str],
+) -> list[str]:
+    token2pageuid = []
+    for doc_id in tqdm(doc_ids, total=len(doc_ids), desc="Building token2pageuid from shapes"):
+        emb_path = embedding_dir / f"{doc_id}.safetensors"
+        if not emb_path.exists():
+            raise FileNotFoundError(f"Missing embedding file: {emb_path}")
+        shape = _read_embedding_shape(emb_path)
+        if len(shape) != 3:
+            raise ValueError(
+                f"Expected ColPali document embeddings shaped [n_pages, n_tokens, dim], "
+                f"got {shape} for {emb_path}"
+            )
+        n_pages, n_tokens, _dim = shape
+        for page_id in range(n_pages):
+            page_uid = f"{doc_id}_page{page_id}"
+            token2pageuid.extend([page_uid] * int(n_tokens))
+    return token2pageuid
+
+
 def run_model(
     rag_model: MultimodalRAGModel,
     datum,
@@ -145,8 +178,25 @@ def evaluate(data_loader, rag_model, index=None, data_len=None, args=None, **kwa
 
     logger.info("Preparing doc indices")
 
+    if args.faiss_token_table_mode not in {"load_embeddings", "shape_only"}:
+        raise ValueError(
+            "faiss_token_table_mode must be one of {'load_embeddings', 'shape_only'}, "
+            f"got {args.faiss_token_table_mode!r}"
+        )
+    if args.faiss_index_score_source not in {"embedding", "faiss_distance"}:
+        raise ValueError(
+            "faiss_index_score_source must be one of {'embedding', 'faiss_distance'}, "
+            f"got {args.faiss_index_score_source!r}"
+        )
+    if args.faiss_token_table_mode == "shape_only" and args.faiss_index_score_source != "faiss_distance":
+        raise ValueError(
+            "faiss_token_table_mode='shape_only' requires faiss_index_score_source='faiss_distance'."
+        )
+
+    docid2embs = {}
     if args.retrieval_model_type == "colpali":
-        docid2embs = data_loader.dataset.load_all_embeddings()
+        if args.faiss_token_table_mode == "load_embeddings":
+            docid2embs = data_loader.dataset.load_all_embeddings()
 
     #  reduce_embeddings(docid2embs=docid2embs)
     # docid2embs_page_reudced = reduce_embeddings(docid2embs, dim='page')
@@ -156,7 +206,7 @@ def evaluate(data_loader, rag_model, index=None, data_len=None, args=None, **kwa
     all_token_embeddings = []
     token2pageuid = []
 
-    if args.retrieval_model_type == "colpali":
+    if args.retrieval_model_type == "colpali" and args.faiss_token_table_mode == "load_embeddings":
         for doc_id, doc_emb in tqdm(docid2embs.items(), total=len(docid2embs)):
             # e.g., doc_emb - torch.Size([9, 1030, 128])
             for page_id in range(len(doc_emb)):
@@ -166,12 +216,26 @@ def evaluate(data_loader, rag_model, index=None, data_len=None, args=None, **kwa
                 page_uid = f"{doc_id}_page{page_id}"
                 token2pageuid.extend([page_uid] * page_emb.shape[0])
 
-    logger.info(len(all_token_embeddings))
+        logger.info(len(all_token_embeddings))
 
-    all_token_embeddings = torch.cat(all_token_embeddings, dim=0)
-    all_token_embeddings = all_token_embeddings.float().numpy()
+        all_token_embeddings = torch.cat(all_token_embeddings, dim=0)
+        all_token_embeddings = all_token_embeddings.float().numpy()
 
-    logger.info("Created flattened token embeddings / token2pageuid")
+        logger.info("Created flattened token embeddings / token2pageuid")
+    elif args.retrieval_model_type == "colpali" and args.faiss_token_table_mode == "shape_only":
+        embedding_dir = Path(LOCAL_EMBEDDINGS_DIR) / args.embedding_name
+        token2pageuid = build_token2pageuid_from_embedding_shapes(
+            embedding_dir=embedding_dir,
+            doc_ids=data_loader.dataset.all_supporting_doc_ids,
+        )
+        all_token_embeddings = None
+        logger.info(f"Created token2pageuid from embedding shapes: {len(token2pageuid)} tokens")
+        if index is not None and hasattr(index, "ntotal") and int(index.ntotal) != len(token2pageuid):
+            raise ValueError(
+                "FAISS index and shape-derived token table disagree: "
+                f"index.ntotal={index.ntotal} token2pageuid={len(token2pageuid)}"
+            )
+        logger.info("Using FAISS distances for retrieval scoring; full token matrix was not loaded")
 
     qid2result = {}
 

@@ -74,18 +74,23 @@ class RAGModelBase:
                 )
 
         k = n_return_pages
-        _distances, indices = index.search(query_emb, k)
+        distances, indices = index.search(query_emb, k)
 
         final_page2scores = {}
         for q_idx, current_query_emb in enumerate(query_emb):
             current_q_page2scores = {}
 
             for nn_idx in range(k):
-                found_nearest_doc_token_idx = indices[q_idx, nn_idx]
+                found_nearest_doc_token_idx = int(indices[q_idx, nn_idx])
+                if found_nearest_doc_token_idx < 0:
+                    continue
                 page_uid = token2pageuid[found_nearest_doc_token_idx]
 
-                doc_token_emb = all_token_embeddings[found_nearest_doc_token_idx]
-                score = (current_query_emb * doc_token_emb).sum()
+                if all_token_embeddings is None:
+                    score = float(distances[q_idx, nn_idx])
+                else:
+                    doc_token_emb = all_token_embeddings[found_nearest_doc_token_idx]
+                    score = float((current_query_emb * doc_token_emb).sum())
 
                 if page_uid not in current_q_page2scores:
                     current_q_page2scores[page_uid] = score
@@ -107,7 +112,7 @@ class RAGModelBase:
         sorted_results = []
         for page_uid, score in top_k_pages:
             doc_id, page_idx = self._page_uid_to_doc_page(page_uid)
-            sorted_results.append((doc_id, page_idx, score.item()))
+            sorted_results.append((doc_id, page_idx, float(score)))
 
         return sorted_results
 
