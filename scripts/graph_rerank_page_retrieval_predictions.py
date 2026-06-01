@@ -3156,25 +3156,38 @@ def add_learned_page_prior_seed(
     raw_scores = [score for _uid, score, _rank in filtered]
     lo = min(raw_scores)
     hi = max(raw_scores)
-    added_values = []
+    scored_prior_rows: list[tuple[str, float, float]] = []
     for uid, raw_score, _base_rank in filtered:
         if bool(getattr(args, "learned_page_prior_normalize", True)):
             prior_score = (raw_score - lo) / (hi - lo) if hi > lo else (1.0 if len(filtered) == 1 else 0.0)
         else:
             prior_score = max(0.0, raw_score)
         prior_score = max(0.0, float(prior_score))
-        contribution = seed_weight * prior_score
+        if prior_score <= 0:
+            continue
+        scored_prior_rows.append((uid, float(raw_score), prior_score))
+
+    prior_score_sum = sum(prior_score for _uid, _raw_score, prior_score in scored_prior_rows)
+    if prior_score_sum <= 0:
+        return metadata
+
+    added_values = []
+    added_seed_total = 0.0
+    for uid, raw_score, prior_score in scored_prior_rows:
+        contribution = seed_weight * (prior_score / prior_score_sum)
         if contribution <= 0:
             continue
         page_seed[uid] += contribution
         records[uid].learned_page_prior_raw_score = float(raw_score)
         records[uid].learned_page_prior_score = float(prior_score)
         added_values.append(float(prior_score))
+        added_seed_total += float(contribution)
 
     metadata.update(
         {
             "learned_page_prior_matched_page_count": len(added_values),
-            "learned_page_prior_seed_total": seed_weight * sum(added_values),
+            "learned_page_prior_seed_total": added_seed_total,
+            "learned_page_prior_score_sum": prior_score_sum,
             "mean_learned_page_prior_score": statistics.fmean(added_values) if added_values else None,
             "max_learned_page_prior_score": max(added_values) if added_values else None,
         }
