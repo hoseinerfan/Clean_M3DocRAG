@@ -4,6 +4,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 
+USER_DENSE_PRED="${DENSE_PRED:-}"
+USER_SPARSE_PRED="${SPARSE_PRED:-}"
+USER_GOLD="${GOLD:-}"
+USER_DOC_PAGES_JSONL="${DOC_PAGES_JSONL:-}"
+
 VITAL_PATHS_ENV="${VITAL_PATHS_ENV:-$REPO_ROOT/hpc_vital_paths.generated.env}"
 if [[ -f "$VITAL_PATHS_ENV" ]]; then
   # shellcheck disable=SC1090
@@ -35,10 +40,10 @@ first_existing_path() {
 }
 
 SPLIT="${SPLIT:-dev}"
-GOLD="${M3DOCVQA_GOLD:-$GOLD}"
-DENSE_PRED="${M3DOCVQA_DENSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_${SPLIT}/mmqa_${SPLIT}_plain_top224_nprobe${FAISS_NPROBE}_effdiag_all.prediction.json}"
-SPARSE_PRED="${M3DOCVQA_SPARSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_${SPLIT}/mmqa_${SPLIT}_splade.prediction.json}"
-DOC_PAGES_JSONL="${M3DOCVQA_PAGE_TEXT_JSONL:-$LOCAL_OUTPUT_DIR/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl}"
+GOLD="${USER_GOLD:-${M3DOCVQA_GOLD:-$GOLD}}"
+DENSE_PRED="${USER_DENSE_PRED:-${M3DOCVQA_DENSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_${SPLIT}/mmqa_${SPLIT}_plain_top224_nprobe${FAISS_NPROBE}_effdiag_all.prediction.json}}"
+SPARSE_PRED="${USER_SPARSE_PRED:-${M3DOCVQA_SPARSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_${SPLIT}/mmqa_${SPLIT}_splade.prediction.json}}"
+DOC_PAGES_JSONL="${USER_DOC_PAGES_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-$LOCAL_OUTPUT_DIR/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl}}"
 SPLADE_INDEX_PT="${SPLADE_INDEX_PT:-$LOCAL_OUTPUT_DIR/m3docvqa_splade/m3docvqa_${SPLIT}_splade.pt}"
 GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$LOCAL_OUTPUT_DIR/m3docvqa_gpp_hyperlink_node_ablation}"
 LABEL_PREFIX="${LABEL_PREFIX:-mmqa_${SPLIT}_gpp_hyperlink_node}"
