@@ -164,6 +164,22 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
             ["docA_page1", "docA_page0", "docB_page0", "docA_page2"],
         )
 
+    def test_parse_alpha_grid_dedupes_and_rejects_invalid_values(self) -> None:
+        self.assertEqual(MODULE.parse_alpha_grid("0.1, 0.20,0.1"), [0.1, 0.2])
+        with self.assertRaises(ValueError):
+            MODULE.parse_alpha_grid("0.1,1.5")
+
+    def test_split_gold_for_tuning_is_deterministic_and_disjoint(self) -> None:
+        gold = {f"q{i}": {"qid": f"q{i}"} for i in range(10)}
+
+        fit_a, tune_a = MODULE.split_gold_for_tuning(gold, tune_fraction=0.2, seed=13)
+        fit_b, tune_b = MODULE.split_gold_for_tuning(gold, tune_fraction=0.2, seed=13)
+
+        self.assertEqual(tune_a, tune_b)
+        self.assertEqual(fit_a, fit_b)
+        self.assertEqual(len(tune_a), 2)
+        self.assertFalse(set(fit_a) & set(tune_a))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+
+INFERENCE_MODE="${INFERENCE_MODE:-blend_rerank}"
+AUTO_TUNE_BLEND_ALPHA="${AUTO_TUNE_BLEND_ALPHA:-1}"
+TUNE_FRACTION="${TUNE_FRACTION:-0.20}"
+TUNE_HIT_K="${TUNE_HIT_K:-4}"
+TUNE_BLEND_ALPHA_GRID="${TUNE_BLEND_ALPHA_GRID:-0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/output/m3docvqa_content_aware_auto_blend_sweep}"
+FORCE_RERUN="${FORCE_RERUN:-1}"
+
+export INFERENCE_MODE AUTO_TUNE_BLEND_ALPHA TUNE_FRACTION TUNE_HIT_K TUNE_BLEND_ALPHA_GRID OUT_DIR FORCE_RERUN
+
+bash "$REPO_ROOT/examples/run_m3docvqa_content_aware_base_sweep.sh"

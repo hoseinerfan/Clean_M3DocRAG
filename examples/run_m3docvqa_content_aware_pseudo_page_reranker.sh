@@ -102,6 +102,11 @@ add_source_pair_if_exists gpp_no_hyperlink "$TRAIN_GPP_NO_HYPERLINK_PRED" "$EVAL
 add_source_pair_if_exists gpp_doc_hyperlink "$TRAIN_GPP_DOC_HYPERLINK_PRED" "$EVAL_GPP_DOC_HYPERLINK_PRED"
 add_source_pair_if_exists gpp_page_hyperlink "$TRAIN_GPP_PAGE_HYPERLINK_PRED" "$EVAL_GPP_PAGE_HYPERLINK_PRED"
 
+auto_tune_args=()
+if [[ "${AUTO_TUNE_BLEND_ALPHA:-0}" == "1" ]]; then
+  auto_tune_args+=(--auto-tune-blend-alpha)
+fi
+
 echo "using_train_gold=$TRAIN_GOLD"
 echo "using_eval_gold=$EVAL_GOLD"
 echo "using_train_page_text_jsonl=$TRAIN_PAGE_TEXT_JSONL"
@@ -131,6 +136,10 @@ echo "using_label=$LABEL"
   --seed "${SEED:-13}" \
   --inference-mode "${INFERENCE_MODE:-blend_rerank}" \
   --blend-alpha "${BLEND_ALPHA:-0.30}" \
+  "${auto_tune_args[@]}" \
+  --tune-fraction "${TUNE_FRACTION:-0.20}" \
+  --tune-blend-alpha-grid "${TUNE_BLEND_ALPHA_GRID:-0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50}" \
+  --tune-hit-k "${TUNE_HIT_K:-4}" \
   --anchor-top-k "${ANCHOR_TOP_K:-4}" \
   --promotion-rank-min "${PROMOTION_RANK_MIN:-5}" \
   --promotion-rank-max "${PROMOTION_RANK_MAX:-200}" \

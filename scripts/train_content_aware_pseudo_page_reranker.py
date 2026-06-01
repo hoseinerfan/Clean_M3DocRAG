@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import random
@@ -132,6 +133,36 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.30,
         help="Model-score weight for blend_rerank. 0 keeps base order; 1 uses model order.",
+    )
+    parser.add_argument(
+        "--auto-tune-blend-alpha",
+        action="store_true",
+        help=(
+            "Select blend_alpha on a held-out slice of the training qids instead of using "
+            "--blend-alpha directly. This avoids tuning on dev."
+        ),
+    )
+    parser.add_argument(
+        "--tune-fraction",
+        type=float,
+        default=0.20,
+        help="Fraction of training qids held out for auto blend-alpha tuning.",
+    )
+    parser.add_argument(
+        "--tune-blend-alpha-grid",
+        default="0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50",
+        help="Comma-separated alpha candidates used by --auto-tune-blend-alpha.",
+    )
+    parser.add_argument(
+        "--tune-hit-k",
+        type=int,
+        default=4,
+        help="Pseudo-page recall cutoff optimized by --auto-tune-blend-alpha.",
+    )
+    parser.add_argument(
+        "--skip-retrain-after-tuning",
+        action="store_true",
+        help="Keep the fit-split model after tuning instead of retraining on all train qids.",
     )
     parser.add_argument("--anchor-top-k", type=int, default=4)
     parser.add_argument("--promotion-rank-min", type=int, default=5)
@@ -546,6 +577,25 @@ def gold_doc_ids(row: dict[str, Any]) -> set[str]:
     return docs
 
 
+def split_gold_for_tuning(
+    gold: dict[str, dict[str, Any]],
+    *,
+    tune_fraction: float,
+    seed: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    if not 0.0 < float(tune_fraction) < 1.0:
+        raise ValueError(f"tune_fraction must be in (0, 1), got {tune_fraction}")
+    qids = sorted(gold)
+    rng = random.Random(int(seed))
+    rng.shuffle(qids)
+    tune_count = int(round(len(qids) * float(tune_fraction)))
+    tune_count = max(1, min(len(qids) - 1, tune_count)) if len(qids) >= 2 else 0
+    tune_qids = set(qids[:tune_count])
+    fit = {qid: row for qid, row in gold.items() if qid not in tune_qids}
+    tune = {qid: row for qid, row in gold.items() if qid in tune_qids}
+    return fit, tune
+
+
 def pick_negative_indices(records: list[dict[str, Any]], positive_uids: set[str], args: argparse.Namespace) -> list[int]:
     negative_indices: list[int] = []
     used: set[int] = set()
@@ -895,6 +945,101 @@ def rerank_records(records: list[dict[str, Any]], args: argparse.Namespace) -> l
     )
 
 
+def parse_alpha_grid(raw: str) -> list[float]:
+    values: list[float] = []
+    seen: set[float] = set()
+    for part in str(raw).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        value = float(part)
+        if value < 0.0 or value > 1.0:
+            raise ValueError(f"Blend alpha must be in [0, 1], got {value}")
+        key = round(value, 8)
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(value)
+    if not values:
+        raise ValueError("Empty tune blend-alpha grid.")
+    return values
+
+
+def tune_blend_alpha(
+    *,
+    tune_gold: dict[str, dict[str, Any]],
+    base_pred: dict[str, dict[str, Any]],
+    page_features: dict[str, dict[str, Any]],
+    source_maps_by_label: dict[str, dict[str, dict[str, float]]],
+    mean: np.ndarray,
+    std: np.ndarray,
+    weights: np.ndarray,
+    bias: float,
+    args: argparse.Namespace,
+) -> dict[str, Any]:
+    alpha_grid = parse_alpha_grid(str(args.tune_blend_alpha_grid))
+    hit_k = int(args.tune_hit_k)
+    if hit_k <= 0:
+        raise ValueError(f"tune_hit_k must be positive, got {hit_k}")
+    candidate_args = copy.copy(args)
+    candidate_args.inference_mode = "blend_rerank"
+
+    hits = {alpha: 0 for alpha in alpha_grid}
+    evaluated = 0
+    skipped_no_page_gold = 0
+    skipped_missing_prediction = 0
+    for qid, gold_row in tune_gold.items():
+        pages_gold = gold_page_uids(gold_row)
+        if not pages_gold:
+            skipped_no_page_gold += 1
+            continue
+        records = ranked_page_records(base_pred.get(qid), int(args.candidate_top_k))
+        if not records:
+            skipped_missing_prediction += 1
+            continue
+        scored_records = score_records(
+            qid=qid,
+            gold_row=gold_row,
+            records=records,
+            page_features=page_features,
+            source_maps_by_label=source_maps_by_label,
+            mean=mean,
+            std=std,
+            weights=weights,
+            bias=bias,
+        )
+        evaluated += 1
+        for alpha in alpha_grid:
+            candidate_args.blend_alpha = float(alpha)
+            candidate_records = [dict(row) for row in scored_records]
+            ranked = rerank_records(candidate_records, candidate_args)
+            ranked_uids = [str(row["uid"]) for row in ranked]
+            if any(uid in pages_gold for uid in ranked_uids[:hit_k]):
+                hits[alpha] += 1
+
+    if evaluated <= 0:
+        raise ValueError("No held-out train qids with pseudo-page labels were available for blend-alpha tuning.")
+
+    scores = [
+        {
+            "blend_alpha": float(alpha),
+            f"page@{hit_k}": float(hits[alpha]) / float(evaluated) if evaluated else 0.0,
+            "hit_count": int(hits[alpha]),
+        }
+        for alpha in alpha_grid
+    ]
+    best = max(scores, key=lambda row: (float(row[f"page@{hit_k}"]), -float(row["blend_alpha"])))
+    return {
+        "selected_blend_alpha": float(best["blend_alpha"]),
+        "optimized_metric": f"page@{hit_k}",
+        "optimized_metric_value": float(best[f"page@{hit_k}"]),
+        "tune_eval_qid_count": int(evaluated),
+        "skipped_no_page_gold": int(skipped_no_page_gold),
+        "skipped_missing_prediction": int(skipped_missing_prediction),
+        "alpha_scores": scores,
+    }
+
+
 def apply_reranker(
     *,
     gold: dict[str, dict[str, Any]],
@@ -1104,8 +1249,17 @@ def main() -> None:
         label, path = parse_labeled_path(spec)
         eval_source_maps[label] = source_maps(load_prediction(path), int(args.candidate_top_k))
 
+    fit_gold = train_gold
+    tune_gold: dict[str, dict[str, Any]] = {}
+    if bool(args.auto_tune_blend_alpha):
+        fit_gold, tune_gold = split_gold_for_tuning(
+            train_gold,
+            tune_fraction=float(args.tune_fraction),
+            seed=int(args.seed),
+        )
+
     X, y, train_meta = build_matrix(
-        gold=train_gold,
+        gold=fit_gold,
         base_pred=train_base,
         page_features=train_page_features,
         source_maps_by_label=train_source_maps,
@@ -1113,6 +1267,42 @@ def main() -> None:
     )
     X_train, mean, std = standardize_train(X)
     weights, bias, history = train_logistic(X_train, y, args)
+
+    tuning_summary: dict[str, Any] | None = None
+    if bool(args.auto_tune_blend_alpha):
+        fit_train_meta = dict(train_meta)
+        tuning_summary = tune_blend_alpha(
+            tune_gold=tune_gold,
+            base_pred=train_base,
+            page_features=train_page_features,
+            source_maps_by_label=train_source_maps,
+            mean=mean,
+            std=std,
+            weights=weights,
+            bias=bias,
+            args=args,
+        )
+        args.blend_alpha = float(tuning_summary["selected_blend_alpha"])
+        if not bool(args.skip_retrain_after_tuning):
+            X, y, train_meta = build_matrix(
+                gold=train_gold,
+                base_pred=train_base,
+                page_features=train_page_features,
+                source_maps_by_label=train_source_maps,
+                args=args,
+            )
+            X_train, mean, std = standardize_train(X)
+            weights, bias, history = train_logistic(X_train, y, args)
+        train_meta = {
+            **train_meta,
+            "auto_tune_blend_alpha": True,
+            "retrained_after_tuning": not bool(args.skip_retrain_after_tuning),
+            "fit_qid_count": int(len(fit_gold)),
+            "tune_qid_count": int(len(tune_gold)),
+            "selected_blend_alpha": float(args.blend_alpha),
+            "fit_train_metadata": fit_train_meta,
+            "tuning_summary": tuning_summary,
+        }
 
     output_pred, prior_rows = apply_reranker(
         gold=eval_gold,
@@ -1142,6 +1332,7 @@ def main() -> None:
             "candidate_top_k": int(args.candidate_top_k),
             "inference_mode": args.inference_mode,
             "blend_alpha": float(args.blend_alpha),
+            "auto_tune_blend_alpha": bool(args.auto_tune_blend_alpha),
         },
     }
     output_model_json = Path(args.output_model_json)
@@ -1166,6 +1357,7 @@ def main() -> None:
         "eval_page_text_jsonl": args.eval_page_text_jsonl,
         "feature_names": FEATURE_NAMES,
         "train_metadata": train_meta,
+        "tuning_summary": tuning_summary,
         "metrics": metrics,
         "movement_vs_base": movement_vs_base(base_pred=eval_base, candidate_pred=output_pred, gold=eval_gold),
     }
