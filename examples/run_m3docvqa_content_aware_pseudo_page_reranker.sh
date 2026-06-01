@@ -15,10 +15,8 @@ if [[ -f "$VITAL_PATHS_ENV" ]]; then
 fi
 
 CUSTOM_ROOT="${CUSTOM_ROOT:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom}"
-TRAIN_GOLD="${TRAIN_GOLD:-$REPO_ROOT/data/m3-docvqa/multimodalqa/MMQA_train.jsonl}"
-EVAL_GOLD="${EVAL_GOLD:-$REPO_ROOT/data/m3-docvqa/multimodalqa/MMQA_dev.jsonl}"
-OUT_DIR="${OUT_DIR:-$REPO_ROOT/output/m3docvqa_rank_band_page_promotion}"
-LABEL="${LABEL:-mmqa_train_to_dev_rank_band_page_promotion}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/output/m3docvqa_content_aware_pseudo_page_reranker}"
+LABEL="${LABEL:-mmqa_train_to_dev_content_aware_pseudo_page}"
 
 first_existing_path() {
   local path
@@ -40,10 +38,13 @@ require_file() {
   fi
 }
 
+TRAIN_GOLD="${TRAIN_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_train_pseudo_page_labels_strict.augmented_gold.jsonl}"
+EVAL_GOLD="${EVAL_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_dev_pseudo_page_labels_strict.augmented_gold.jsonl}"
+TRAIN_PAGE_TEXT_JSONL="${TRAIN_PAGE_TEXT_JSONL:-${M3DOCVQA_TRAIN_PAGE_TEXT_JSONL:-$CUSTOM_ROOT/outputs/m3docvqa_page_text/m3docvqa_train_page_text.jsonl}}"
+EVAL_PAGE_TEXT_JSONL="${EVAL_PAGE_TEXT_JSONL:-${M3DOCVQA_DEV_PAGE_TEXT_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-$CUSTOM_ROOT/outputs/m3docvqa_page_text/m3docvqa_dev_page_text.jsonl}}}"
+
 TRAIN_DENSE_PRED="${TRAIN_DENSE_PRED:-${M3DOCVQA_TRAIN_DENSE_PRED:-$(first_existing_path \
-  "$CUSTOM_ROOT/outputs/mmqa_train_plain_top224_nprobe4_effdiag_all.prediction.json" \
-  "$CUSTOM_ROOT/outputs/mmqa_train_plain_top224_nprobe4_effdiag_train.prediction.json" \
-  "$REPO_ROOT/output/m3docvqa_plain_top224_mmqa_train/mmqa_train_plain_top224_nprobe4_effdiag_all.prediction.json" \
+  "$CUSTOM_ROOT/outputs/m3docvqa_baseline_mmqa_train/mmqa_train_baseline_ret1000_ivfflat_nprobe4.prediction.json" \
   "$REPO_ROOT/output/m3docvqa_baseline_mmqa_train/mmqa_train_baseline_ret1000_ivfflat_nprobe4.prediction.json" \
   || true)}}"
 EVAL_DENSE_PRED="${EVAL_DENSE_PRED:-${M3DOCVQA_DEV_DENSE_PRED:-${M3DOCVQA_DENSE_PRED:-${DENSE_PRED:-$(first_existing_path \
@@ -60,7 +61,7 @@ EVAL_SPLADE_PRED="${EVAL_SPLADE_PRED:-${M3DOCVQA_DEV_SPLADE_PRED:-${M3DOCVQA_SPL
   "$REPO_ROOT/output/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json" \
   || true)}}}}"
 
-GPP_TRAIN_OUT_DIR="${GPP_TRAIN_OUT_DIR:-$REPO_ROOT/output/m3docvqa_gpp_hyperlink_node_ablation_mmr_target1_train}"
+GPP_TRAIN_OUT_DIR="${GPP_TRAIN_OUT_DIR:-$REPO_ROOT/output/m3docvqa_gpp_hyperlink_node_ablation_mmr_target1_train_real}"
 GPP_EVAL_OUT_DIR="${GPP_EVAL_OUT_DIR:-$REPO_ROOT/output/m3docvqa_gpp_hyperlink_node_ablation_mmr_target1}"
 GPP_TRAIN_LABEL_PREFIX="${GPP_TRAIN_LABEL_PREFIX:-mmqa_train_gpp_hyperlink_node}"
 GPP_EVAL_LABEL_PREFIX="${GPP_EVAL_LABEL_PREFIX:-mmqa_dev_gpp_hyperlink_node}"
@@ -76,6 +77,8 @@ EVAL_GPP_PAGE_HYPERLINK_PRED="${EVAL_GPP_PAGE_HYPERLINK_PRED:-$GPP_EVAL_OUT_DIR/
 mkdir -p "$OUT_DIR"
 require_file train_gold "$TRAIN_GOLD"
 require_file eval_gold "$EVAL_GOLD"
+require_file train_page_text_jsonl "$TRAIN_PAGE_TEXT_JSONL"
+require_file eval_page_text_jsonl "$EVAL_PAGE_TEXT_JSONL"
 require_file train_dense_pred "$TRAIN_DENSE_PRED"
 require_file eval_dense_pred "$EVAL_DENSE_PRED"
 
@@ -101,32 +104,38 @@ add_source_pair_if_exists gpp_page_hyperlink "$TRAIN_GPP_PAGE_HYPERLINK_PRED" "$
 
 echo "using_train_gold=$TRAIN_GOLD"
 echo "using_eval_gold=$EVAL_GOLD"
+echo "using_train_page_text_jsonl=$TRAIN_PAGE_TEXT_JSONL"
+echo "using_eval_page_text_jsonl=$EVAL_PAGE_TEXT_JSONL"
 echo "using_train_dense_pred=$TRAIN_DENSE_PRED"
 echo "using_eval_dense_pred=$EVAL_DENSE_PRED"
 echo "using_out_dir=$OUT_DIR"
+echo "using_label=$LABEL"
 
-"$PYTHON_BIN" "$REPO_ROOT/scripts/train_rank_band_page_promotion_reranker.py" \
+"$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
   --eval-gold "$EVAL_GOLD" \
   --train-base-pred "$TRAIN_DENSE_PRED" \
   --eval-base-pred "$EVAL_DENSE_PRED" \
+  --train-page-text-jsonl "$TRAIN_PAGE_TEXT_JSONL" \
+  --eval-page-text-jsonl "$EVAL_PAGE_TEXT_JSONL" \
   "${train_sources[@]}" \
   "${eval_sources[@]}" \
   --candidate-top-k "${CANDIDATE_TOP_K:-1000}" \
+  --negatives-per-band "${NEGATIVES_PER_BAND:-10}" \
+  --max-negatives-per-qid "${MAX_NEGATIVES_PER_QID:-64}" \
+  --epochs "${EPOCHS:-80}" \
+  --learning-rate "${LEARNING_RATE:-0.01}" \
+  --weight-decay "${WEIGHT_DECAY:-1e-4}" \
+  --batch-size "${BATCH_SIZE:-65536}" \
+  --positive-weight-cap "${POSITIVE_WEIGHT_CAP:-20}" \
+  --seed "${SEED:-13}" \
+  --inference-mode "${INFERENCE_MODE:-blend_rerank}" \
+  --blend-alpha "${BLEND_ALPHA:-0.30}" \
   --anchor-top-k "${ANCHOR_TOP_K:-4}" \
   --promotion-rank-min "${PROMOTION_RANK_MIN:-5}" \
-  --promotion-rank-max "${PROMOTION_RANK_MAX:-500}" \
-  --positive-scope "${PROMOTION_POSITIVE_SCOPE:-${POSITIVE_SCOPE:-doc}}" \
-  --negatives-per-band "${NEGATIVES_PER_BAND:-8}" \
-  --max-negatives-per-qid "${MAX_NEGATIVES_PER_QID:-48}" \
-  --epochs "${EPOCHS:-120}" \
-  --learning-rate "${LEARNING_RATE:-0.03}" \
-  --weight-decay "${WEIGHT_DECAY:-1e-4}" \
-  --pair-batch-size "${PAIR_BATCH_SIZE:-65536}" \
-  --seed "${SEED:-13}" \
-  --inference-mode "${INFERENCE_MODE:-safe_promote}" \
+  --promotion-rank-max "${PROMOTION_RANK_MAX:-200}" \
   --max-promotions-per-qid "${MAX_PROMOTIONS_PER_QID:-2}" \
-  --promotion-margin "${PROMOTION_MARGIN:-0.0}" \
+  --promotion-margin "${PROMOTION_MARGIN:-0.05}" \
   --output-model-json "$OUT_DIR/${LABEL}.model.json" \
   --output-prediction-json "$OUT_DIR/${LABEL}.dev.prediction.json" \
   --output-summary-json "$OUT_DIR/${LABEL}.summary.json" \
