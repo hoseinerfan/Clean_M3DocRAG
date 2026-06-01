@@ -208,8 +208,8 @@ add_first_existing_run rank_band_direct \
   "$REPO_OUTPUT_DIR/m3docvqa_rank_band_page_promotion/mmqa_train_to_dev_rank_band_page_promotion.dev.prediction.json"
 add_glob_runs rank_band_graph_prior_ \
   "$REPO_OUTPUT_DIR/m3docvqa_rank_band_graph_prior"*/*.prediction.json
-add_first_existing_run content_aware_pseudo_page \
-  "$REPO_OUTPUT_DIR/m3docvqa_content_aware_pseudo_page_reranker/mmqa_train_to_dev_content_aware_pseudo_page.dev.prediction.json"
+add_glob_runs content_aware_ \
+  "$REPO_OUTPUT_DIR/m3docvqa_content_aware"*/*.prediction.json
 
 if [[ "${#run_args[@]}" -lt 4 ]]; then
   echo "too_few_runs=${#run_args[@]}: expected dense plus at least a few candidate outputs" >&2
