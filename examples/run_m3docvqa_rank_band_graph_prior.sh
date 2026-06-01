@@ -28,11 +28,19 @@ export LEARNED_PAGE_PRIOR_SCORE_FIELD="${LEARNED_PAGE_PRIOR_SCORE_FIELD:-learned
 export LEARNED_PAGE_PRIOR_NORMALIZE="${LEARNED_PAGE_PRIOR_NORMALIZE:-1}"
 export GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$REPO_ROOT/output/m3docvqa_rank_band_graph_prior}"
 export GRAPH_LABEL="${GRAPH_LABEL:-mmqa_dev_gpp_rank_band_graph_prior_w${LEARNED_PAGE_PRIOR_SEED_WEIGHT}_top${LEARNED_PAGE_PRIOR_TOP_K}}"
+if [[ -z "${DENSE_PRED:-}" && -n "${EVAL_DENSE_PRED:-}" ]]; then
+  export DENSE_PRED="$EVAL_DENSE_PRED"
+fi
+if [[ -z "${SPARSE_PRED:-}" && -n "${EVAL_SPLADE_PRED:-}" ]]; then
+  export SPARSE_PRED="$EVAL_SPLADE_PRED"
+fi
 
 echo "using_learned_page_prior_jsonl=$LEARNED_PAGE_PRIOR_JSONL"
 echo "using_learned_page_prior_seed_weight=$LEARNED_PAGE_PRIOR_SEED_WEIGHT"
 echo "using_learned_page_prior_min_base_rank=$LEARNED_PAGE_PRIOR_MIN_BASE_RANK"
 echo "using_learned_page_prior_max_base_rank=$LEARNED_PAGE_PRIOR_MAX_BASE_RANK"
 echo "using_learned_page_prior_top_k=$LEARNED_PAGE_PRIOR_TOP_K"
+echo "using_dense_pred=${DENSE_PRED:-}"
+echo "using_sparse_pred=${SPARSE_PRED:-}"
 
 bash "$REPO_ROOT/scripts/run_m3docvqa_page_preserving_graph_pipeline.sh"
