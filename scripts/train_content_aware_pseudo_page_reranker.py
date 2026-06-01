@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument(
         "--inference-mode",
-        choices=["blend_rerank", "full_rerank", "safe_promote"],
+        choices=["blend_rerank", "full_rerank", "safe_promote", "doc_head_blend"],
         default="blend_rerank",
     )
     parser.add_argument(
@@ -786,6 +786,46 @@ def minmax_by_key(records: list[dict[str, Any]], key: str) -> dict[str, float]:
     return {record["uid"]: (float(record.get(key, 0.0)) - lo) / (hi - lo) for record in records}
 
 
+def assign_blend_scores(records: list[dict[str, Any]], alpha: float) -> None:
+    model_norm = minmax_by_key(records, "learned_score")
+    base_rank_scores = {row["uid"]: 1.0 / math.log2(float(row["base_rank"]) + 1.0) for row in records}
+    lo = min(base_rank_scores.values())
+    hi = max(base_rank_scores.values())
+    if not math.isclose(lo, hi):
+        base_rank_scores = {uid: (value - lo) / (hi - lo) for uid, value in base_rank_scores.items()}
+    for row in records:
+        row["rerank_score"] = (1.0 - alpha) * base_rank_scores[row["uid"]] + alpha * model_norm[row["uid"]]
+
+
+def doc_head_rerank_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    doc_order: list[str] = []
+    rows_by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in records:
+        doc_id = str(row["doc_id"])
+        if doc_id not in rows_by_doc:
+            doc_order.append(doc_id)
+        rows_by_doc[doc_id].append(row)
+
+    head_by_doc: dict[str, dict[str, Any]] = {}
+    for doc_id, rows in rows_by_doc.items():
+        head_by_doc[doc_id] = max(
+            rows,
+            key=lambda row: (
+                float(row.get("rerank_score", row.get("learned_score", 0.0))),
+                -int(row["base_rank"]),
+            ),
+        )
+
+    output: list[dict[str, Any]] = []
+    selected_uids: set[str] = set()
+    for doc_id in doc_order:
+        head = head_by_doc[doc_id]
+        output.append(head)
+        selected_uids.add(str(head["uid"]))
+    output.extend(row for row in records if str(row["uid"]) not in selected_uids)
+    return output
+
+
 def rerank_records(records: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
     if not records:
         return []
@@ -809,15 +849,9 @@ def rerank_records(records: list[dict[str, Any]], args: argparse.Namespace) -> l
         promoted_uids = {row["uid"] for row in promotions}
         return promotions + [row for row in records if row["uid"] not in promoted_uids]
 
-    model_norm = minmax_by_key(records, "learned_score")
-    base_rank_scores = {row["uid"]: 1.0 / math.log2(float(row["base_rank"]) + 1.0) for row in records}
-    lo = min(base_rank_scores.values())
-    hi = max(base_rank_scores.values())
-    if not math.isclose(lo, hi):
-        base_rank_scores = {uid: (value - lo) / (hi - lo) for uid, value in base_rank_scores.items()}
-    alpha = float(args.blend_alpha)
-    for row in records:
-        row["rerank_score"] = (1.0 - alpha) * base_rank_scores[row["uid"]] + alpha * model_norm[row["uid"]]
+    assign_blend_scores(records, float(args.blend_alpha))
+    if args.inference_mode == "doc_head_blend":
+        return doc_head_rerank_records(records)
     return sorted(
         records,
         key=lambda row: (-float(row["rerank_score"]), int(row["base_rank"]), row["uid"]),
