@@ -116,6 +116,7 @@ echo "using_out_dir=$OUT_DIR"
   --anchor-top-k "${ANCHOR_TOP_K:-4}" \
   --promotion-rank-min "${PROMOTION_RANK_MIN:-5}" \
   --promotion-rank-max "${PROMOTION_RANK_MAX:-500}" \
+  --positive-scope "${POSITIVE_SCOPE:-doc}" \
   --negatives-per-band "${NEGATIVES_PER_BAND:-8}" \
   --max-negatives-per-qid "${MAX_NEGATIVES_PER_QID:-48}" \
   --epochs "${EPOCHS:-120}" \

@@ -68,6 +68,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--anchor-top-k", type=int, default=4)
     parser.add_argument("--promotion-rank-min", type=int, default=5)
     parser.add_argument("--promotion-rank-max", type=int, default=500)
+    parser.add_argument(
+        "--positive-scope",
+        choices=["auto", "page", "doc"],
+        default="auto",
+        help=(
+            "Training target granularity. 'page' marks only exact gold pages positive; "
+            "'doc' marks any page from a gold document positive; 'auto' uses page labels "
+            "when available and falls back to document labels."
+        ),
+    )
     parser.add_argument("--negatives-per-band", type=int, default=8)
     parser.add_argument("--max-negatives-per-qid", type=int, default=48)
     parser.add_argument("--epochs", type=int, default=120)
@@ -451,22 +461,38 @@ def build_candidates_for_qid(
 def selected_training_rows(
     candidates: list[dict[str, Any]],
     gold_pages: set[str],
+    gold_docs: set[str],
     *,
+    positive_scope: str,
     anchor_top_k: int,
     promotion_rank_max: int,
     negatives_per_band: int,
     max_negatives_per_qid: int,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    positives = [row for row in candidates if row["uid"] in gold_pages]
+    if positive_scope == "auto":
+        resolved_scope = "page" if gold_pages else "doc"
+    else:
+        resolved_scope = positive_scope
+    if resolved_scope == "page":
+        positives = [row for row in candidates if row["uid"] in gold_pages]
+    elif resolved_scope == "doc":
+        positives = [row for row in candidates if str(row["doc_id"]) in gold_docs]
+    else:
+        raise ValueError(f"Unsupported positive_scope: {positive_scope}")
     if not positives:
-        return [], {"no_positive_in_pool": 1}
+        return [], {f"no_positive_in_pool_{resolved_scope}": 1}
     negatives_by_uid: dict[str, dict[str, Any]] = {}
 
     def add_negatives(lo: int, hi: int, limit: int) -> None:
         count = 0
         for row in candidates:
             rank = int(row["base_rank"])
-            if rank < lo or rank > hi or row["uid"] in gold_pages:
+            is_positive = (
+                row["uid"] in gold_pages
+                if resolved_scope == "page"
+                else str(row["doc_id"]) in gold_docs
+            )
+            if rank < lo or rank > hi or is_positive:
                 continue
             negatives_by_uid.setdefault(str(row["uid"]), row)
             count += 1
@@ -484,11 +510,17 @@ def selected_training_rows(
     rows = []
     for row in positives + negatives:
         copied = dict(row)
-        copied["label"] = 1.0 if row["uid"] in gold_pages else 0.0
+        copied["label"] = (
+            1.0
+            if (row["uid"] in gold_pages if resolved_scope == "page" else str(row["doc_id"]) in gold_docs)
+            else 0.0
+        )
+        copied["positive_scope"] = resolved_scope
         rows.append(copied)
     return rows, {
         "positive_count": len(positives),
         "negative_count": len(negatives),
+        f"positive_scope_{resolved_scope}_qid_count": 1,
     }
 
 
@@ -770,6 +802,8 @@ def main() -> None:
         rows, stats = selected_training_rows(
             candidates,
             gold_page_uids(train_gold[qid]),
+            gold_doc_ids(train_gold[qid]),
+            positive_scope=args.positive_scope,
             anchor_top_k=int(args.anchor_top_k),
             promotion_rank_max=int(args.promotion_rank_max),
             negatives_per_band=int(args.negatives_per_band),
@@ -925,6 +959,7 @@ def main() -> None:
         "prediction_path": str(pred_path),
         "feature_names": feature_names,
         "source_labels": source_labels,
+        "positive_scope": args.positive_scope,
         "train_qid_count": len(train_rows_by_qid),
         "train_row_count": len(all_train_rows),
         "train_pair_count": int(len(pair_pos)),
