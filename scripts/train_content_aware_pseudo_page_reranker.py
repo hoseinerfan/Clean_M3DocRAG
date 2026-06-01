@@ -124,7 +124,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument(
         "--inference-mode",
-        choices=["blend_rerank", "full_rerank", "safe_promote", "doc_head_blend"],
+        choices=["blend_rerank", "full_rerank", "safe_promote", "doc_head_blend", "doc_slot_blend"],
         default="blend_rerank",
     )
     parser.add_argument(
@@ -826,6 +826,41 @@ def doc_head_rerank_records(records: list[dict[str, Any]]) -> list[dict[str, Any
     return output
 
 
+def doc_slot_rerank_records(records: list[dict[str, Any]], max_rank: int) -> list[dict[str, Any]]:
+    eligible_by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    eligible_uids: set[str] = set()
+    for row in records:
+        if int(row["base_rank"]) > int(max_rank):
+            continue
+        doc_id = str(row["doc_id"])
+        eligible_by_doc[doc_id].append(row)
+        eligible_uids.add(str(row["uid"]))
+
+    sorted_by_doc: dict[str, list[dict[str, Any]]] = {}
+    for doc_id, rows in eligible_by_doc.items():
+        sorted_by_doc[doc_id] = sorted(
+            rows,
+            key=lambda row: (
+                -float(row.get("rerank_score", row.get("learned_score", 0.0))),
+                int(row["base_rank"]),
+                str(row["uid"]),
+            ),
+        )
+
+    next_idx_by_doc: Counter[str] = Counter()
+    output: list[dict[str, Any]] = []
+    for row in records:
+        uid = str(row["uid"])
+        if uid not in eligible_uids:
+            output.append(row)
+            continue
+        doc_id = str(row["doc_id"])
+        idx = next_idx_by_doc[doc_id]
+        output.append(sorted_by_doc[doc_id][idx])
+        next_idx_by_doc[doc_id] += 1
+    return output
+
+
 def rerank_records(records: list[dict[str, Any]], args: argparse.Namespace) -> list[dict[str, Any]]:
     if not records:
         return []
@@ -852,6 +887,8 @@ def rerank_records(records: list[dict[str, Any]], args: argparse.Namespace) -> l
     assign_blend_scores(records, float(args.blend_alpha))
     if args.inference_mode == "doc_head_blend":
         return doc_head_rerank_records(records)
+    if args.inference_mode == "doc_slot_blend":
+        return doc_slot_rerank_records(records, int(args.promotion_rank_max))
     return sorted(
         records,
         key=lambda row: (-float(row["rerank_score"]), int(row["base_rank"]), row["uid"]),

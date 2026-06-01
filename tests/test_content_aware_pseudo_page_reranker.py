@@ -144,6 +144,26 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
             ["docA_page1", "docB_page0", "docC_page0", "docA_page0"],
         )
 
+    def test_doc_slot_blend_only_reorders_same_doc_early_slots(self) -> None:
+        records = [
+            {"uid": "docA_page0", "doc_id": "docA", "page_idx": 0, "base_rank": 1, "learned_score": 0.1},
+            {"uid": "docA_page1", "doc_id": "docA", "page_idx": 1, "base_rank": 2, "learned_score": 0.9},
+            {"uid": "docB_page0", "doc_id": "docB", "page_idx": 0, "base_rank": 3, "learned_score": 0.7},
+            {"uid": "docA_page2", "doc_id": "docA", "page_idx": 2, "base_rank": 5, "learned_score": 1.0},
+        ]
+        args = type(
+            "Args",
+            (),
+            {"inference_mode": "doc_slot_blend", "blend_alpha": 1.0, "promotion_rank_max": 3},
+        )()
+
+        reranked = MODULE.rerank_records(records, args)
+
+        self.assertEqual(
+            [row["uid"] for row in reranked],
+            ["docA_page1", "docA_page0", "docB_page0", "docA_page2"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
