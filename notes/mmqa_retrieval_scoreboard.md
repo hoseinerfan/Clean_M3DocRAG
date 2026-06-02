@@ -124,12 +124,13 @@ Counterfactual page promotion is a safety-oriented extension. It learns whether 
 |---|---:|---:|---:|---:|---:|---|
 | GPP no-hyperlink base | 0.6740 | 0.7221 | 0.8328 | 0.9488 | 0.9540 | Base for the counterfactual run. |
 | Counterfactual page promotion, insert rank 5 | 0.6740 | 0.7707 | 0.8530 | 0.9497 | 0.9584 | Safe top-5 repair; preserves top-4. |
-| Gain | +0.0000 | +0.0486 | +0.0201 | +0.0009 | +0.0044 | `188` recovered, `77` lost, net `+111`; threshold `0.80`. |
+| Counterfactual page promotion, insert rank 4 | 0.7282 | 0.7694 | 0.8556 | 0.9510 | 0.9580 | Stronger top-4 repair; `196` recovered, `72` lost, net `+124`; threshold `0.80`. |
+| Rank-4 gain | +0.0543 | +0.0473 | +0.0228 | +0.0022 | +0.0039 | Improves early page evidence without hurting document recall. |
 
 Current interpretation:
 
 - Main method: content-aware promotion with adaptive `page@5` tuning.
-- Safe repair extension: counterfactual page promotion.
+- Targeted repair extension: counterfactual page promotion. The insert-rank-4 variant now gives a real `page@4` improvement, while insert-rank-5 remains the conservative top-5 repair.
 - Standard LightGBM LambdaMART was tested as a control. It improved `page@4` over GPP no-hyperlink (`0.6954` vs `0.6740`) but hurt `page@10` and doc recall, so it is not the main method.
 - The strongest claim is pseudo-page-supervised, graph-aware content page promotion, not generic LTR.
 

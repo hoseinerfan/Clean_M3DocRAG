@@ -77,7 +77,7 @@ Compared with the earlier fixed `alpha=0.30` content-aware result, adaptive `pag
 
 Counterfactual page promotion is a safety-oriented extension. Instead of reranking all candidates, it learns whether promoting one candidate page would repair the current top-k evidence set.
 
-Current run:
+Top-5 safe-repair run:
 
 - base: GPP no-hyperlink
 - objective: repair `page@5`
@@ -92,12 +92,26 @@ Current run:
 | Counterfactual page promotion | 0.6740 | 0.7707 | 0.8530 | 0.9497 | 0.9584 |
 | Gain | +0.0000 | +0.0486 | +0.0201 | +0.0009 | +0.0044 |
 
+Top-4 repair run:
+
+- base: GPP no-hyperlink
+- objective: repair `page@4`
+- insertion rank: 4
+- selected threshold: 0.80
+- promoted pages on dev: 1,702
+- movement: 196 recovered, 72 lost, net +124
+
+| Method | page@4 | page@5 | page@10 | doc@4 | doc@5 |
+|---|---:|---:|---:|---:|---:|
+| GPP no-hyperlink base | 0.6740 | 0.7221 | 0.8328 | 0.9488 | 0.9540 |
+| Counterfactual page promotion, insert rank 4 | 0.7282 | 0.7694 | 0.8556 | 0.9510 | 0.9580 |
+| Gain | +0.0543 | +0.0473 | +0.0228 | +0.0022 | +0.0039 |
+
 Interpretation:
 
-- The method intentionally inserts at rank 5, so `page@4` is unchanged.
-- It gives a large `page@5` gain while preserving the top-4 list.
-- It is currently a promising safe-repair variant, not the best overall method.
-- Next targeted run: `REPAIR_HIT_K=4`, `INSERT_RANK=4`, and a higher lost penalty to test whether it can safely improve `page@4`.
+- The rank-5 variant is conservative: it improves `page@5` while preserving the original top-4 list.
+- The rank-4 variant is more useful for evidence retrieval: it directly improves `page@4` by `+0.0543` and still improves `page@5` and `page@10`.
+- Counterfactual promotion is now more than a safe extension; it is a strong targeted repair method, although adaptive content-aware promotion still has the best overall `page@4/page@5`.
 
 ## Graph-Aware LTR Result
 
@@ -153,23 +167,13 @@ Advisor-safe claim:
 Use these distinctions:
 
 - **Main method:** content-aware promotion, adaptive `page@5`.
-- **Safe repair extension:** counterfactual page promotion.
+- **Targeted repair extension:** counterfactual page promotion, especially the insert-rank-4 run.
 - **Negative/secondary control:** standard LightGBM LambdaMART.
 - **Transfer conclusion:** positive over dense bases; mixed/negative over stronger docseed bases.
 
 ## Next Steps
 
-1. Run counterfactual top-4 repair:
-
-```bash
-REPAIR_HIT_K=4 \
-INSERT_RANK=4 \
-AUTO_TUNE_THRESHOLD=1 \
-LOST_PENALTY=2.0 \
-OUT_DIR=output/m3docvqa_counterfactual_page_promotion_top4 \
-LABEL=mmqa_train_to_dev_counterfactual_page_promotion_top4_gpp_no_hyperlink \
-bash examples/run_m3docvqa_counterfactual_page_promotion.sh
-```
+1. Compare adaptive content-aware promotion and counterfactual insert-rank-4 on the same downstream answer-generation setup, because both are now credible page-evidence promotion candidates.
 
 2. Report trained transfer only as zero-shot over dense bases unless a safe router is added.
 

@@ -21,7 +21,8 @@ Current status:
 | Method | Current result | Verdict |
 |---|---:|---|
 | Content-aware promotion, adaptive `page@5` | M3DocVQA strict pseudo-page `page@5=0.8031` | Best current page-evidence method. |
-| Counterfactual page promotion, insert rank 5 | M3DocVQA strict pseudo-page `page@5=0.7707`, gain `+0.0486` over GPP no-hyperlink | Safe repair extension; preserves top-4. |
+| Counterfactual page promotion, insert rank 4 | M3DocVQA strict pseudo-page `page@4=0.7282`, gain `+0.0543` over GPP no-hyperlink | Strong targeted repair extension; improves top-4 evidence directly. |
+| Counterfactual page promotion, insert rank 5 | M3DocVQA strict pseudo-page `page@5=0.7707`, gain `+0.0486` over GPP no-hyperlink | Conservative top-5 repair; preserves top-4. |
 | M3DocVQA-trained content transfer on dense pools | positive zero-shot `page@5` gains on ViDoSeek, SciEGQA, DUDE, and MMDocIR | Useful transfer result, but not a universal post-reranker. |
 | LightGBM LambdaMART | improves `page@4` over GPP no-hyperlink but hurts broader ranking | Control/extension, not main method. |
 
