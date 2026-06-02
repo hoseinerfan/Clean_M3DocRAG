@@ -41,6 +41,37 @@ layer. `*` The ViDoSeek result starts from its no-heading control branch (`1023 
 hits), rather than directly composing the gate with the separately selected
 `denseheavy150_m3best_pagepreserve` row.
 
+## Trained Content-Aware Transfer 2026-06-02
+
+Detailed interpretation note: [page_evidence_promotion_findings_2026-06-02.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/page_evidence_promotion_findings_2026-06-02.md:1)
+
+The M3DocVQA/MMQA-trained adaptive content-aware page promotion model was applied zero-shot to DUDE, MMDocIR, SciEGQA, and ViDoSeek. It used the saved M3DocVQA model weights and `blend_alpha` from the adaptive `page@5` run; no target-dataset labels were used for training.
+
+Dense-base transfer:
+
+| Dataset | dense page@5 | transfer page@5 | page@5 gain | page@4 gain | page@10 gain | doc@4 gain | Finding |
+|---|---:|---:|---:|---:|---:|---:|---|
+| ViDoSeek | 0.9151 | 0.9229 | +0.0079 | +0.0070 | +0.0053 | +0.0000 | Small positive; dataset is already saturated. |
+| SciEGQA | 0.8065 | 0.8226 | +0.0160 | +0.0080 | +0.0117 | +0.0105 | Positive transfer. |
+| DUDE | 0.5908 | 0.6173 | +0.0265 | +0.0269 | +0.0200 | +0.0107 | Strongest positive transfer. |
+| MMDocIR | 0.6580 | 0.6821 | +0.0241 | +0.0151 | +0.0115 | +0.0018 | Positive transfer. |
+
+Docseed-base transfer:
+
+| Dataset | page@4 gain | page@5 gain | page@10 gain | doc@4 gain | Finding |
+|---|---:|---:|---:|---:|---|
+| ViDoSeek | +0.0061 | +0.0026 | +0.0053 | +0.0000 | Small positive. |
+| SciEGQA | +0.0043 | +0.0111 | -0.0043 | +0.0018 | Mixed but acceptable at top-5. |
+| DUDE | -0.0086 | -0.0183 | -0.0541 | -0.0241 | Negative transfer after docseed. |
+| MMDocIR | -0.0320 | -0.0326 | -0.0513 | -0.0247 | Negative transfer after docseed. |
+
+Current transfer conclusion:
+
+- The M3DocVQA-trained content-aware model improves dense retrieval zero-shot on all four checked datasets.
+- It is not a universal post-reranker after stronger docseed outputs.
+- For DUDE and MMDocIR, `docseed_rrf_1p00` remains stronger than `docseed_rrf_1p00 + transfer`.
+- Report the method as a dense-pool evidence promotion transfer, not as a replacement for every dataset-specific graph/docseed pipeline.
+
 ## Table C: SciEGQA
 
 | Method | qids | page@1 | page@4 | page@20 | doc@4 | doc@20 |

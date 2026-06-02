@@ -100,6 +100,39 @@ Current M3DocVQA recommendations:
 - Keep external hyperlink claims scoped to M3DocVQA until OpenDocVQA/ViDoRe/DUDE/ViDoSeek/SciEGQA have dataset-internal URL-to-doc mappings.
 - M3DocVQA train has gold docs but no gold pages, so train-set tuning should be document-level unless pseudo page labels are created.
 
+## M3DocVQA Pseudo-Page Evidence Promotion 2026-06-02
+
+Detailed interpretation note: [page_evidence_promotion_findings_2026-06-02.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/page_evidence_promotion_findings_2026-06-02.md:1)
+
+New pseudo-page labels were created from MMQA evidence and exported page text. The strict setting matched `2,285 / 2,441` dev qids (`0.9361`) and `22,389 / 23,817` train qids (`0.9400`). These labels make page-level evidence retrieval measurable on M3DocVQA/MMQA.
+
+Main strict pseudo-page dev result:
+
+| Method | page@4 | page@5 | Gain@5 vs dense | page@10 | doc@4 | Finding |
+|---|---:|---:|---:|---:|---:|---|
+| Dense baseline | 0.6210 | 0.6556 | +0.0000 | 0.7383 | 0.9160 | Dense page pool baseline. |
+| GPP no-hyperlink | 0.6740 | 0.7221 | +0.0665 | 0.8328 | 0.9488 | Strong graph baseline without hyperlink propagation. |
+| GPP doc-hyperlink | 0.6687 | 0.7138 | +0.0582 | 0.8280 | 0.9514 | Hyperlink helps doc recall, not page evidence here. |
+| GPP page-hyperlink | 0.6709 | 0.7177 | +0.0621 | 0.8298 | 0.9510 | Similar page-level behavior to doc-hyperlink. |
+| Content-aware promotion, adaptive `page@5` | 0.7659 | 0.8031 | +0.1475 | 0.8687 | 0.9545 | Best current page-evidence method. |
+
+The adaptive `page@5` method is a real held-out train tuning step. It chose `blend_alpha=0.40` by optimizing pseudo-page `page@5`, then retrained on all train qids before dev evaluation.
+
+Counterfactual page promotion is a safety-oriented extension. It learns whether a candidate page should be inserted to repair the current top-k evidence set rather than reranking the whole list.
+
+| Method | page@4 | page@5 | page@10 | doc@4 | doc@5 | Finding |
+|---|---:|---:|---:|---:|---:|---|
+| GPP no-hyperlink base | 0.6740 | 0.7221 | 0.8328 | 0.9488 | 0.9540 | Base for the counterfactual run. |
+| Counterfactual page promotion, insert rank 5 | 0.6740 | 0.7707 | 0.8530 | 0.9497 | 0.9584 | Safe top-5 repair; preserves top-4. |
+| Gain | +0.0000 | +0.0486 | +0.0201 | +0.0009 | +0.0044 | `188` recovered, `77` lost, net `+111`; threshold `0.80`. |
+
+Current interpretation:
+
+- Main method: content-aware promotion with adaptive `page@5` tuning.
+- Safe repair extension: counterfactual page promotion.
+- Standard LightGBM LambdaMART was tested as a control. It improved `page@4` over GPP no-hyperlink (`0.6954` vs `0.6740`) but hurt `page@10` and doc recall, so it is not the main method.
+- The strongest claim is pseudo-page-supervised, graph-aware content page promotion, not generic LTR.
+
 ## Table C: External Page-Labeled Method Tables
 
 Use this section for datasets with exact page labels. These numbers are **average page/doc recall@k**, not answer EM/F1. Raw dense baseline rows are not recorded here unless explicitly listed; the complete rows we currently have are `MaxSim+` (`plain_top224`) and page-preserving Graph-PPR.

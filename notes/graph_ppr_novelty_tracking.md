@@ -4,11 +4,32 @@ This note tracks the current novelty story, empirical status, and next experimen
 
 Latest ablation findings: [graph_ablation_findings_2026-05-28.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/graph_ablation_findings_2026-05-28.md:1)
 
+Latest page-evidence promotion findings: [page_evidence_promotion_findings_2026-06-02.md](/Users/hoseinerfan/Desktop/Clean_M3DocRAG/notes/page_evidence_promotion_findings_2026-06-02.md:1)
+
 ## Working Novelty Claim
 
 We propose a query-adaptive heterogeneous evidence graph for multimodal multi-page document retrieval. Dense and sparse candidate pages are augmented with typed evidence nodes derived from query-specific retrieval reliability, document structure, page position, and query anchors. Personalized PageRank is then used to propagate evidence over this graph.
 
 This is stronger than simply using ColPali, SPLADE, RRF, or standard PPR. Those are existing tools. The novelty should be claimed in the graph construction and query-adaptive evidence design.
+
+## Related Page-Promotion Track
+
+The pseudo-page-supervised page-promotion work is now a separate but connected thesis track. It uses graph-derived outputs as features, but it does not claim novelty as a new graph propagation algorithm.
+
+Current status:
+
+| Method | Current result | Verdict |
+|---|---:|---|
+| Content-aware promotion, adaptive `page@5` | M3DocVQA strict pseudo-page `page@5=0.8031` | Best current page-evidence method. |
+| Counterfactual page promotion, insert rank 5 | M3DocVQA strict pseudo-page `page@5=0.7707`, gain `+0.0486` over GPP no-hyperlink | Safe repair extension; preserves top-4. |
+| M3DocVQA-trained content transfer on dense pools | positive zero-shot `page@5` gains on ViDoSeek, SciEGQA, DUDE, and MMDocIR | Useful transfer result, but not a universal post-reranker. |
+| LightGBM LambdaMART | improves `page@4` over GPP no-hyperlink but hurts broader ranking | Control/extension, not main method. |
+
+Advisor-facing separation:
+
+- Graph-PPR novelty: query-adaptive graph construction and typed evidence propagation.
+- Page-promotion novelty: pseudo-page supervision, discovery-vs-promotion diagnosis, and graph-aware content evidence promotion.
+- Generic LTR and fixed heuristic promotion are controls, not the central novelty claims.
 
 ## Current Performance Ledger
 
