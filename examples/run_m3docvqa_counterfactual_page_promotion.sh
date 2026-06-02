@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+PYTHON_BIN="${PYTHON_BIN:-$REPO_ROOT/env/bin/python}"
+if [[ ! -x "$PYTHON_BIN" ]]; then
+  PYTHON_BIN="${PYTHON_BIN_FALLBACK:-python}"
+fi
+
+VITAL_PATHS_ENV="${VITAL_PATHS_ENV:-$REPO_ROOT/hpc_vital_paths.generated.env}"
+if [[ -f "$VITAL_PATHS_ENV" ]]; then
+  # shellcheck disable=SC1090
+  source "$VITAL_PATHS_ENV"
+fi
+
+CUSTOM_ROOT="${CUSTOM_ROOT:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom}"
+OUT_DIR="${OUT_DIR:-$REPO_ROOT/output/m3docvqa_counterfactual_page_promotion}"
+LABEL="${LABEL:-mmqa_train_to_dev_counterfactual_page_promotion_gpp_no_hyperlink}"
+
+first_existing_path() {
+  local path
+  for path in "$@"; do
+    if [[ -n "$path" && -f "$path" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done
+  return 1
+}
+
+require_file() {
+  local name="$1"
+  local path="$2"
+  if [[ ! -f "$path" ]]; then
+    echo "missing_${name}: $path" >&2
+    exit 1
+  fi
+}
+
+TRAIN_GOLD="${TRAIN_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_train_pseudo_page_labels_strict.augmented_gold.jsonl}"
+EVAL_GOLD="${EVAL_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_dev_pseudo_page_labels_strict.augmented_gold.jsonl}"
+TRAIN_PAGE_TEXT_JSONL="${TRAIN_PAGE_TEXT_JSONL:-${M3DOCVQA_TRAIN_PAGE_TEXT_JSONL:-$CUSTOM_ROOT/outputs/m3docvqa_page_text/m3docvqa_train_page_text.jsonl}}"
+EVAL_PAGE_TEXT_JSONL="${EVAL_PAGE_TEXT_JSONL:-${M3DOCVQA_DEV_PAGE_TEXT_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-$CUSTOM_ROOT/outputs/m3docvqa_page_text/m3docvqa_dev_page_text.jsonl}}}"
+
+GPP_TRAIN_OUT_DIR="${GPP_TRAIN_OUT_DIR:-$REPO_ROOT/output/m3docvqa_gpp_hyperlink_node_ablation_mmr_target1_train_real}"
+GPP_EVAL_OUT_DIR="${GPP_EVAL_OUT_DIR:-$REPO_ROOT/output/m3docvqa_gpp_hyperlink_node_ablation_mmr_target1}"
+GPP_TRAIN_LABEL_PREFIX="${GPP_TRAIN_LABEL_PREFIX:-mmqa_train_gpp_hyperlink_node}"
+GPP_EVAL_LABEL_PREFIX="${GPP_EVAL_LABEL_PREFIX:-mmqa_dev_gpp_hyperlink_node}"
+
+TRAIN_BASE_PRED="${TRAIN_BASE_PRED:-$GPP_TRAIN_OUT_DIR/${GPP_TRAIN_LABEL_PREFIX}_no_hyperlink.prediction.json}"
+EVAL_BASE_PRED="${EVAL_BASE_PRED:-$GPP_EVAL_OUT_DIR/${GPP_EVAL_LABEL_PREFIX}_no_hyperlink.prediction.json}"
+
+TRAIN_SPLADE_PRED="${TRAIN_SPLADE_PRED:-${M3DOCVQA_TRAIN_SPLADE_PRED:-$(first_existing_path \
+  "$CUSTOM_ROOT/outputs/m3docvqa_splade_mmqa_train/mmqa_train_splade.prediction.json" \
+  "$REPO_ROOT/output/m3docvqa_splade_mmqa_train/mmqa_train_splade.prediction.json" \
+  || true)}}"
+EVAL_SPLADE_PRED="${EVAL_SPLADE_PRED:-${M3DOCVQA_DEV_SPLADE_PRED:-${M3DOCVQA_SPLADE_PRED:-${SPARSE_PRED:-$(first_existing_path \
+  "$CUSTOM_ROOT/outputs/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json" \
+  "$REPO_ROOT/output/m3docvqa_splade_mmqa_dev/mmqa_dev_splade.prediction.json" \
+  || true)}}}}"
+
+TRAIN_GPP_DOC_HYPERLINK_PRED="${TRAIN_GPP_DOC_HYPERLINK_PRED:-$GPP_TRAIN_OUT_DIR/${GPP_TRAIN_LABEL_PREFIX}_docnode_to_hyperlink_docs.prediction.json}"
+TRAIN_GPP_PAGE_HYPERLINK_PRED="${TRAIN_GPP_PAGE_HYPERLINK_PRED:-$GPP_TRAIN_OUT_DIR/${GPP_TRAIN_LABEL_PREFIX}_pagenode_to_hyperlink_pages.prediction.json}"
+EVAL_GPP_DOC_HYPERLINK_PRED="${EVAL_GPP_DOC_HYPERLINK_PRED:-$GPP_EVAL_OUT_DIR/${GPP_EVAL_LABEL_PREFIX}_docnode_to_hyperlink_docs.prediction.json}"
+EVAL_GPP_PAGE_HYPERLINK_PRED="${EVAL_GPP_PAGE_HYPERLINK_PRED:-$GPP_EVAL_OUT_DIR/${GPP_EVAL_LABEL_PREFIX}_pagenode_to_hyperlink_pages.prediction.json}"
+
+mkdir -p "$OUT_DIR"
+require_file train_gold "$TRAIN_GOLD"
+require_file eval_gold "$EVAL_GOLD"
+require_file train_page_text_jsonl "$TRAIN_PAGE_TEXT_JSONL"
+require_file eval_page_text_jsonl "$EVAL_PAGE_TEXT_JSONL"
+require_file train_base_pred "$TRAIN_BASE_PRED"
+require_file eval_base_pred "$EVAL_BASE_PRED"
+
+train_sources=()
+eval_sources=()
+add_source_pair_if_exists() {
+  local label="$1"
+  local train_path="$2"
+  local eval_path="$3"
+  if [[ -f "$train_path" && -f "$eval_path" ]]; then
+    train_sources+=(--train-source "$label=$train_path")
+    eval_sources+=(--eval-source "$label=$eval_path")
+  else
+    [[ -f "$train_path" ]] || echo "skip_missing_train_source_${label}=$train_path" >&2
+    [[ -f "$eval_path" ]] || echo "skip_missing_eval_source_${label}=$eval_path" >&2
+  fi
+}
+
+add_source_pair_if_exists splade "$TRAIN_SPLADE_PRED" "$EVAL_SPLADE_PRED"
+add_source_pair_if_exists gpp_doc_hyperlink "$TRAIN_GPP_DOC_HYPERLINK_PRED" "$EVAL_GPP_DOC_HYPERLINK_PRED"
+add_source_pair_if_exists gpp_page_hyperlink "$TRAIN_GPP_PAGE_HYPERLINK_PRED" "$EVAL_GPP_PAGE_HYPERLINK_PRED"
+
+auto_tune_args=()
+if [[ "${AUTO_TUNE_THRESHOLD:-1}" == "1" ]]; then
+  auto_tune_args+=(--auto-tune-threshold)
+fi
+
+echo "using_train_gold=$TRAIN_GOLD"
+echo "using_eval_gold=$EVAL_GOLD"
+echo "using_train_page_text_jsonl=$TRAIN_PAGE_TEXT_JSONL"
+echo "using_eval_page_text_jsonl=$EVAL_PAGE_TEXT_JSONL"
+echo "using_train_base_pred=$TRAIN_BASE_PRED"
+echo "using_eval_base_pred=$EVAL_BASE_PRED"
+echo "using_out_dir=$OUT_DIR"
+echo "using_label=$LABEL"
+echo "using_repair_hit_k=${REPAIR_HIT_K:-5}"
+echo "using_insert_rank=${INSERT_RANK:-5}"
+
+"$PYTHON_BIN" "$REPO_ROOT/scripts/train_counterfactual_page_promotion.py" \
+  --train-gold "$TRAIN_GOLD" \
+  --eval-gold "$EVAL_GOLD" \
+  --train-base-pred "$TRAIN_BASE_PRED" \
+  --eval-base-pred "$EVAL_BASE_PRED" \
+  --train-page-text-jsonl "$TRAIN_PAGE_TEXT_JSONL" \
+  --eval-page-text-jsonl "$EVAL_PAGE_TEXT_JSONL" \
+  "${train_sources[@]}" \
+  "${eval_sources[@]}" \
+  --candidate-top-k "${CANDIDATE_TOP_K:-1000}" \
+  --repair-hit-k "${REPAIR_HIT_K:-5}" \
+  --insert-rank "${INSERT_RANK:-5}" \
+  --promotion-rank-min "${PROMOTION_RANK_MIN:-6}" \
+  --promotion-rank-max "${PROMOTION_RANK_MAX:-200}" \
+  --max-promotions-per-qid "${MAX_PROMOTIONS_PER_QID:-1}" \
+  --negatives-per-band "${NEGATIVES_PER_BAND:-24}" \
+  --max-negatives-per-qid "${MAX_NEGATIVES_PER_QID:-160}" \
+  --already-hit-negatives-per-qid "${ALREADY_HIT_NEGATIVES_PER_QID:-48}" \
+  --positive-weight-cap "${POSITIVE_WEIGHT_CAP:-50.0}" \
+  --n-estimators "${N_ESTIMATORS:-300}" \
+  --learning-rate "${LEARNING_RATE:-0.05}" \
+  --num-leaves "${NUM_LEAVES:-31}" \
+  --min-samples-leaf "${MIN_SAMPLES_LEAF:-30}" \
+  --l2-regularization "${L2_REGULARIZATION:-0.0}" \
+  --seed "${SEED:-13}" \
+  "${auto_tune_args[@]}" \
+  --tune-fraction "${TUNE_FRACTION:-0.20}" \
+  --threshold "${THRESHOLD:-0.50}" \
+  --threshold-grid "${THRESHOLD_GRID:-0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50,0.60,0.70,0.80}" \
+  --lost-penalty "${LOST_PENALTY:-1.0}" \
+  --promotion-penalty "${PROMOTION_PENALTY:-0.002}" \
+  --output-model-json "$OUT_DIR/${LABEL}.model.json" \
+  --output-prediction-json "$OUT_DIR/${LABEL}.dev.prediction.json" \
+  --output-summary-json "$OUT_DIR/${LABEL}.summary.json" \
+  --output-table-md "$OUT_DIR/${LABEL}.table.md" \
+  --output-actions-jsonl "$OUT_DIR/${LABEL}.dev.actions.jsonl"

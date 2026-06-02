@@ -172,6 +172,7 @@ CONTENT_AWARE_PAGE4_PRED="${CONTENT_AWARE_PAGE4_PRED:-$REPO_OUTPUT_DIR/m3docvqa_
 CONTENT_AWARE_PAGE5_PRED="${CONTENT_AWARE_PAGE5_PRED:-$REPO_OUTPUT_DIR/m3docvqa_content_aware_auto_blend_sweep_page5/mmqa_train_to_dev_content_aware_base_gpp_no_hyperlink.dev.prediction.json}"
 CONTENT_AWARE_PAGE10_PRED="${CONTENT_AWARE_PAGE10_PRED:-$REPO_OUTPUT_DIR/m3docvqa_content_aware_auto_blend_sweep_page10/mmqa_train_to_dev_content_aware_base_gpp_no_hyperlink.dev.prediction.json}"
 LTR_PAGE_RERANKER_PRED="${LTR_PAGE_RERANKER_PRED:-$REPO_OUTPUT_DIR/m3docvqa_ltr_page_reranker/mmqa_train_to_dev_graph_aware_ltr_gpp_no_hyperlink.dev.prediction.json}"
+COUNTERFACTUAL_PAGE_PROMOTION_PRED="${COUNTERFACTUAL_PAGE_PROMOTION_PRED:-$REPO_OUTPUT_DIR/m3docvqa_counterfactual_page_promotion/mmqa_train_to_dev_counterfactual_page_promotion_gpp_no_hyperlink.dev.prediction.json}"
 require_file content_aware_page5_pred "$CONTENT_AWARE_PAGE5_PRED"
 
 pseudo_run_args=(--run "dense=$DENSE_PRED")
@@ -198,6 +199,8 @@ add_pseudo_run_if_exists content_aware_adaptive_page10 "$CONTENT_AWARE_PAGE10_PR
 add_original_candidate_if_exists content_aware_adaptive_page10 "$CONTENT_AWARE_PAGE10_PRED"
 add_pseudo_run_if_exists graph_aware_ltr "$LTR_PAGE_RERANKER_PRED"
 add_original_candidate_if_exists graph_aware_ltr "$LTR_PAGE_RERANKER_PRED"
+add_pseudo_run_if_exists counterfactual_page_promotion "$COUNTERFACTUAL_PAGE_PROMOTION_PRED"
+add_original_candidate_if_exists counterfactual_page_promotion "$COUNTERFACTUAL_PAGE_PROMOTION_PRED"
 
 echo "original_gold=$ORIGINAL_GOLD"
 echo "pseudo_gold=$PSEUDO_GOLD"
