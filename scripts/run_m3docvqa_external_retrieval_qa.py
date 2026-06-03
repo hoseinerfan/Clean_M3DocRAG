@@ -52,6 +52,22 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--limit", type=int, help="Optional max number of qids to process after filtering.")
     parser.add_argument(
+        "--eval-num-shards",
+        "--eval_num_shards",
+        dest="eval_num_shards",
+        type=int,
+        default=1,
+        help="Number of modulo shards to split the selected qids across.",
+    )
+    parser.add_argument(
+        "--eval-shard-id",
+        "--eval_shard_id",
+        dest="eval_shard_id",
+        type=int,
+        default=0,
+        help="Modulo shard id to process when --eval-num-shards > 1.",
+    )
+    parser.add_argument(
         "--doc-image-cache-size",
         type=int,
         default=16,
@@ -224,6 +240,19 @@ def main() -> None:
         qids = [qid for qid in qids if qid in requested]
     if args.limit is not None:
         qids = qids[: int(args.limit)]
+    if args.eval_num_shards < 1:
+        raise ValueError(f"eval_num_shards must be >= 1, got {args.eval_num_shards}")
+    if args.eval_shard_id < 0 or args.eval_shard_id >= args.eval_num_shards:
+        raise ValueError(
+            f"eval_shard_id must be in [0, {args.eval_num_shards}), got {args.eval_shard_id}"
+        )
+    selected_qid_count_before_shard = len(qids)
+    if args.eval_num_shards > 1:
+        qids = [
+            qid
+            for idx, qid in enumerate(qids)
+            if idx % int(args.eval_num_shards) == int(args.eval_shard_id)
+        ]
     if not qids:
         raise ValueError("No qids remain after intersecting prediction rows with gold/filter.")
 
@@ -257,6 +286,9 @@ def main() -> None:
 
     print(f"qid_count_total={len(gold_by_qid)}")
     print(f"qid_count_input_pred={len(prediction_rows)}")
+    print(f"qid_count_selected_before_shard={selected_qid_count_before_shard}")
+    print(f"eval_num_shards={args.eval_num_shards}")
+    print(f"eval_shard_id={args.eval_shard_id}")
     print(f"qid_count_selected={len(qids) + len(completed) if args.resume else len(qids)}")
     print(f"qid_count_pending={len(qids)}")
     print(f"qa_top_pages={args.qa_top_pages}")
