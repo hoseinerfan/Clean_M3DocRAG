@@ -175,6 +175,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-summary-json", required=True)
     parser.add_argument("--output-table-md", default="")
     parser.add_argument("--output-eval-prior-jsonl", default="")
+    parser.add_argument(
+        "--restrict-eval-to-gold-qids",
+        action="store_true",
+        help=(
+            "Only apply the trained reranker to qids present in --eval-gold. "
+            "Useful for out-of-fold train prediction generation."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1304,9 +1312,17 @@ def main() -> None:
             "tuning_summary": tuning_summary,
         }
 
+    eval_base_for_apply = eval_base
+    if bool(args.restrict_eval_to_gold_qids):
+        eval_base_for_apply = {
+            qid: eval_base[qid]
+            for qid in eval_gold
+            if qid in eval_base
+        }
+
     output_pred, prior_rows = apply_reranker(
         gold=eval_gold,
-        base_pred=eval_base,
+        base_pred=eval_base_for_apply,
         page_features=eval_page_features,
         source_maps_by_label=eval_source_maps,
         mean=mean,
@@ -1355,6 +1371,8 @@ def main() -> None:
         "eval_base_pred": args.eval_base_pred,
         "train_page_text_jsonl": args.train_page_text_jsonl,
         "eval_page_text_jsonl": args.eval_page_text_jsonl,
+        "restrict_eval_to_gold_qids": bool(args.restrict_eval_to_gold_qids),
+        "eval_base_apply_qid_count": int(len(eval_base_for_apply)),
         "feature_names": FEATURE_NAMES,
         "train_metadata": train_meta,
         "tuning_summary": tuning_summary,
