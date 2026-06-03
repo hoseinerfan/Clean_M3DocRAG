@@ -114,9 +114,13 @@ Main strict pseudo-page dev result:
 | GPP no-hyperlink | 0.6740 | 0.7221 | +0.0665 | 0.8328 | 0.9488 | Strong graph baseline without hyperlink propagation. |
 | GPP doc-hyperlink | 0.6687 | 0.7138 | +0.0582 | 0.8280 | 0.9514 | Hyperlink helps doc recall, not page evidence here. |
 | GPP page-hyperlink | 0.6709 | 0.7177 | +0.0621 | 0.8298 | 0.9510 | Similar page-level behavior to doc-hyperlink. |
-| Content-aware promotion, adaptive `page@5` | 0.7659 | 0.8031 | +0.1475 | 0.8687 | 0.9545 | Best current page-evidence method. |
+| Content-aware promotion, adaptive `page@5` | 0.7659 | 0.8031 | +0.1475 | 0.8687 | 0.9545 | Strong first-stage page evidence promotion. |
+| Practical content-aware + counterfactual insert-rank-4 | 0.7729 | 0.8144 | +0.1588 | 0.8748 | 0.9558 | Practical hybrid; useful but not fully OOF-clean. |
+| **OOF content-aware + counterfactual insert-rank-4** | **0.7764** | **0.8179** | **+0.1623** | **0.8753** | **0.9562** | **Final thesis-grade method.** |
 
 The adaptive `page@5` method is a real held-out train tuning step. It chose `blend_alpha=0.40` by optimizing pseudo-page `page@5`, then retrained on all train qids before dev evaluation.
+
+The final hybrid is cleaner than the practical hybrid. It creates 5-fold out-of-fold train-side content-aware predictions, merges them into a 23,817-qid OOF train base, then trains counterfactual top-4 boundary repair on that OOF base.
 
 Counterfactual page promotion is a safety-oriented extension. It learns whether a candidate page should be inserted to repair the current top-k evidence set rather than reranking the whole list.
 
@@ -127,12 +131,22 @@ Counterfactual page promotion is a safety-oriented extension. It learns whether 
 | Counterfactual page promotion, insert rank 4 | 0.7282 | 0.7694 | 0.8556 | 0.9510 | 0.9580 | Stronger top-4 repair; `196` recovered, `72` lost, net `+124`; threshold `0.80`. |
 | Rank-4 gain | +0.0543 | +0.0473 | +0.0228 | +0.0022 | +0.0039 | Improves early page evidence without hurting document recall. |
 
+OOF hybrid group audit:
+
+| Group | Method | page@4 | page@5 | page@10 | net@4 |
+|---|---|---:|---:|---:|---:|
+| single_gold_doc | Content-aware | 0.7969 | 0.8272 | 0.8827 | +93 |
+| single_gold_doc | OOF hybrid insert-rank-4 | 0.8063 | 0.8356 | 0.8890 | +102 |
+| multi_gold_doc | Content-aware | 0.7436 | 0.7857 | 0.8586 | +117 |
+| multi_gold_doc | OOF hybrid insert-rank-4 | 0.7549 | 0.8053 | 0.8654 | +132 |
+
 Current interpretation:
 
-- Main method: content-aware promotion with adaptive `page@5` tuning.
-- Targeted repair extension: counterfactual page promotion. The insert-rank-4 variant now gives a real `page@4` improvement, while insert-rank-5 remains the conservative top-5 repair.
+- Main method: OOF content-aware promotion plus counterfactual insert-rank-4 boundary repair.
+- Stage-1 ablation: content-aware promotion with adaptive `page@5` tuning.
+- Targeted repair ablations: counterfactual page promotion on GPP, practical hybrid, and conservative insert-rank-5.
 - Standard LightGBM LambdaMART was tested as a control. It improved `page@4` over GPP no-hyperlink (`0.6954` vs `0.6740`) but hurt `page@10` and doc recall, so it is not the main method.
-- The strongest claim is pseudo-page-supervised, graph-aware content page promotion, not generic LTR.
+- The strongest claim is pseudo-page-supervised, graph-aware page evidence promotion with counterfactual top-k boundary repair, not generic LTR.
 
 ## Table C: External Page-Labeled Method Tables
 

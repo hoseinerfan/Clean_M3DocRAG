@@ -20,7 +20,9 @@ Current status:
 
 | Method | Current result | Verdict |
 |---|---:|---|
-| Content-aware promotion, adaptive `page@5` | M3DocVQA strict pseudo-page `page@5=0.8031` | Best current page-evidence method. |
+| OOF content-aware + counterfactual insert-rank-4 | M3DocVQA strict pseudo-page `page@4=0.7764`, `page@5=0.8179` | Final thesis-grade page-evidence method. |
+| Content-aware promotion, adaptive `page@5` | M3DocVQA strict pseudo-page `page@5=0.8031` | Strong first-stage ablation. |
+| Practical content-aware + counterfactual insert-rank-4 | M3DocVQA strict pseudo-page `page@4=0.7729`, `page@5=0.8144` | Useful practical hybrid, superseded by OOF-clean version. |
 | Counterfactual page promotion, insert rank 4 | M3DocVQA strict pseudo-page `page@4=0.7282`, gain `+0.0543` over GPP no-hyperlink | Strong targeted repair extension; improves top-4 evidence directly. |
 | Counterfactual page promotion, insert rank 5 | M3DocVQA strict pseudo-page `page@5=0.7707`, gain `+0.0486` over GPP no-hyperlink | Conservative top-5 repair; preserves top-4. |
 | M3DocVQA-trained content transfer on dense pools | positive zero-shot `page@5` gains on ViDoSeek, SciEGQA, DUDE, and MMDocIR | Useful transfer result, but not a universal post-reranker. |
@@ -29,7 +31,7 @@ Current status:
 Advisor-facing separation:
 
 - Graph-PPR novelty: query-adaptive graph construction and typed evidence propagation.
-- Page-promotion novelty: pseudo-page supervision, discovery-vs-promotion diagnosis, and graph-aware content evidence promotion.
+- Page-promotion novelty: pseudo-page supervision, discovery-vs-promotion diagnosis, graph-aware content evidence promotion, and counterfactual top-k boundary repair.
 - Generic LTR and fixed heuristic promotion are controls, not the central novelty claims.
 
 ## Current Performance Ledger

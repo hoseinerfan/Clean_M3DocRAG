@@ -1,5 +1,7 @@
 # Page Evidence Promotion Findings 2026-06-02
 
+Updated 2026-06-03 with the clean out-of-fold hybrid result.
+
 Purpose: consolidate the current M3DocVQA/MMQA pseudo-page supervision direction, the strongest page-promotion results, the zero-shot transfer results on page-labeled external datasets, and the current interpretation for thesis/advisor reporting.
 
 ## Current Thesis Direction
@@ -31,19 +33,24 @@ These labels are required for M3DocVQA training/tuning, but not for inference on
 
 ## Main M3DocVQA/MMQA Result
 
-Evaluation: M3DocVQA/MMQA dev with strict pseudo-page labels. The proposed method is the content-aware page promotion reranker with adaptive held-out train tuning for `page@5`; the selected blend weight was `alpha=0.40`.
+Evaluation: M3DocVQA/MMQA dev with strict pseudo-page labels. The final proposed method is **OOF content-aware page evidence promotion + counterfactual top-4 boundary repair**.
 
-| Method | page@4 | page@5 | Gain@5 vs dense | page@10 | doc@4 |
-|---|---:|---:|---:|---:|---:|
-| Dense baseline | 0.6210 | 0.6556 | +0.0000 | 0.7383 | 0.9160 |
-| GPP no-hyperlink | 0.6740 | 0.7221 | +0.0665 | 0.8328 | 0.9488 |
-| GPP doc-hyperlink | 0.6687 | 0.7138 | +0.0582 | 0.8280 | 0.9514 |
-| GPP page-hyperlink | 0.6709 | 0.7177 | +0.0621 | 0.8298 | 0.9510 |
-| Content-aware promotion, adaptive `page@5` | 0.7659 | 0.8031 | +0.1475 | 0.8687 | 0.9545 |
+Advisor-facing strict pseudo-page dev table:
+
+| Method | page@4 | page@5 | Gain@5 vs dense | page@10 | doc@4 | Role |
+|---|---:|---:|---:|---:|---:|---|
+| Dense baseline | 0.6210 | 0.6556 | +0.0000 | 0.7383 | 0.9160 | Dense page pool baseline. |
+| GPP no-hyperlink | 0.6740 | 0.7221 | +0.0665 | 0.8328 | 0.9488 | Graph baseline without hyperlink propagation. |
+| GPP doc-hyperlink | 0.6687 | 0.7138 | +0.0582 | 0.8280 | 0.9514 | Hyperlink variant; better document recall than page recall. |
+| GPP page-hyperlink | 0.6709 | 0.7177 | +0.0621 | 0.8298 | 0.9510 | Hyperlink page-node variant. |
+| Content-aware promotion, adaptive `page@5` | 0.7659 | 0.8031 | +0.1475 | 0.8687 | 0.9545 | Strong first-stage page evidence promotion. |
+| Practical hybrid insert-rank-4 | 0.7729 | 0.8144 | +0.1588 | 0.8748 | 0.9558 | Practical hybrid trained using full-train content-aware base. |
+| **OOF hybrid insert-rank-4** | **0.7764** | **0.8179** | **+0.1623** | **0.8753** | **0.9562** | **Final thesis-grade method.** |
 
 Interpretation:
 
-- The proposed content-aware method improves `page@5` by `+0.1475` over dense retrieval and by `+0.0810` over GPP no-hyperlink.
+- The final OOF hybrid improves `page@5` by `+0.1623` over dense retrieval, `+0.0958` over GPP no-hyperlink, and `+0.0149` over content-aware promotion alone.
+- The OOF hybrid improves `page@4` by `+0.1554` over dense retrieval and `+0.0105` over content-aware promotion alone.
 - The gain is page-evidence focused. It is not simply a document-shortlist improvement.
 - Hyperlink GPP helps document-level recall, but page-level evidence selection still needs content-aware promotion.
 
@@ -111,7 +118,52 @@ Interpretation:
 
 - The rank-5 variant is conservative: it improves `page@5` while preserving the original top-4 list.
 - The rank-4 variant is more useful for evidence retrieval: it directly improves `page@4` by `+0.0543` and still improves `page@5` and `page@10`.
-- Counterfactual promotion is now more than a safe extension; it is a strong targeted repair method, although adaptive content-aware promotion still has the best overall `page@4/page@5`.
+- Counterfactual promotion is more than a safe extension; it is a strong targeted repair method. When applied after content-aware promotion with clean OOF train predictions, it becomes the final best method.
+
+## OOF Content-Aware + Counterfactual Hybrid
+
+The practical hybrid was useful but not fully thesis-grade, because the train-side content-aware base was produced by a model trained on all train qids. The clean version uses out-of-fold content-aware train predictions:
+
+1. split the 23,817 train qids into 5 deterministic folds,
+2. train content-aware promotion on 4 folds,
+3. predict the held-out fold,
+4. merge the held-out predictions into one OOF train prediction covering all 23,817 train qids,
+5. train counterfactual repair on this OOF content-aware train base,
+6. evaluate on dev using the full-train content-aware dev prediction as the stage-1 base.
+
+OOF sanity:
+
+| Check | Value |
+|---|---:|
+| train qids covered by merged OOF prediction | 23,817 |
+| fold held-out qids | 4,764 / 4,764 / 4,763 / 4,763 / 4,763 |
+| selected threshold, insert-rank-4 | 0.80 |
+| dev promoted actions, insert-rank-4 | 1,361 |
+| movement vs content-aware, insert-rank-4 | 98 recovered, 74 lost |
+
+Final OOF hybrid comparison:
+
+| Method | page@4 | page@5 | page@10 | doc@4 | doc@5 |
+|---|---:|---:|---:|---:|---:|
+| Content-aware base | 0.7659 | 0.8031 | 0.8687 | 0.9545 | 0.9580 |
+| OOF hybrid insert-rank-4 | 0.7764 | 0.8179 | 0.8753 | 0.9562 | 0.9593 |
+| Gain | +0.0105 | +0.0149 | +0.0066 | +0.0018 | +0.0013 |
+| OOF hybrid insert-rank-5 | 0.7659 | 0.8118 | 0.8748 | 0.9545 | 0.9593 |
+
+Grouped result:
+
+| Group | Method | page@4 | page@5 | page@10 | net@4 |
+|---|---|---:|---:|---:|---:|
+| single_gold_doc | Content-aware | 0.7969 | 0.8272 | 0.8827 | +93 |
+| single_gold_doc | OOF hybrid insert-rank-4 | 0.8063 | 0.8356 | 0.8890 | +102 |
+| multi_gold_doc | Content-aware | 0.7436 | 0.7857 | 0.8586 | +117 |
+| multi_gold_doc | OOF hybrid insert-rank-4 | 0.7549 | 0.8053 | 0.8654 | +132 |
+
+Interpretation:
+
+- Insert-rank-4 is the final setting because it improves `page@4`, `page@5`, and `page@10`.
+- Insert-rank-5 is a conservative ablation: it improves `page@5` while preserving `page@4`.
+- The largest group gain is on multi-gold-doc questions, where evidence is more distributed and boundary repair is most useful.
 
 ## Graph-Aware LTR Result
 
@@ -162,18 +214,19 @@ Interpretation:
 
 Advisor-safe claim:
 
-> We propose a pseudo-page-supervised, graph-aware content page promotion framework. It constructs page-level supervision from MMQA evidence, shows that many failures are promotion failures inside the top-1000 candidate pool, and trains an adaptive content-aware reranker that substantially improves page-level evidence recall on M3DocVQA/MMQA. The trained model also improves dense retrieval zero-shot on DUDE, MMDocIR, SciEGQA, and ViDoSeek, but it is not yet a universal post-reranker after stronger docseed pipelines.
+> We propose a pseudo-page-supervised, graph-aware page evidence promotion framework. It constructs page-level supervision from MMQA evidence, shows that many failures are promotion failures inside the top-1000 candidate pool, and uses a two-stage model: content-aware evidence promotion followed by counterfactual top-4 boundary repair. The clean out-of-fold hybrid substantially improves page-level evidence recall on M3DocVQA/MMQA and the trained content-aware stage also transfers positively over dense retrieval on DUDE, MMDocIR, SciEGQA, and ViDoSeek.
 
 Use these distinctions:
 
-- **Main method:** content-aware promotion, adaptive `page@5`.
-- **Targeted repair extension:** counterfactual page promotion, especially the insert-rank-4 run.
+- **Main method:** OOF content-aware promotion + counterfactual insert-rank-4 boundary repair.
+- **Stage-1 ablation:** content-aware promotion, adaptive `page@5`.
+- **Repair ablations:** counterfactual promotion on GPP, practical hybrid, and conservative insert-rank-5.
 - **Negative/secondary control:** standard LightGBM LambdaMART.
 - **Transfer conclusion:** positive over dense bases; mixed/negative over stronger docseed bases.
 
 ## Next Steps
 
-1. Compare adaptive content-aware promotion and counterfactual insert-rank-4 on the same downstream answer-generation setup, because both are now credible page-evidence promotion candidates.
+1. Run downstream answer-generation with the final OOF hybrid insert-rank-4 prediction and compare against dense, GPP, and content-aware-only.
 
 2. Report trained transfer only as zero-shot over dense bases unless a safe router is added.
 
