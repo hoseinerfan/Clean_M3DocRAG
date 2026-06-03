@@ -44,10 +44,11 @@ def parse_args() -> argparse.Namespace:
 def load_model(path: Path) -> dict[str, Any]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     feature_names = payload.get("feature_names")
-    if feature_names != ca.FEATURE_NAMES:
-        raise ValueError(
-            "Model feature_names do not match train_content_aware_pseudo_page_reranker.FEATURE_NAMES"
-        )
+    if not isinstance(feature_names, list) or not feature_names:
+        raise ValueError("Model feature_names must be a non-empty list.")
+    unknown = [name for name in feature_names if name not in ca.FEATURE_NAMES]
+    if unknown:
+        raise ValueError(f"Model contains unknown feature_names: {unknown}")
     return payload
 
 
@@ -75,6 +76,7 @@ def apply_model(
     std = np.asarray(model["std"], dtype=np.float32)
     weights = np.asarray(model["weights"], dtype=np.float32)
     bias = float(model["bias"])
+    feature_names = list(model.get("feature_names") or ca.FEATURE_NAMES)
 
     output: dict[str, dict[str, Any]] = {}
     prior_rows: list[dict[str, Any]] = []
@@ -106,6 +108,7 @@ def apply_model(
             std=std,
             weights=weights,
             bias=bias,
+            feature_names=feature_names,
         )
         reranked = ca.rerank_records(scored_records_qid, args)
         reranked_uids = {str(row["uid"]) for row in reranked}
@@ -155,6 +158,7 @@ def apply_model(
 def main() -> None:
     args = parse_args()
     model = load_model(Path(args.model_json))
+    model_feature_names = list(model.get("feature_names") or ca.FEATURE_NAMES)
     args = resolved_args(args, model)
 
     base_pred = ca.load_prediction(Path(args.base_pred))
@@ -186,6 +190,8 @@ def main() -> None:
         ]
     summary = {
         "model_json": args.model_json,
+        "feature_names": model_feature_names,
+        "feature_set": model.get("feature_set", ""),
         "base_pred": args.base_pred,
         "page_text_jsonl": args.page_text_jsonl,
         "source_count": len(source_maps_by_label),

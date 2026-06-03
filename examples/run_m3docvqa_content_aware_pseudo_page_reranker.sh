@@ -17,6 +17,8 @@ fi
 CUSTOM_ROOT="${CUSTOM_ROOT:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/output/m3docvqa_content_aware_pseudo_page_reranker}"
 LABEL="${LABEL:-mmqa_train_to_dev_content_aware_pseudo_page}"
+FEATURE_SET="${FEATURE_SET:-all}"
+SOURCE_SET="${SOURCE_SET:-all}"
 
 first_existing_path() {
   local path
@@ -84,10 +86,31 @@ require_file eval_dense_pred "$EVAL_DENSE_PRED"
 
 train_sources=()
 eval_sources=()
+source_enabled() {
+  local label="$1"
+  local group="$2"
+  local source_set=" ${SOURCE_SET//,/ } "
+  if [[ "$SOURCE_SET" == "all" ]]; then
+    return 0
+  fi
+  if [[ "$SOURCE_SET" == "none" ]]; then
+    return 1
+  fi
+  if [[ "$source_set" == *" $label "* || "$source_set" == *" $group "* ]]; then
+    return 0
+  fi
+  return 1
+}
+
 add_source_pair_if_exists() {
   local label="$1"
   local train_path="$2"
   local eval_path="$3"
+  local group="${4:-aux}"
+  if ! source_enabled "$label" "$group"; then
+    echo "skip_source_disabled_${label}=SOURCE_SET:$SOURCE_SET"
+    return 0
+  fi
   if [[ -f "$train_path" && -f "$eval_path" ]]; then
     train_sources+=(--train-source "$label=$train_path")
     eval_sources+=(--eval-source "$label=$eval_path")
@@ -97,10 +120,10 @@ add_source_pair_if_exists() {
   fi
 }
 
-add_source_pair_if_exists splade "$TRAIN_SPLADE_PRED" "$EVAL_SPLADE_PRED"
-add_source_pair_if_exists gpp_no_hyperlink "$TRAIN_GPP_NO_HYPERLINK_PRED" "$EVAL_GPP_NO_HYPERLINK_PRED"
-add_source_pair_if_exists gpp_doc_hyperlink "$TRAIN_GPP_DOC_HYPERLINK_PRED" "$EVAL_GPP_DOC_HYPERLINK_PRED"
-add_source_pair_if_exists gpp_page_hyperlink "$TRAIN_GPP_PAGE_HYPERLINK_PRED" "$EVAL_GPP_PAGE_HYPERLINK_PRED"
+add_source_pair_if_exists splade "$TRAIN_SPLADE_PRED" "$EVAL_SPLADE_PRED" retrieval
+add_source_pair_if_exists gpp_no_hyperlink "$TRAIN_GPP_NO_HYPERLINK_PRED" "$EVAL_GPP_NO_HYPERLINK_PRED" graph
+add_source_pair_if_exists gpp_doc_hyperlink "$TRAIN_GPP_DOC_HYPERLINK_PRED" "$EVAL_GPP_DOC_HYPERLINK_PRED" graph
+add_source_pair_if_exists gpp_page_hyperlink "$TRAIN_GPP_PAGE_HYPERLINK_PRED" "$EVAL_GPP_PAGE_HYPERLINK_PRED" graph
 
 auto_tune_args=()
 if [[ "${AUTO_TUNE_BLEND_ALPHA:-0}" == "1" ]]; then
@@ -115,6 +138,8 @@ echo "using_train_dense_pred=$TRAIN_DENSE_PRED"
 echo "using_eval_dense_pred=$EVAL_DENSE_PRED"
 echo "using_out_dir=$OUT_DIR"
 echo "using_label=$LABEL"
+echo "using_feature_set=$FEATURE_SET"
+echo "using_source_set=$SOURCE_SET"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -125,6 +150,7 @@ echo "using_label=$LABEL"
   --eval-page-text-jsonl "$EVAL_PAGE_TEXT_JSONL" \
   "${train_sources[@]}" \
   "${eval_sources[@]}" \
+  --feature-set "$FEATURE_SET" \
   --candidate-top-k "${CANDIDATE_TOP_K:-1000}" \
   --negatives-per-band "${NEGATIVES_PER_BAND:-10}" \
   --max-negatives-per-qid "${MAX_NEGATIVES_PER_QID:-64}" \

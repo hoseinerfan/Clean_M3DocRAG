@@ -97,6 +97,96 @@ FEATURE_NAMES = [
     "exact_question_substring",
 ]
 
+RANK_FEATURES = [
+    "base_rank_recip",
+    "base_rank_log_recip",
+    "base_rank_frac",
+    "base_norm_score",
+    "base_score_gap_to_top",
+]
+
+STRUCTURE_FEATURES = [
+    "doc_rank_recip",
+    "page_rank_in_doc_recip",
+    "doc_page_count_log",
+    "page_idx_log",
+    "page_idx_recip",
+    "is_first_page",
+]
+
+SOURCE_FEATURES = [
+    "source_present_count",
+    "source_best_rank_recip",
+    "source_best_norm_score",
+    "source_mean_rank_recip",
+]
+
+CONTENT_FEATURES = [
+    "page_token_count_log",
+    "question_token_recall",
+    "question_token_precision",
+    "question_token_jaccard",
+    "question_overlap_count_log",
+    "anchor_token_recall",
+    "anchor_token_count_log",
+    "number_token_recall",
+    "number_token_count_log",
+    "phrase_match_count_log",
+    "phrase_match_fraction",
+    "bigram_match_fraction",
+    "trigram_match_fraction",
+    "longest_question_ngram_match",
+    "exact_question_substring",
+]
+
+FEATURE_SET_NAMES = [
+    "all",
+    "rank_only",
+    "rank_source",
+    "rank_structure",
+    "rank_source_structure",
+    "content_only",
+    "no_content",
+    "no_source",
+    "no_structure",
+]
+
+
+def dedupe_feature_names(names: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for name in names:
+        if name in seen:
+            continue
+        if name not in FEATURE_NAMES:
+            raise ValueError(f"Unknown feature name in feature set: {name}")
+        seen.add(name)
+        out.append(name)
+    return out
+
+
+def resolve_feature_names(feature_set: str) -> list[str]:
+    key = str(feature_set or "all").strip().lower()
+    if key == "all":
+        return list(FEATURE_NAMES)
+    if key == "rank_only":
+        return list(RANK_FEATURES)
+    if key == "rank_source":
+        return dedupe_feature_names(RANK_FEATURES + SOURCE_FEATURES)
+    if key == "rank_structure":
+        return dedupe_feature_names(RANK_FEATURES + STRUCTURE_FEATURES)
+    if key == "rank_source_structure":
+        return dedupe_feature_names(RANK_FEATURES + SOURCE_FEATURES + STRUCTURE_FEATURES)
+    if key == "content_only":
+        return list(CONTENT_FEATURES)
+    if key == "no_content":
+        return [name for name in FEATURE_NAMES if name not in set(CONTENT_FEATURES)]
+    if key == "no_source":
+        return [name for name in FEATURE_NAMES if name not in set(SOURCE_FEATURES)]
+    if key == "no_structure":
+        return [name for name in FEATURE_NAMES if name not in set(STRUCTURE_FEATURES)]
+    raise ValueError(f"Unknown feature_set {feature_set!r}; expected one of {', '.join(FEATURE_SET_NAMES)}")
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -114,6 +204,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-page-text-jsonl", required=True)
     parser.add_argument("--train-source", action="append", default=[], help="Optional LABEL=prediction.json")
     parser.add_argument("--eval-source", action="append", default=[], help="Optional LABEL=prediction.json")
+    parser.add_argument(
+        "--feature-set",
+        choices=FEATURE_SET_NAMES,
+        default="all",
+        help="Feature group used for final-method ablation.",
+    )
     parser.add_argument("--candidate-top-k", type=int, default=1000)
     parser.add_argument("--negatives-per-band", type=int, default=10)
     parser.add_argument("--max-negatives-per-qid", type=int, default=64)
@@ -529,6 +625,7 @@ def feature_vector(
     page_features: dict[str, dict[str, Any]],
     source_maps_by_label: dict[str, dict[str, dict[str, float]]],
     qid: str,
+    feature_names: list[str] | None = None,
 ) -> list[float]:
     rank = int(record["base_rank"])
     top_score = float(records[0]["score"]) if records else 0.0
@@ -562,7 +659,8 @@ def feature_vector(
         else float(sum(1.0 / rank_value for rank_value in source_ranks)) / float(len(source_ranks)),
     }
     base.update(content_features(question, page_features.get(uid)))
-    return [float(base[name]) for name in FEATURE_NAMES]
+    selected = feature_names or FEATURE_NAMES
+    return [float(base[name]) for name in selected]
 
 
 def gold_page_uids(row: dict[str, Any]) -> set[str]:
@@ -685,6 +783,7 @@ def build_matrix(
                     page_features=page_features,
                     source_maps_by_label=source_maps_by_label,
                     qid=qid,
+                    feature_names=getattr(args, "active_feature_names", FEATURE_NAMES),
                 )
             )
             labels.append(1)
@@ -702,6 +801,7 @@ def build_matrix(
                     page_features=page_features,
                     source_maps_by_label=source_maps_by_label,
                     qid=qid,
+                    feature_names=getattr(args, "active_feature_names", FEATURE_NAMES),
                 )
             )
             labels.append(0)
@@ -805,6 +905,7 @@ def score_records(
     std: np.ndarray,
     weights: np.ndarray,
     bias: float,
+    feature_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     if not records:
         return []
@@ -823,6 +924,7 @@ def score_records(
             page_features=page_features,
             source_maps_by_label=source_maps_by_label,
             qid=qid,
+            feature_names=feature_names,
         )
         for record in records
     ]
@@ -1015,6 +1117,7 @@ def tune_blend_alpha(
             std=std,
             weights=weights,
             bias=bias,
+            feature_names=getattr(args, "active_feature_names", FEATURE_NAMES),
         )
         evaluated += 1
         for alpha in alpha_grid:
@@ -1075,6 +1178,7 @@ def apply_reranker(
             std=std,
             weights=weights,
             bias=bias,
+            feature_names=getattr(args, "active_feature_names", FEATURE_NAMES),
         )
         reranked = rerank_records(scored_records, args)
         reranked_uids = {row["uid"] for row in reranked}
@@ -1238,6 +1342,7 @@ def write_table(path: Path, rows: list[dict[str, Any]], recall_ks: list[int]) ->
 
 def main() -> None:
     args = parse_args()
+    args.active_feature_names = resolve_feature_names(args.feature_set)
     random.seed(int(args.seed))
     np.random.seed(int(args.seed))
 
@@ -1337,7 +1442,9 @@ def main() -> None:
     output_prediction_json.write_text(json.dumps(output_pred) + "\n", encoding="utf-8")
 
     model = {
-        "feature_names": FEATURE_NAMES,
+        "feature_names": list(args.active_feature_names),
+        "all_feature_names": FEATURE_NAMES,
+        "feature_set": args.feature_set,
         "weights": [float(value) for value in weights.tolist()],
         "bias": float(bias),
         "mean": [float(value) for value in mean.tolist()],
@@ -1349,6 +1456,7 @@ def main() -> None:
             "inference_mode": args.inference_mode,
             "blend_alpha": float(args.blend_alpha),
             "auto_tune_blend_alpha": bool(args.auto_tune_blend_alpha),
+            "feature_set": args.feature_set,
         },
     }
     output_model_json = Path(args.output_model_json)
@@ -1371,9 +1479,11 @@ def main() -> None:
         "eval_base_pred": args.eval_base_pred,
         "train_page_text_jsonl": args.train_page_text_jsonl,
         "eval_page_text_jsonl": args.eval_page_text_jsonl,
+        "feature_set": args.feature_set,
         "restrict_eval_to_gold_qids": bool(args.restrict_eval_to_gold_qids),
         "eval_base_apply_qid_count": int(len(eval_base_for_apply)),
-        "feature_names": FEATURE_NAMES,
+        "feature_names": list(args.active_feature_names),
+        "all_feature_names": FEATURE_NAMES,
         "train_metadata": train_meta,
         "tuning_summary": tuning_summary,
         "metrics": metrics,
