@@ -38,11 +38,13 @@ QA_OUT_DIR="${QA_OUT_DIR:-$REPO_ROOT/output/m3docvqa_final_qa_comparison}"
 DENSE_PRED="${DENSE_PRED:-$CUSTOM_ROOT/outputs/mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json}"
 GPP_NO_HYPERLINK_PRED="${GPP_NO_HYPERLINK_PRED:-$REPO_ROOT/output/m3docvqa_gpp_hyperlink_node_ablation_mmr_target1/mmqa_dev_gpp_hyperlink_node_no_hyperlink.prediction.json}"
 CONTENT_AWARE_PRED="${CONTENT_AWARE_PRED:-$REPO_ROOT/output/m3docvqa_content_aware_auto_blend_sweep_page5/mmqa_train_to_dev_content_aware_base_gpp_no_hyperlink.dev.prediction.json}"
+CONTENT_AWARE_LOOSE_PRED="${CONTENT_AWARE_LOOSE_PRED:-$REPO_ROOT/output/m3docvqa_content_aware_pseudo_label_ablation/mmqa_train_to_dev_content_aware_pseudolabel_loose_base_gpp_no_hyperlink.dev.prediction.json}"
 OOF_HYBRID_INSERT4_PRED="${OOF_HYBRID_INSERT4_PRED:-$REPO_ROOT/output/m3docvqa_content_aware_counterfactual_oof_hybrid/insert_rank4/mmqa_train_to_dev_content_aware_counterfactual_oof_insert4.dev.prediction.json}"
 
 RUN_DENSE_QA="${RUN_DENSE_QA:-1}"
 RUN_GPP_NO_HYPERLINK_QA="${RUN_GPP_NO_HYPERLINK_QA:-1}"
 RUN_CONTENT_AWARE_QA="${RUN_CONTENT_AWARE_QA:-1}"
+RUN_CONTENT_AWARE_LOOSE_QA="${RUN_CONTENT_AWARE_LOOSE_QA:-0}"
 RUN_OOF_HYBRID_INSERT4_QA="${RUN_OOF_HYBRID_INSERT4_QA:-1}"
 
 require_file() {
@@ -148,10 +150,12 @@ if [[ "$MERGE_QA_SHARDS" != "1" ]]; then
   run_qa dense "$DENSE_PRED" "$RUN_DENSE_QA"
   run_qa gpp_no_hyperlink "$GPP_NO_HYPERLINK_PRED" "$RUN_GPP_NO_HYPERLINK_QA"
   run_qa content_aware "$CONTENT_AWARE_PRED" "$RUN_CONTENT_AWARE_QA"
+  run_qa content_aware_loose "$CONTENT_AWARE_LOOSE_PRED" "$RUN_CONTENT_AWARE_LOOSE_QA"
   run_qa oof_hybrid_insert4 "$OOF_HYBRID_INSERT4_PRED" "$RUN_OOF_HYBRID_INSERT4_QA"
 else
   merge_qa dense "$RUN_DENSE_QA"
   merge_qa gpp_no_hyperlink "$RUN_GPP_NO_HYPERLINK_QA"
   merge_qa content_aware "$RUN_CONTENT_AWARE_QA"
+  merge_qa content_aware_loose "$RUN_CONTENT_AWARE_LOOSE_QA"
   merge_qa oof_hybrid_insert4 "$RUN_OOF_HYBRID_INSERT4_QA"
 fi
