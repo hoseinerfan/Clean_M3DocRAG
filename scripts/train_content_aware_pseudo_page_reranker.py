@@ -239,6 +239,20 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--query-adaptive-alpha",
+        action="store_true",
+        help=(
+            "After global alpha tuning, also tune one blend alpha per held-out query-confidence "
+            "bucket. At inference time each query gets the bucket-specific alpha."
+        ),
+    )
+    parser.add_argument(
+        "--query-alpha-bins",
+        type=int,
+        default=3,
+        help="Number of query-confidence buckets used by --query-adaptive-alpha.",
+    )
+    parser.add_argument(
         "--tune-fraction",
         type=float,
         default=0.20,
@@ -957,6 +971,80 @@ def assign_blend_scores(records: list[dict[str, Any]], alpha: float) -> None:
         row["rerank_score"] = (1.0 - alpha) * base_rank_scores[row["uid"]] + alpha * model_norm[row["uid"]]
 
 
+def query_confidence_score(
+    records: list[dict[str, Any]],
+    source_maps_by_label: dict[str, dict[str, dict[str, float]]],
+    qid: str,
+) -> float:
+    """Estimate how much the base ranking should be trusted for this query."""
+    if not records:
+        return 0.0
+
+    norm_scores = normalize_scores(records)
+    top_uid = str(records[0]["uid"])
+    if len(records) >= 2:
+        score_gap = float(norm_scores.get(top_uid, 0.0)) - float(norm_scores.get(str(records[1]["uid"]), 0.0))
+    else:
+        score_gap = 1.0
+    score_gap = max(0.0, min(1.0, score_gap))
+
+    top_doc = str(records[0]["doc_id"])
+    top_window = records[: min(5, len(records))]
+    doc_concentration = (
+        sum(1 for row in top_window if str(row["doc_id"]) == top_doc) / float(len(top_window))
+        if top_window
+        else 0.0
+    )
+
+    source_agreement = 0.0
+    if source_maps_by_label:
+        agree = 0
+        total = 0
+        for qid_map in source_maps_by_label.values():
+            page_map = qid_map.get(qid, {})
+            total += 1
+            source_row = page_map.get(top_uid)
+            if source_row and float(source_row.get("rank", math.inf)) <= 5.0:
+                agree += 1
+        source_agreement = agree / float(max(total, 1))
+
+    components = [score_gap, doc_concentration]
+    if source_maps_by_label:
+        components.append(source_agreement)
+    return float(sum(components) / float(len(components)))
+
+
+def fit_confidence_thresholds(scores: list[float], bin_count: int) -> list[float]:
+    if bin_count <= 1 or not scores:
+        return []
+    thresholds: list[float] = []
+    values = np.asarray(scores, dtype=np.float32)
+    for idx in range(1, int(bin_count)):
+        threshold = float(np.quantile(values, idx / float(bin_count)))
+        if thresholds and math.isclose(threshold, thresholds[-1]):
+            continue
+        thresholds.append(threshold)
+    return thresholds
+
+
+def confidence_bin(score: float, thresholds: list[float]) -> int:
+    for idx, threshold in enumerate(thresholds):
+        if float(score) <= float(threshold):
+            return idx
+    return len(thresholds)
+
+
+def alpha_for_query_confidence(score: float, adaptive_config: dict[str, Any] | None, fallback_alpha: float) -> tuple[float, int | None]:
+    if not adaptive_config:
+        return float(fallback_alpha), None
+    thresholds = [float(value) for value in adaptive_config.get("confidence_thresholds", [])]
+    bin_idx = confidence_bin(float(score), thresholds)
+    alphas = adaptive_config.get("bin_selected_blend_alpha", [])
+    if 0 <= bin_idx < len(alphas):
+        return float(alphas[bin_idx]), int(bin_idx)
+    return float(adaptive_config.get("global_fallback_blend_alpha", fallback_alpha)), int(bin_idx)
+
+
 def doc_head_rerank_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     doc_order: list[str] = []
     rows_by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1095,6 +1183,7 @@ def tune_blend_alpha(
     candidate_args.inference_mode = "blend_rerank"
 
     hits = {alpha: 0 for alpha in alpha_grid}
+    tune_cases: list[dict[str, Any]] = []
     evaluated = 0
     skipped_no_page_gold = 0
     skipped_missing_prediction = 0
@@ -1120,6 +1209,15 @@ def tune_blend_alpha(
             feature_names=getattr(args, "active_feature_names", FEATURE_NAMES),
         )
         evaluated += 1
+        confidence = query_confidence_score(records, source_maps_by_label, qid)
+        tune_cases.append(
+            {
+                "qid": qid,
+                "pages_gold": pages_gold,
+                "scored_records": scored_records,
+                "confidence": float(confidence),
+            }
+        )
         for alpha in alpha_grid:
             candidate_args.blend_alpha = float(alpha)
             candidate_records = [dict(row) for row in scored_records]
@@ -1140,6 +1238,70 @@ def tune_blend_alpha(
         for alpha in alpha_grid
     ]
     best = max(scores, key=lambda row: (float(row[f"page@{hit_k}"]), -float(row["blend_alpha"])))
+    adaptive_config: dict[str, Any] | None = None
+    if bool(getattr(args, "query_adaptive_alpha", False)):
+        bin_count = max(1, int(getattr(args, "query_alpha_bins", 3)))
+        confidence_scores = [float(case["confidence"]) for case in tune_cases]
+        thresholds = fit_confidence_thresholds(confidence_scores, bin_count)
+        effective_bin_count = len(thresholds) + 1
+        bin_hits = {
+            bin_idx: {alpha: 0 for alpha in alpha_grid}
+            for bin_idx in range(effective_bin_count)
+        }
+        bin_eval = Counter()
+        for case in tune_cases:
+            bin_idx = confidence_bin(float(case["confidence"]), thresholds)
+            bin_eval[bin_idx] += 1
+            for alpha in alpha_grid:
+                candidate_args.blend_alpha = float(alpha)
+                candidate_records = [dict(row) for row in case["scored_records"]]
+                ranked = rerank_records(candidate_records, candidate_args)
+                ranked_uids = [str(row["uid"]) for row in ranked]
+                if any(uid in case["pages_gold"] for uid in ranked_uids[:hit_k]):
+                    bin_hits[bin_idx][alpha] += 1
+
+        bin_scores: list[dict[str, Any]] = []
+        bin_selected_alphas: list[float] = []
+        for bin_idx in range(effective_bin_count):
+            evaluated_in_bin = int(bin_eval.get(bin_idx, 0))
+            if evaluated_in_bin <= 0:
+                selected_alpha = float(best["blend_alpha"])
+                alpha_scores = []
+            else:
+                alpha_scores = [
+                    {
+                        "blend_alpha": float(alpha),
+                        f"page@{hit_k}": float(bin_hits[bin_idx][alpha]) / float(evaluated_in_bin),
+                        "hit_count": int(bin_hits[bin_idx][alpha]),
+                    }
+                    for alpha in alpha_grid
+                ]
+                selected = max(
+                    alpha_scores,
+                    key=lambda row: (float(row[f"page@{hit_k}"]), -float(row["blend_alpha"])),
+                )
+                selected_alpha = float(selected["blend_alpha"])
+            bin_selected_alphas.append(selected_alpha)
+            bin_scores.append(
+                {
+                    "bin": int(bin_idx),
+                    "confidence_lower": None if bin_idx == 0 else float(thresholds[bin_idx - 1]),
+                    "confidence_upper": None if bin_idx >= len(thresholds) else float(thresholds[bin_idx]),
+                    "selected_blend_alpha": selected_alpha,
+                    "tune_eval_qid_count": evaluated_in_bin,
+                    "alpha_scores": alpha_scores,
+                }
+            )
+        adaptive_config = {
+            "mode": "confidence_bins",
+            "query_alpha_bins_requested": int(getattr(args, "query_alpha_bins", 3)),
+            "query_alpha_bins_effective": int(effective_bin_count),
+            "confidence_thresholds": [float(value) for value in thresholds],
+            "bin_selected_blend_alpha": bin_selected_alphas,
+            "global_fallback_blend_alpha": float(best["blend_alpha"]),
+            "bin_scores": bin_scores,
+        }
+
     return {
         "selected_blend_alpha": float(best["blend_alpha"]),
         "optimized_metric": f"page@{hit_k}",
@@ -1148,6 +1310,8 @@ def tune_blend_alpha(
         "skipped_no_page_gold": int(skipped_no_page_gold),
         "skipped_missing_prediction": int(skipped_missing_prediction),
         "alpha_scores": scores,
+        "query_adaptive_alpha": bool(getattr(args, "query_adaptive_alpha", False)),
+        "adaptive_alpha_config": adaptive_config,
     }
 
 
@@ -1180,7 +1344,21 @@ def apply_reranker(
             bias=bias,
             feature_names=getattr(args, "active_feature_names", FEATURE_NAMES),
         )
-        reranked = rerank_records(scored_records, args)
+        apply_args = args
+        query_alpha = float(args.blend_alpha)
+        query_alpha_confidence: float | None = None
+        query_alpha_bin: int | None = None
+        if bool(getattr(args, "query_adaptive_alpha", False)):
+            query_alpha_confidence = query_confidence_score(records, source_maps_by_label, qid)
+            query_alpha, query_alpha_bin = alpha_for_query_confidence(
+                query_alpha_confidence,
+                getattr(args, "adaptive_alpha_config", None),
+                float(args.blend_alpha),
+            )
+            apply_args = copy.copy(args)
+            apply_args.blend_alpha = float(query_alpha)
+
+        reranked = rerank_records(scored_records, apply_args)
         reranked_uids = {row["uid"] for row in reranked}
         raw_by_uid = {row["uid"]: row["raw"] for row in records}
         output_rows = [raw_by_uid[row["uid"]] for row in reranked if row["uid"] in raw_by_uid]
@@ -1200,7 +1378,11 @@ def apply_reranker(
             **(out_row.get("reranker_metadata", {}) if isinstance(out_row.get("reranker_metadata"), dict) else {}),
             "content_aware_pseudo_page_reranker": {
                 "inference_mode": args.inference_mode,
-                "blend_alpha": float(args.blend_alpha),
+                "blend_alpha": float(query_alpha),
+                "global_blend_alpha": float(args.blend_alpha),
+                "query_adaptive_alpha": bool(getattr(args, "query_adaptive_alpha", False)),
+                "query_alpha_confidence": query_alpha_confidence,
+                "query_alpha_bin": query_alpha_bin,
             },
         }
         output[qid] = out_row
@@ -1343,6 +1525,10 @@ def write_table(path: Path, rows: list[dict[str, Any]], recall_ks: list[int]) ->
 def main() -> None:
     args = parse_args()
     args.active_feature_names = resolve_feature_names(args.feature_set)
+    if bool(args.query_adaptive_alpha) and not bool(args.auto_tune_blend_alpha):
+        raise ValueError("--query-adaptive-alpha requires --auto-tune-blend-alpha.")
+    if int(args.query_alpha_bins) <= 0:
+        raise ValueError(f"--query-alpha-bins must be positive, got {args.query_alpha_bins}")
     random.seed(int(args.seed))
     np.random.seed(int(args.seed))
 
@@ -1396,6 +1582,8 @@ def main() -> None:
             args=args,
         )
         args.blend_alpha = float(tuning_summary["selected_blend_alpha"])
+        if bool(args.query_adaptive_alpha):
+            args.adaptive_alpha_config = tuning_summary.get("adaptive_alpha_config")
         if not bool(args.skip_retrain_after_tuning):
             X, y, train_meta = build_matrix(
                 gold=train_gold,
@@ -1413,6 +1601,8 @@ def main() -> None:
             "fit_qid_count": int(len(fit_gold)),
             "tune_qid_count": int(len(tune_gold)),
             "selected_blend_alpha": float(args.blend_alpha),
+            "query_adaptive_alpha": bool(args.query_adaptive_alpha),
+            "adaptive_alpha_config": tuning_summary.get("adaptive_alpha_config") if tuning_summary else None,
             "fit_train_metadata": fit_train_meta,
             "tuning_summary": tuning_summary,
         }
@@ -1456,6 +1646,8 @@ def main() -> None:
             "inference_mode": args.inference_mode,
             "blend_alpha": float(args.blend_alpha),
             "auto_tune_blend_alpha": bool(args.auto_tune_blend_alpha),
+            "query_adaptive_alpha": bool(args.query_adaptive_alpha),
+            "query_alpha_bins": int(args.query_alpha_bins),
             "feature_set": args.feature_set,
         },
     }

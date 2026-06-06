@@ -129,6 +129,9 @@ auto_tune_args=()
 if [[ "${AUTO_TUNE_BLEND_ALPHA:-0}" == "1" ]]; then
   auto_tune_args+=(--auto-tune-blend-alpha)
 fi
+if [[ "${QUERY_ADAPTIVE_ALPHA:-0}" == "1" ]]; then
+  auto_tune_args+=(--query-adaptive-alpha)
+fi
 
 echo "using_train_gold=$TRAIN_GOLD"
 echo "using_eval_gold=$EVAL_GOLD"
@@ -140,6 +143,7 @@ echo "using_out_dir=$OUT_DIR"
 echo "using_label=$LABEL"
 echo "using_feature_set=$FEATURE_SET"
 echo "using_source_set=$SOURCE_SET"
+echo "using_query_adaptive_alpha=${QUERY_ADAPTIVE_ALPHA:-0}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -166,6 +170,7 @@ echo "using_source_set=$SOURCE_SET"
   --tune-fraction "${TUNE_FRACTION:-0.20}" \
   --tune-blend-alpha-grid "${TUNE_BLEND_ALPHA_GRID:-0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50}" \
   --tune-hit-k "${TUNE_HIT_K:-4}" \
+  --query-alpha-bins "${QUERY_ALPHA_BINS:-3}" \
   --anchor-top-k "${ANCHOR_TOP_K:-4}" \
   --promotion-rank-min "${PROMOTION_RANK_MIN:-5}" \
   --promotion-rank-max "${PROMOTION_RANK_MAX:-200}" \
