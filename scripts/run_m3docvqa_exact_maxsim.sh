@@ -47,6 +47,7 @@ echo "using_output_summary_json=$OUTPUT_SUMMARY_JSON"
   --embedding_name "$EMBEDDING_NAME" \
   --from-baseline-top-pages "$TOP_PAGES" \
   --base-score-source exact_page_maxsim \
+  --approx-base-page-token-topk 0 \
   --weight-base 1.0 \
   --weight-visual 0.0 \
   --weight-non-visual 0.0 \
