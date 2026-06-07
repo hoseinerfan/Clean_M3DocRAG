@@ -25,6 +25,7 @@ CUSTOM_ROOT="${CUSTOM_ROOT:-/mmfs1/scratch/jacks.local/aerfanshekooh/custom}"
 ALPHAS="${ALPHAS:-0.35 0.40 0.50 0.60 0.70 0.80 1.00}"
 HIT_KS="${HIT_KS:-4 5}"
 FORCE_RERUN="${FORCE_RERUN:-0}"
+REFERENCE_RUNS="${REFERENCE_RUNS:-}"
 
 TRAIN_GOLD="${TRAIN_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_train_pseudo_page_labels_strict.augmented_gold.jsonl}"
 EVAL_GOLD="${EVAL_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_dev_pseudo_page_labels_strict.augmented_gold.jsonl}"
@@ -38,6 +39,24 @@ RESCUE_OUT_DIR="${RESCUE_OUT_DIR:-$REPO_ROOT/output/m3docvqa_content_aware_alpha
 mkdir -p "$OUT_ROOT" "$RESCUE_OUT_DIR"
 
 run_args=()
+if [[ -n "$REFERENCE_RUNS" ]]; then
+  for labeled_path in $REFERENCE_RUNS; do
+    label="${labeled_path%%=*}"
+    path="${labeled_path#*=}"
+    if [[ "$label" == "$labeled_path" || -z "$label" || -z "$path" ]]; then
+      echo "bad_reference_run: $labeled_path" >&2
+      echo "expected_reference_run_format: label=/path/to/prediction.json" >&2
+      exit 1
+    fi
+    if [[ ! -f "$path" ]]; then
+      echo "missing_reference_run_${label}: $path" >&2
+      exit 1
+    fi
+    echo "using_reference_run_${label}=$path"
+    run_args+=(--run "$labeled_path")
+  done
+fi
+
 for alpha in $ALPHAS; do
   tag="$(alpha_tag "$alpha")"
   alpha_out_dir="$OUT_ROOT/alpha_${tag}"
