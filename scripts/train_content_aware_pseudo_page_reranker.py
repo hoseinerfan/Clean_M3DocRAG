@@ -301,6 +301,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--base-aware-alpha-utility-gate",
+        action="store_true",
+        help=(
+            "Train a safer held-out utility gate that separately predicts recovery and loss "
+            "risk for each alpha. It chooses a nonzero alpha only when predicted recovery "
+            "outweighs predicted base-ranking damage. Requires --auto-tune-blend-alpha."
+        ),
+    )
+    parser.add_argument(
         "--query-alpha-bins",
         type=int,
         default=3,
@@ -353,6 +362,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Comma-separated predicted-utility thresholds calibrated on source held-out qids "
             "for --learned-alpha-utility-gate. Include 0.00 for a pure positive-utility gate."
+        ),
+    )
+    parser.add_argument(
+        "--alpha-utility-risk-penalty-grid",
+        default="1.00,1.50,2.00,3.00",
+        help=(
+            "Comma-separated loss-risk penalties calibrated on source held-out qids for "
+            "--base-aware-alpha-utility-gate."
         ),
     )
     parser.add_argument(
@@ -1717,6 +1734,26 @@ def parse_utility_threshold_grid(raw: str) -> list[float]:
     return values
 
 
+def parse_positive_float_grid(raw: str, *, name: str) -> list[float]:
+    values: list[float] = []
+    seen: set[float] = set()
+    for part in str(raw).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        value = float(part)
+        if value < 0.0:
+            raise ValueError(f"{name} values must be nonnegative, got {value}")
+        key = round(value, 8)
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(value)
+    if not values:
+        raise ValueError(f"Empty {name} grid.")
+    return values
+
+
 def alpha_utility_feature_vector(query_features: list[float], alpha: float) -> list[float]:
     alpha = float(alpha)
     return (
@@ -1798,6 +1835,95 @@ def predict_learned_alpha_utility_gate(
         "mode": "learned_alpha_utility_gate",
         "utility_threshold": threshold,
         "selected_predicted_utility": selected_utility,
+        "selection_reason": reason,
+        "top_utilities": sorted(
+            utilities,
+            key=lambda row: (-float(row["predicted_utility"]), float(row["alpha"])),
+        )[:5],
+    }
+
+
+def predict_base_aware_alpha_utility_gate(
+    *,
+    records: list[dict[str, Any]],
+    source_maps_by_label: dict[str, dict[str, dict[str, float]]],
+    qid: str,
+    adaptive_config: dict[str, Any] | None,
+    fallback_alpha: float,
+) -> tuple[float, dict[str, Any]]:
+    if not adaptive_config or adaptive_config.get("mode") != "base_aware_alpha_utility_gate":
+        return float(fallback_alpha), {"mode": None}
+
+    alpha_grid = [float(value) for value in adaptive_config.get("alpha_grid", [])]
+    if not alpha_grid:
+        return 0.0, {"mode": "base_aware_alpha_utility_gate", "error": "empty_alpha_grid"}
+
+    feature_top_k = int(adaptive_config.get("query_alpha_feature_top_k", 20))
+    query_features = query_alpha_feature_vector(records, source_maps_by_label, qid, feature_top_k)
+    recovery_mean = np.asarray(adaptive_config.get("recovery_feature_mean", []), dtype=np.float32)
+    recovery_std = np.asarray(adaptive_config.get("recovery_feature_std", []), dtype=np.float32)
+    recovery_weights = np.asarray(adaptive_config.get("recovery_weights", []), dtype=np.float32)
+    recovery_bias = float(adaptive_config.get("recovery_bias", 0.0))
+    loss_mean = np.asarray(adaptive_config.get("loss_feature_mean", []), dtype=np.float32)
+    loss_std = np.asarray(adaptive_config.get("loss_feature_std", []), dtype=np.float32)
+    loss_weights = np.asarray(adaptive_config.get("loss_weights", []), dtype=np.float32)
+    loss_bias = float(adaptive_config.get("loss_bias", 0.0))
+    expected_len = len(ALPHA_UTILITY_FEATURE_NAMES)
+    if (
+        len(recovery_mean) != expected_len
+        or len(recovery_std) != expected_len
+        or len(recovery_weights) != expected_len
+        or len(loss_mean) != expected_len
+        or len(loss_std) != expected_len
+        or len(loss_weights) != expected_len
+    ):
+        return 0.0, {"mode": "base_aware_alpha_utility_gate", "error": "feature_shape_mismatch"}
+
+    threshold = float(adaptive_config.get("utility_threshold", 0.0))
+    risk_penalty = float(adaptive_config.get("loss_risk_penalty", 1.0))
+    utilities: list[dict[str, float]] = []
+    for alpha in alpha_grid:
+        if math.isclose(float(alpha), 0.0):
+            predicted_recovery = 0.0
+            predicted_loss = 0.0
+            utility = 0.0
+        else:
+            features = np.asarray(alpha_utility_feature_vector(query_features, float(alpha)), dtype=np.float32)
+            recovery_x = (features - recovery_mean) / recovery_std
+            loss_x = (features - loss_mean) / loss_std
+            predicted_recovery = float(recovery_x @ recovery_weights + np.float32(recovery_bias))
+            predicted_loss = float(loss_x @ loss_weights + np.float32(loss_bias))
+            utility = predicted_recovery - risk_penalty * predicted_loss
+        utilities.append(
+            {
+                "alpha": float(alpha),
+                "predicted_recovery": float(predicted_recovery),
+                "predicted_loss": float(predicted_loss),
+                "predicted_utility": float(utility),
+            }
+        )
+
+    eligible = [
+        row
+        for row in utilities
+        if not math.isclose(float(row["alpha"]), 0.0) and float(row["predicted_utility"]) > threshold
+    ]
+    if not eligible:
+        selected_alpha = 0.0
+        selected = {"predicted_recovery": 0.0, "predicted_loss": 0.0, "predicted_utility": 0.0}
+        reason = "no_safe_positive_predicted_utility"
+    else:
+        selected = max(eligible, key=lambda row: (float(row["predicted_utility"]), -float(row["alpha"])))
+        selected_alpha = float(selected["alpha"])
+        reason = "safe_positive_predicted_utility"
+
+    return selected_alpha, {
+        "mode": "base_aware_alpha_utility_gate",
+        "utility_threshold": threshold,
+        "loss_risk_penalty": risk_penalty,
+        "selected_predicted_recovery": float(selected["predicted_recovery"]),
+        "selected_predicted_loss": float(selected["predicted_loss"]),
+        "selected_predicted_utility": float(selected["predicted_utility"]),
         "selection_reason": reason,
         "top_utilities": sorted(
             utilities,
@@ -1973,6 +2099,197 @@ def fit_learned_alpha_utility_gate_config(
     return config
 
 
+def fit_base_aware_alpha_utility_gate_config(
+    *,
+    tune_cases: list[dict[str, Any]],
+    alpha_grid: list[float],
+    hit_k: int,
+    candidate_args: argparse.Namespace,
+    source_maps_by_label: dict[str, dict[str, dict[str, float]]],
+    args: argparse.Namespace,
+    global_fallback_alpha: float,
+) -> dict[str, Any]:
+    if not any(math.isclose(float(alpha), 0.0) for alpha in alpha_grid):
+        alpha_grid = [0.0] + list(alpha_grid)
+    alpha_grid = sorted({round(float(alpha), 8) for alpha in alpha_grid})
+    feature_top_k = int(getattr(args, "query_alpha_feature_top_k", 20))
+
+    vectors: list[list[float]] = []
+    recovery_targets: list[float] = []
+    loss_targets: list[float] = []
+    utility_cases: list[dict[str, Any]] = []
+    target_rows: list[dict[str, Any]] = []
+    target_counter: Counter[str] = Counter()
+
+    for case in tune_cases:
+        query_features = query_alpha_feature_vector(
+            case["scored_records"],
+            source_maps_by_label,
+            str(case["qid"]),
+            feature_top_k,
+        )
+        alpha_hits: dict[float, bool] = {}
+        alpha_ranks: dict[float, int | None] = {}
+        for alpha in alpha_grid:
+            candidate_args.blend_alpha = float(alpha)
+            candidate_records = [dict(row) for row in case["scored_records"]]
+            ranked = rerank_records(candidate_records, candidate_args)
+            ranked_uids = [str(row["uid"]) for row in ranked]
+            rank = first_rank(ranked_uids, case["pages_gold"])
+            alpha_ranks[float(alpha)] = rank
+            alpha_hits[float(alpha)] = bool(rank is not None and rank <= int(hit_k))
+
+        base_hit = bool(alpha_hits.get(0.0, False))
+        for alpha in alpha_grid:
+            hit = bool(alpha_hits[float(alpha)])
+            recovery = float(int(hit and not base_hit))
+            loss = float(int(base_hit and not hit))
+            vectors.append(alpha_utility_feature_vector(query_features, float(alpha)))
+            recovery_targets.append(recovery)
+            loss_targets.append(loss)
+            if recovery:
+                target_counter["recovery"] += 1
+            elif loss:
+                target_counter["loss"] += 1
+            else:
+                target_counter["neutral"] += 1
+        utility_cases.append(
+            {
+                "qid": str(case["qid"]),
+                "scored_records": case["scored_records"],
+                "pages_gold": case["pages_gold"],
+                "base_hit": base_hit,
+            }
+        )
+        if len(target_rows) < 20:
+            best_alpha = max(
+                alpha_grid,
+                key=lambda alpha: (
+                    int(alpha_hits[float(alpha)] and not base_hit),
+                    int(alpha_hits[float(alpha)]),
+                    -float(alpha),
+                ),
+            )
+            target_rows.append(
+                {
+                    "qid": str(case["qid"]),
+                    "base_hit": base_hit,
+                    "best_alpha_by_recovery": float(best_alpha),
+                    "best_rank": alpha_ranks[float(best_alpha)],
+                    "alpha_hits": {f"{float(alpha):.8g}": bool(alpha_hits[float(alpha)]) for alpha in alpha_grid},
+                }
+            )
+
+    if not vectors:
+        return {
+            "mode": "base_aware_alpha_utility_gate",
+            "error": "no_tune_cases",
+            "global_fallback_blend_alpha": float(global_fallback_alpha),
+        }
+
+    X = np.asarray(vectors, dtype=np.float32)
+    recovery_y = np.asarray(recovery_targets, dtype=np.float32)
+    loss_y = np.asarray(loss_targets, dtype=np.float32)
+    ridge = max(0.0, float(getattr(args, "alpha_utility_ridge", 1.0)))
+    recovery_weights, recovery_bias, recovery_mean, recovery_std = fit_alpha_utility_ridge(X, recovery_y, ridge)
+    loss_weights, loss_bias, loss_mean, loss_std = fit_alpha_utility_ridge(X, loss_y, ridge)
+
+    config: dict[str, Any] = {
+        "mode": "base_aware_alpha_utility_gate",
+        "query_alpha_feature_names": list(QUERY_ALPHA_FEATURE_NAMES),
+        "alpha_utility_feature_names": list(ALPHA_UTILITY_FEATURE_NAMES),
+        "query_alpha_feature_top_k": int(feature_top_k),
+        "alpha_grid": [float(value) for value in alpha_grid],
+        "recovery_weights": [float(value) for value in recovery_weights.tolist()],
+        "recovery_bias": float(recovery_bias),
+        "recovery_feature_mean": [float(value) for value in recovery_mean.tolist()],
+        "recovery_feature_std": [float(value) for value in recovery_std.tolist()],
+        "loss_weights": [float(value) for value in loss_weights.tolist()],
+        "loss_bias": float(loss_bias),
+        "loss_feature_mean": [float(value) for value in loss_mean.tolist()],
+        "loss_feature_std": [float(value) for value in loss_std.tolist()],
+        "global_fallback_blend_alpha": float(global_fallback_alpha),
+        "alpha_utility_ridge": float(ridge),
+        "target_recovery_loss_distribution": {key: int(value) for key, value in sorted(target_counter.items())},
+        "target_examples": target_rows,
+    }
+
+    threshold_grid = parse_utility_threshold_grid(str(getattr(args, "alpha_utility_threshold_grid", "0.0")))
+    risk_penalty_grid = parse_positive_float_grid(
+        str(getattr(args, "alpha_utility_risk_penalty_grid", "1.0")),
+        name="alpha utility risk penalty",
+    )
+    threshold_scores: list[dict[str, Any]] = []
+    for risk_penalty in risk_penalty_grid:
+        config["loss_risk_penalty"] = float(risk_penalty)
+        for threshold in threshold_grid:
+            config["utility_threshold"] = float(threshold)
+            hits = 0
+            recovered = 0
+            lost = 0
+            selected_alpha_sum = 0.0
+            selected_counts: Counter[float] = Counter()
+            for case in utility_cases:
+                selected_alpha, _ = predict_base_aware_alpha_utility_gate(
+                    records=case["scored_records"],
+                    source_maps_by_label=source_maps_by_label,
+                    qid=str(case["qid"]),
+                    adaptive_config=config,
+                    fallback_alpha=float(global_fallback_alpha),
+                )
+                selected_counts[round(float(selected_alpha), 8)] += 1
+                selected_alpha_sum += float(selected_alpha)
+                candidate_args.blend_alpha = float(selected_alpha)
+                candidate_records = [dict(row) for row in case["scored_records"]]
+                ranked = rerank_records(candidate_records, candidate_args)
+                ranked_uids = [str(row["uid"]) for row in ranked]
+                selected_hit = any(uid in case["pages_gold"] for uid in ranked_uids[:hit_k])
+                hits += int(selected_hit)
+                if selected_hit and not bool(case["base_hit"]):
+                    recovered += 1
+                if bool(case["base_hit"]) and not selected_hit:
+                    lost += 1
+            evaluated = max(1, len(utility_cases))
+            threshold_scores.append(
+                {
+                    "utility_threshold": float(threshold),
+                    "loss_risk_penalty": float(risk_penalty),
+                    f"page@{hit_k}": float(hits) / float(evaluated),
+                    "hit_count": int(hits),
+                    "recovered_hit_count": int(recovered),
+                    "lost_hit_count": int(lost),
+                    "net_hit_count": int(recovered - lost),
+                    "mean_selected_alpha": float(selected_alpha_sum) / float(evaluated),
+                    "selected_alpha_distribution": {
+                        f"{float(alpha):.8g}": int(count)
+                        for alpha, count in sorted(selected_counts.items(), key=lambda item: float(item[0]))
+                    },
+                }
+            )
+
+    selected_threshold = max(
+        threshold_scores,
+        key=lambda row: (
+            float(row[f"page@{hit_k}"]),
+            int(row["net_hit_count"]),
+            -int(row["lost_hit_count"]),
+            -float(row["mean_selected_alpha"]),
+            float(row["loss_risk_penalty"]),
+            float(row["utility_threshold"]),
+        ),
+    )
+    config.update(
+        {
+            "utility_threshold": float(selected_threshold["utility_threshold"]),
+            "loss_risk_penalty": float(selected_threshold["loss_risk_penalty"]),
+            "tune_eval_qid_count": int(len(utility_cases)),
+            "threshold_scores": threshold_scores,
+            "selected_threshold_score": selected_threshold,
+        }
+    )
+    return config
+
+
 def doc_head_rerank_records(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     doc_order: list[str] = []
     rows_by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -2104,7 +2421,10 @@ def tune_blend_alpha(
     args: argparse.Namespace,
 ) -> dict[str, Any]:
     alpha_grid = parse_alpha_grid(str(args.tune_blend_alpha_grid))
-    if bool(getattr(args, "learned_alpha_utility_gate", False)) and not any(
+    if (
+        bool(getattr(args, "learned_alpha_utility_gate", False))
+        or bool(getattr(args, "base_aware_alpha_utility_gate", False))
+    ) and not any(
         math.isclose(float(alpha), 0.0) for alpha in alpha_grid
     ):
         alpha_grid = [0.0] + alpha_grid
@@ -2173,6 +2493,16 @@ def tune_blend_alpha(
     adaptive_config: dict[str, Any] | None = None
     if bool(getattr(args, "learned_alpha_utility_gate", False)):
         adaptive_config = fit_learned_alpha_utility_gate_config(
+            tune_cases=tune_cases,
+            alpha_grid=alpha_grid,
+            hit_k=hit_k,
+            candidate_args=candidate_args,
+            source_maps_by_label=source_maps_by_label,
+            args=args,
+            global_fallback_alpha=float(best["blend_alpha"]),
+        )
+    elif bool(getattr(args, "base_aware_alpha_utility_gate", False)):
+        adaptive_config = fit_base_aware_alpha_utility_gate_config(
             tune_cases=tune_cases,
             alpha_grid=alpha_grid,
             hit_k=hit_k,
@@ -2276,6 +2606,7 @@ def tune_blend_alpha(
         "learned_query_alpha": bool(getattr(args, "learned_query_alpha", False)),
         "learned_alpha_action": bool(getattr(args, "learned_alpha_action", False)),
         "learned_alpha_utility_gate": bool(getattr(args, "learned_alpha_utility_gate", False)),
+        "base_aware_alpha_utility_gate": bool(getattr(args, "base_aware_alpha_utility_gate", False)),
         "adaptive_alpha_config": adaptive_config,
     }
 
@@ -2318,6 +2649,17 @@ def apply_reranker(
         if bool(getattr(args, "learned_alpha_utility_gate", False)):
             query_alpha_confidence = query_confidence_score(scored_records, source_maps_by_label, qid)
             query_alpha, query_alpha_info = predict_learned_alpha_utility_gate(
+                records=scored_records,
+                source_maps_by_label=source_maps_by_label,
+                qid=qid,
+                adaptive_config=adaptive_config,
+                fallback_alpha=float(args.blend_alpha),
+            )
+            apply_args = copy.copy(args)
+            apply_args.blend_alpha = float(query_alpha)
+        elif bool(getattr(args, "base_aware_alpha_utility_gate", False)):
+            query_alpha_confidence = query_confidence_score(scored_records, source_maps_by_label, qid)
+            query_alpha, query_alpha_info = predict_base_aware_alpha_utility_gate(
                 records=scored_records,
                 source_maps_by_label=source_maps_by_label,
                 qid=qid,
@@ -2385,6 +2727,7 @@ def apply_reranker(
                 "learned_query_alpha": bool(getattr(args, "learned_query_alpha", False)),
                 "learned_alpha_action": bool(getattr(args, "learned_alpha_action", False)),
                 "learned_alpha_utility_gate": bool(getattr(args, "learned_alpha_utility_gate", False)),
+                "base_aware_alpha_utility_gate": bool(getattr(args, "base_aware_alpha_utility_gate", False)),
                 "query_alpha_mode": query_alpha_info.get("mode"),
                 "query_alpha_confidence": query_alpha_confidence,
                 "query_alpha_bin": query_alpha_bin,
@@ -2539,6 +2882,8 @@ def main() -> None:
         raise ValueError("--learned-alpha-action requires --auto-tune-blend-alpha.")
     if bool(args.learned_alpha_utility_gate) and not bool(args.auto_tune_blend_alpha):
         raise ValueError("--learned-alpha-utility-gate requires --auto-tune-blend-alpha.")
+    if bool(args.base_aware_alpha_utility_gate) and not bool(args.auto_tune_blend_alpha):
+        raise ValueError("--base-aware-alpha-utility-gate requires --auto-tune-blend-alpha.")
     adaptive_mode_count = sum(
         bool(value)
         for value in [
@@ -2546,12 +2891,14 @@ def main() -> None:
             args.learned_query_alpha,
             args.learned_alpha_action,
             args.learned_alpha_utility_gate,
+            args.base_aware_alpha_utility_gate,
         ]
     )
     if adaptive_mode_count > 1:
         raise ValueError(
             "Use only one adaptive alpha mode: --query-adaptive-alpha, "
-            "--learned-query-alpha, --learned-alpha-action, or --learned-alpha-utility-gate."
+            "--learned-query-alpha, --learned-alpha-action, --learned-alpha-utility-gate, "
+            "or --base-aware-alpha-utility-gate."
         )
     if int(args.query_alpha_bins) <= 0:
         raise ValueError(f"--query-alpha-bins must be positive, got {args.query_alpha_bins}")
@@ -2619,6 +2966,7 @@ def main() -> None:
             or bool(args.learned_query_alpha)
             or bool(args.learned_alpha_action)
             or bool(args.learned_alpha_utility_gate)
+            or bool(args.base_aware_alpha_utility_gate)
         ):
             args.adaptive_alpha_config = tuning_summary.get("adaptive_alpha_config")
         if not bool(args.skip_retrain_after_tuning):
@@ -2642,6 +2990,7 @@ def main() -> None:
             "learned_query_alpha": bool(args.learned_query_alpha),
             "learned_alpha_action": bool(args.learned_alpha_action),
             "learned_alpha_utility_gate": bool(args.learned_alpha_utility_gate),
+            "base_aware_alpha_utility_gate": bool(args.base_aware_alpha_utility_gate),
             "adaptive_alpha_config": tuning_summary.get("adaptive_alpha_config") if tuning_summary else None,
             "fit_train_metadata": fit_train_meta,
             "tuning_summary": tuning_summary,
@@ -2691,6 +3040,7 @@ def main() -> None:
             "learned_query_alpha": bool(args.learned_query_alpha),
             "learned_alpha_action": bool(args.learned_alpha_action),
             "learned_alpha_utility_gate": bool(args.learned_alpha_utility_gate),
+            "base_aware_alpha_utility_gate": bool(args.base_aware_alpha_utility_gate),
             "query_alpha_bins": int(args.query_alpha_bins),
             "query_alpha_feature_top_k": int(args.query_alpha_feature_top_k),
             "query_alpha_ridge": float(args.query_alpha_ridge),
@@ -2700,6 +3050,7 @@ def main() -> None:
             "query_alpha_action_weight_decay": float(args.query_alpha_action_weight_decay),
             "alpha_utility_ridge": float(args.alpha_utility_ridge),
             "alpha_utility_threshold_grid": str(args.alpha_utility_threshold_grid),
+            "alpha_utility_risk_penalty_grid": str(args.alpha_utility_risk_penalty_grid),
             "feature_set": args.feature_set,
         },
     }

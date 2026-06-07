@@ -234,6 +234,38 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
             self.assertIn("query_alpha_confidence", metadata)
             self.assertIn("query_alpha_bin", metadata)
 
+    def test_base_aware_alpha_gate_blocks_lossy_alpha(self) -> None:
+        records = [
+            {"uid": "docA_page0", "doc_id": "docA", "base_rank": 1, "score": 10.0, "learned_score": 0.1},
+            {"uid": "docB_page0", "doc_id": "docB", "base_rank": 2, "score": 9.0, "learned_score": 0.9},
+        ]
+        feature_len = len(MODULE.ALPHA_UTILITY_FEATURE_NAMES)
+        config = {
+            "mode": "base_aware_alpha_utility_gate",
+            "query_alpha_feature_top_k": 2,
+            "alpha_grid": [0.0, 1.0],
+            "recovery_weights": [0.0] * feature_len,
+            "recovery_bias": 0.1,
+            "recovery_feature_mean": [0.0] * feature_len,
+            "recovery_feature_std": [1.0] * feature_len,
+            "loss_weights": [0.0] * feature_len,
+            "loss_bias": 1.0,
+            "loss_feature_mean": [0.0] * feature_len,
+            "loss_feature_std": [1.0] * feature_len,
+            "loss_risk_penalty": 2.0,
+            "utility_threshold": 0.0,
+        }
+        alpha, info = MODULE.predict_base_aware_alpha_utility_gate(
+            records=records,
+            source_maps_by_label={},
+            qid="q1",
+            adaptive_config=config,
+            fallback_alpha=1.0,
+        )
+        self.assertEqual(alpha, 0.0)
+        self.assertEqual(info["mode"], "base_aware_alpha_utility_gate")
+        self.assertEqual(info["selection_reason"], "no_safe_positive_predicted_utility")
+
     def test_learned_query_alpha_writes_regressor_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

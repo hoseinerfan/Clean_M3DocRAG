@@ -78,6 +78,9 @@ def resolved_args(args: argparse.Namespace, model: dict[str, Any]) -> argparse.N
     args.learned_alpha_utility_gate = bool(
         model_args.get("learned_alpha_utility_gate", False) or mode == "learned_alpha_utility_gate"
     )
+    args.base_aware_alpha_utility_gate = bool(
+        model_args.get("base_aware_alpha_utility_gate", False) or mode == "base_aware_alpha_utility_gate"
+    )
     return args
 
 
@@ -144,6 +147,17 @@ def apply_model(
             )
             apply_args = copy.copy(args)
             apply_args.blend_alpha = float(query_alpha)
+        elif bool(getattr(args, "base_aware_alpha_utility_gate", False)):
+            query_alpha_confidence = ca.query_confidence_score(scored_records_qid, source_maps_by_label, qid)
+            query_alpha, query_alpha_info = ca.predict_base_aware_alpha_utility_gate(
+                records=scored_records_qid,
+                source_maps_by_label=source_maps_by_label,
+                qid=qid,
+                adaptive_config=adaptive_config,
+                fallback_alpha=float(args.blend_alpha),
+            )
+            apply_args = copy.copy(args)
+            apply_args.blend_alpha = float(query_alpha)
         elif bool(getattr(args, "learned_alpha_action", False)):
             query_alpha_confidence = ca.query_confidence_score(scored_records_qid, source_maps_by_label, qid)
             query_alpha, query_alpha_info = ca.predict_learned_alpha_action(
@@ -202,6 +216,7 @@ def apply_model(
             "query_alpha_mode": query_alpha_info.get("mode"),
             "query_alpha_confidence": query_alpha_confidence,
             "query_alpha_info": query_alpha_info,
+            "base_aware_alpha_utility_gate": bool(getattr(args, "base_aware_alpha_utility_gate", False)),
             "candidate_top_k": int(args.candidate_top_k),
         }
         output[qid] = out_row
