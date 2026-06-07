@@ -344,6 +344,117 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
             self.assertEqual(metadata["query_alpha_mode"], "learned_query_regressor")
             self.assertIn("raw_alpha", metadata["query_alpha_info"])
 
+    def test_learned_alpha_action_writes_action_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gold = root / "gold.jsonl"
+            pred = root / "pred.json"
+            pages = root / "pages.jsonl"
+            model = root / "model.json"
+            out_pred = root / "out.prediction.json"
+            summary = root / "summary.json"
+
+            gold_rows = []
+            prediction = {}
+            page_rows = []
+            for idx in range(8):
+                qid = f"q{idx}"
+                doc_id = f"doc{idx}"
+                topic = f"action{idx}"
+                gold_rows.append(
+                    {
+                        "qid": qid,
+                        "question": f"Which page mentions {topic} and the target city?",
+                        "metadata": {"gold_page_uids": [f"{doc_id}_page1"]},
+                        "supporting_context": [{"doc_id": doc_id, "doc_part": "text"}],
+                    }
+                )
+                prediction[qid] = {
+                    "qid": qid,
+                    "page_retrieval_results": [
+                        [doc_id, 0, 10.0],
+                        [doc_id, 1, 9.0],
+                        [f"noise{idx}", 0, 8.0],
+                    ],
+                }
+                page_rows.extend(
+                    [
+                        {"doc_id": doc_id, "page_idx": 0, "text": "A generic unrelated page."},
+                        {"doc_id": doc_id, "page_idx": 1, "text": f"The {topic} target city is Lisbon."},
+                        {"doc_id": f"noise{idx}", "page_idx": 0, "text": "Unrelated notes."},
+                    ]
+                )
+
+            self.write_jsonl(gold, gold_rows)
+            pred.write_text(json.dumps(prediction), encoding="utf-8")
+            self.write_jsonl(pages, page_rows)
+
+            old_argv = sys.argv
+            try:
+                sys.argv = [
+                    "train_content_aware_pseudo_page_reranker.py",
+                    "--train-gold",
+                    str(gold),
+                    "--eval-gold",
+                    str(gold),
+                    "--train-base-pred",
+                    str(pred),
+                    "--eval-base-pred",
+                    str(pred),
+                    "--train-page-text-jsonl",
+                    str(pages),
+                    "--eval-page-text-jsonl",
+                    str(pages),
+                    "--candidate-top-k",
+                    "3",
+                    "--negatives-per-band",
+                    "2",
+                    "--max-negatives-per-qid",
+                    "2",
+                    "--epochs",
+                    "20",
+                    "--learning-rate",
+                    "0.05",
+                    "--inference-mode",
+                    "blend_rerank",
+                    "--auto-tune-blend-alpha",
+                    "--learned-alpha-action",
+                    "--query-alpha-feature-top-k",
+                    "3",
+                    "--query-alpha-action-epochs",
+                    "20",
+                    "--query-alpha-action-learning-rate",
+                    "0.05",
+                    "--tune-fraction",
+                    "0.5",
+                    "--tune-hit-k",
+                    "1",
+                    "--tune-blend-alpha-grid",
+                    "0.0,0.5,1.0",
+                    "--output-model-json",
+                    str(model),
+                    "--output-prediction-json",
+                    str(out_pred),
+                    "--output-summary-json",
+                    str(summary),
+                ]
+                MODULE.main()
+            finally:
+                sys.argv = old_argv
+
+            model_payload = json.loads(model.read_text(encoding="utf-8"))
+            self.assertTrue(model_payload["args"]["learned_alpha_action"])
+            adaptive = model_payload["train_metadata"]["adaptive_alpha_config"]
+            self.assertEqual(adaptive["mode"], "learned_alpha_action")
+            self.assertIn("predicted_action_distribution", adaptive)
+            self.assertIn("target_action_accuracy", adaptive)
+
+            output = json.loads(out_pred.read_text(encoding="utf-8"))
+            metadata = output["q0"]["reranker_metadata"]["content_aware_pseudo_page_reranker"]
+            self.assertTrue(metadata["learned_alpha_action"])
+            self.assertEqual(metadata["query_alpha_mode"], "learned_alpha_action")
+            self.assertIn("action_probability", metadata["query_alpha_info"])
+
     def test_doc_head_blend_preserves_doc_order_but_swaps_best_page_head(self) -> None:
         records = [
             {"uid": "docA_page0", "doc_id": "docA", "page_idx": 0, "base_rank": 1, "learned_score": 0.1},

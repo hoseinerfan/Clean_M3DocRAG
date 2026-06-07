@@ -276,6 +276,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--learned-alpha-action",
+        action="store_true",
+        help=(
+            "Train a held-out multinomial action selector over the alpha grid. The selector "
+            "learns which discrete alpha action gives the best pseudo-page rank for each "
+            "query, instead of regressing alpha as a continuous value. Requires "
+            "--auto-tune-blend-alpha."
+        ),
+    )
+    parser.add_argument(
         "--query-alpha-bins",
         type=int,
         default=3,
@@ -297,6 +307,24 @@ def parse_args() -> argparse.Namespace:
         "--query-alpha-continuous",
         action="store_true",
         help="Use the continuous regressor output instead of snapping --learned-query-alpha to the alpha grid.",
+    )
+    parser.add_argument(
+        "--query-alpha-action-epochs",
+        type=int,
+        default=200,
+        help="Training epochs for --learned-alpha-action multinomial selector.",
+    )
+    parser.add_argument(
+        "--query-alpha-action-learning-rate",
+        type=float,
+        default=0.05,
+        help="Learning rate for --learned-alpha-action multinomial selector.",
+    )
+    parser.add_argument(
+        "--query-alpha-action-weight-decay",
+        type=float,
+        default=1e-3,
+        help="L2 regularization for --learned-alpha-action multinomial selector.",
     )
     parser.add_argument(
         "--tune-fraction",
@@ -1282,6 +1310,107 @@ def predict_learned_query_alpha(
     }
 
 
+def softmax_rows(values: np.ndarray) -> np.ndarray:
+    values = np.clip(values, -40.0, 40.0)
+    shifted = values - values.max(axis=1, keepdims=True)
+    exp_values = np.exp(shifted)
+    denom = np.clip(exp_values.sum(axis=1, keepdims=True), 1e-12, None)
+    return exp_values / denom
+
+
+def train_multiclass_logistic(
+    X: np.ndarray,
+    y: np.ndarray,
+    *,
+    class_count: int,
+    seed: int,
+    epochs: int,
+    learning_rate: float,
+    weight_decay: float,
+) -> tuple[np.ndarray, np.ndarray, list[dict[str, float]]]:
+    rng = np.random.default_rng(int(seed))
+    W = np.zeros((X.shape[1], class_count), dtype=np.float32)
+    b = np.zeros(class_count, dtype=np.float32)
+    class_hist = np.bincount(y, minlength=class_count).astype(np.float32)
+    present = class_hist > 0
+    class_weights = np.ones(class_count, dtype=np.float32)
+    if present.any():
+        class_weights[present] = float(len(y)) / (float(present.sum()) * np.maximum(class_hist[present], 1.0))
+    history: list[dict[str, float]] = []
+    lr = float(learning_rate)
+    wd = float(weight_decay)
+    epochs = max(1, int(epochs))
+
+    for epoch in range(1, epochs + 1):
+        order = rng.permutation(len(y))
+        Xb = X[order]
+        yb = y[order]
+        logits = Xb @ W + b
+        probs = softmax_rows(logits)
+        onehot = np.zeros_like(probs, dtype=np.float32)
+        onehot[np.arange(len(yb)), yb] = 1.0
+        row_weights = class_weights[yb].reshape(-1, 1)
+        error = (probs - onehot) * row_weights
+        denom = max(float(row_weights.sum()), 1.0)
+        grad_W = (Xb.T @ error) / denom + wd * W
+        grad_b = error.sum(axis=0) / denom
+        W -= np.float32(lr) * grad_W.astype(np.float32)
+        b -= np.float32(lr) * grad_b.astype(np.float32)
+        if epoch == 1 or epoch == epochs or epoch % max(1, epochs // 10) == 0:
+            chosen = np.clip(probs[np.arange(len(yb)), yb], 1e-6, 1.0)
+            loss = -np.log(chosen) * class_weights[yb]
+            history.append({"epoch": float(epoch), "loss": float(loss.mean())})
+    return W.astype(np.float32), b.astype(np.float32), history
+
+
+def predict_learned_alpha_action(
+    *,
+    records: list[dict[str, Any]],
+    source_maps_by_label: dict[str, dict[str, dict[str, float]]],
+    qid: str,
+    adaptive_config: dict[str, Any] | None,
+    fallback_alpha: float,
+) -> tuple[float, dict[str, Any]]:
+    if not adaptive_config or adaptive_config.get("mode") != "learned_alpha_action":
+        return float(fallback_alpha), {"mode": None}
+    feature_top_k = int(adaptive_config.get("query_alpha_feature_top_k", 20))
+    features = query_alpha_feature_vector(records, source_maps_by_label, qid, feature_top_k)
+    mean = np.asarray(adaptive_config.get("feature_mean", []), dtype=np.float32)
+    std = np.asarray(adaptive_config.get("feature_std", []), dtype=np.float32)
+    weights = np.asarray(adaptive_config.get("weights", []), dtype=np.float32)
+    bias = np.asarray(adaptive_config.get("bias", []), dtype=np.float32)
+    alpha_grid = [float(value) for value in adaptive_config.get("alpha_grid", [])]
+    if (
+        len(features) != len(mean)
+        or len(features) != len(std)
+        or weights.ndim != 2
+        or weights.shape[0] != len(features)
+        or weights.shape[1] != len(alpha_grid)
+        or len(bias) != len(alpha_grid)
+    ):
+        return float(adaptive_config.get("global_fallback_blend_alpha", fallback_alpha)), {
+            "mode": "learned_alpha_action",
+            "error": "feature_shape_mismatch",
+        }
+    X = ((np.asarray(features, dtype=np.float32) - mean) / std).reshape(1, -1)
+    probs = softmax_rows(X @ weights + bias)[0]
+    action_idx = int(np.argmax(probs))
+    selected_alpha = float(alpha_grid[action_idx])
+    top_probs = sorted(
+        (
+            {"alpha": float(alpha_grid[idx]), "probability": float(probs[idx])}
+            for idx in range(len(alpha_grid))
+        ),
+        key=lambda row: (-float(row["probability"]), float(row["alpha"])),
+    )[:5]
+    return selected_alpha, {
+        "mode": "learned_alpha_action",
+        "action_idx": int(action_idx),
+        "action_probability": float(probs[action_idx]),
+        "top_actions": top_probs,
+    }
+
+
 def fit_learned_query_alpha_config(
     *,
     tune_cases: list[dict[str, Any]],
@@ -1404,6 +1533,137 @@ def fit_learned_query_alpha_config(
             f"predicted_page@{hit_k}": float(predicted_hits) / float(evaluated),
             f"oracle_page@{hit_k}": float(oracle_hits) / float(evaluated),
             "target_alpha_mse": float(squared_error) / float(evaluated),
+            "target_examples": target_rows[:20],
+        }
+    )
+    return config
+
+
+def fit_learned_alpha_action_config(
+    *,
+    tune_cases: list[dict[str, Any]],
+    alpha_grid: list[float],
+    hit_k: int,
+    candidate_args: argparse.Namespace,
+    source_maps_by_label: dict[str, dict[str, dict[str, float]]],
+    args: argparse.Namespace,
+    global_fallback_alpha: float,
+) -> dict[str, Any]:
+    vectors: list[list[float]] = []
+    targets: list[int] = []
+    action_cases: list[dict[str, Any]] = []
+    target_rows: list[dict[str, Any]] = []
+    feature_top_k = int(getattr(args, "query_alpha_feature_top_k", 20))
+    alpha_to_idx = {round(float(alpha), 8): idx for idx, alpha in enumerate(alpha_grid)}
+    for case in tune_cases:
+        target_alpha, target_rank, target_hit_any = select_best_alpha_for_case(
+            case=case,
+            alpha_grid=alpha_grid,
+            candidate_args=candidate_args,
+        )
+        alpha_key = round(float(target_alpha), 8)
+        if alpha_key not in alpha_to_idx:
+            continue
+        vectors.append(
+            query_alpha_feature_vector(
+                case["scored_records"],
+                source_maps_by_label,
+                str(case["qid"]),
+                feature_top_k,
+            )
+        )
+        targets.append(int(alpha_to_idx[alpha_key]))
+        action_cases.append(case)
+        target_rows.append(
+            {
+                "qid": str(case["qid"]),
+                "target_alpha": float(target_alpha),
+                "target_action_idx": int(alpha_to_idx[alpha_key]),
+                "target_rank": None if target_rank is None else int(target_rank),
+                f"target_hit@{hit_k}": bool(target_rank is not None and target_rank <= int(hit_k)),
+                "target_hit_any": bool(target_hit_any),
+            }
+        )
+
+    if not vectors:
+        return {
+            "mode": "learned_alpha_action",
+            "error": "no_tune_cases",
+            "global_fallback_blend_alpha": float(global_fallback_alpha),
+        }
+
+    X = np.asarray(vectors, dtype=np.float32)
+    y = np.asarray(targets, dtype=np.int64)
+    X_std, mean, std = standardize_train(X)
+    weights, bias, history = train_multiclass_logistic(
+        X_std,
+        y,
+        class_count=len(alpha_grid),
+        seed=int(getattr(args, "seed", 13)),
+        epochs=int(getattr(args, "query_alpha_action_epochs", 200)),
+        learning_rate=float(getattr(args, "query_alpha_action_learning_rate", 0.05)),
+        weight_decay=float(getattr(args, "query_alpha_action_weight_decay", 1e-3)),
+    )
+    target_counts = Counter(int(value) for value in targets)
+    config = {
+        "mode": "learned_alpha_action",
+        "query_alpha_feature_names": list(QUERY_ALPHA_FEATURE_NAMES),
+        "query_alpha_feature_top_k": int(feature_top_k),
+        "alpha_grid": [float(value) for value in alpha_grid],
+        "weights": [[float(value) for value in row] for row in weights.tolist()],
+        "bias": [float(value) for value in bias.tolist()],
+        "feature_mean": [float(value) for value in mean.tolist()],
+        "feature_std": [float(value) for value in std.tolist()],
+        "global_fallback_blend_alpha": float(global_fallback_alpha),
+        "action_training_history": history,
+        "target_action_distribution": {
+            f"{float(alpha_grid[idx]):.8g}": int(target_counts.get(idx, 0))
+            for idx in range(len(alpha_grid))
+        },
+        "query_alpha_action_epochs": int(getattr(args, "query_alpha_action_epochs", 200)),
+        "query_alpha_action_learning_rate": float(getattr(args, "query_alpha_action_learning_rate", 0.05)),
+        "query_alpha_action_weight_decay": float(getattr(args, "query_alpha_action_weight_decay", 1e-3)),
+    }
+
+    predicted_hits = 0
+    oracle_hits = 0
+    predicted_counts: Counter[int] = Counter()
+    target_correct = 0
+    for case, target_idx in zip(action_cases, targets):
+        predicted_alpha, info = predict_learned_alpha_action(
+            records=case["scored_records"],
+            source_maps_by_label=source_maps_by_label,
+            qid=str(case["qid"]),
+            adaptive_config=config,
+            fallback_alpha=float(global_fallback_alpha),
+        )
+        predicted_idx = int(info.get("action_idx", -1))
+        predicted_counts[predicted_idx] += 1
+        if predicted_idx == int(target_idx):
+            target_correct += 1
+        oracle_alpha = float(alpha_grid[int(target_idx)])
+        for alpha, key in [(predicted_alpha, "predicted"), (oracle_alpha, "oracle")]:
+            candidate_args.blend_alpha = float(alpha)
+            candidate_records = [dict(row) for row in case["scored_records"]]
+            ranked = rerank_records(candidate_records, candidate_args)
+            ranked_uids = [str(row["uid"]) for row in ranked]
+            hit = any(uid in case["pages_gold"] for uid in ranked_uids[:hit_k])
+            if key == "predicted" and hit:
+                predicted_hits += 1
+            if key == "oracle" and hit:
+                oracle_hits += 1
+
+    evaluated = max(1, len(targets))
+    config.update(
+        {
+            "tune_eval_qid_count": int(len(targets)),
+            "predicted_action_distribution": {
+                f"{float(alpha_grid[idx]):.8g}": int(predicted_counts.get(idx, 0))
+                for idx in range(len(alpha_grid))
+            },
+            f"predicted_page@{hit_k}": float(predicted_hits) / float(evaluated),
+            f"oracle_page@{hit_k}": float(oracle_hits) / float(evaluated),
+            "target_action_accuracy": float(target_correct) / float(evaluated),
             "target_examples": target_rows[:20],
         }
     )
@@ -1604,7 +1864,17 @@ def tune_blend_alpha(
     ]
     best = max(scores, key=lambda row: (float(row[f"page@{hit_k}"]), -float(row["blend_alpha"])))
     adaptive_config: dict[str, Any] | None = None
-    if bool(getattr(args, "learned_query_alpha", False)):
+    if bool(getattr(args, "learned_alpha_action", False)):
+        adaptive_config = fit_learned_alpha_action_config(
+            tune_cases=tune_cases,
+            alpha_grid=alpha_grid,
+            hit_k=hit_k,
+            candidate_args=candidate_args,
+            source_maps_by_label=source_maps_by_label,
+            args=args,
+            global_fallback_alpha=float(best["blend_alpha"]),
+        )
+    elif bool(getattr(args, "learned_query_alpha", False)):
         adaptive_config = fit_learned_query_alpha_config(
             tune_cases=tune_cases,
             alpha_grid=alpha_grid,
@@ -1687,6 +1957,7 @@ def tune_blend_alpha(
         "alpha_scores": scores,
         "query_adaptive_alpha": bool(getattr(args, "query_adaptive_alpha", False)),
         "learned_query_alpha": bool(getattr(args, "learned_query_alpha", False)),
+        "learned_alpha_action": bool(getattr(args, "learned_alpha_action", False)),
         "adaptive_alpha_config": adaptive_config,
     }
 
@@ -1726,7 +1997,18 @@ def apply_reranker(
         query_alpha_bin: int | None = None
         query_alpha_info: dict[str, Any] = {}
         adaptive_config = getattr(args, "adaptive_alpha_config", None)
-        if bool(getattr(args, "learned_query_alpha", False)):
+        if bool(getattr(args, "learned_alpha_action", False)):
+            query_alpha_confidence = query_confidence_score(scored_records, source_maps_by_label, qid)
+            query_alpha, query_alpha_info = predict_learned_alpha_action(
+                records=scored_records,
+                source_maps_by_label=source_maps_by_label,
+                qid=qid,
+                adaptive_config=adaptive_config,
+                fallback_alpha=float(args.blend_alpha),
+            )
+            apply_args = copy.copy(args)
+            apply_args.blend_alpha = float(query_alpha)
+        elif bool(getattr(args, "learned_query_alpha", False)):
             query_alpha_confidence = query_confidence_score(scored_records, source_maps_by_label, qid)
             query_alpha, query_alpha_info = predict_learned_query_alpha(
                 records=scored_records,
@@ -1772,6 +2054,7 @@ def apply_reranker(
                 "global_blend_alpha": float(args.blend_alpha),
                 "query_adaptive_alpha": bool(getattr(args, "query_adaptive_alpha", False)),
                 "learned_query_alpha": bool(getattr(args, "learned_query_alpha", False)),
+                "learned_alpha_action": bool(getattr(args, "learned_alpha_action", False)),
                 "query_alpha_mode": query_alpha_info.get("mode"),
                 "query_alpha_confidence": query_alpha_confidence,
                 "query_alpha_bin": query_alpha_bin,
@@ -1922,12 +2205,23 @@ def main() -> None:
         raise ValueError("--query-adaptive-alpha requires --auto-tune-blend-alpha.")
     if bool(args.learned_query_alpha) and not bool(args.auto_tune_blend_alpha):
         raise ValueError("--learned-query-alpha requires --auto-tune-blend-alpha.")
-    if bool(args.query_adaptive_alpha) and bool(args.learned_query_alpha):
-        raise ValueError("Use only one adaptive alpha mode: --query-adaptive-alpha or --learned-query-alpha.")
+    if bool(args.learned_alpha_action) and not bool(args.auto_tune_blend_alpha):
+        raise ValueError("--learned-alpha-action requires --auto-tune-blend-alpha.")
+    adaptive_mode_count = sum(
+        bool(value)
+        for value in [args.query_adaptive_alpha, args.learned_query_alpha, args.learned_alpha_action]
+    )
+    if adaptive_mode_count > 1:
+        raise ValueError(
+            "Use only one adaptive alpha mode: --query-adaptive-alpha, "
+            "--learned-query-alpha, or --learned-alpha-action."
+        )
     if int(args.query_alpha_bins) <= 0:
         raise ValueError(f"--query-alpha-bins must be positive, got {args.query_alpha_bins}")
     if int(args.query_alpha_feature_top_k) <= 0:
         raise ValueError(f"--query-alpha-feature-top-k must be positive, got {args.query_alpha_feature_top_k}")
+    if int(args.query_alpha_action_epochs) <= 0:
+        raise ValueError(f"--query-alpha-action-epochs must be positive, got {args.query_alpha_action_epochs}")
     random.seed(int(args.seed))
     np.random.seed(int(args.seed))
 
@@ -1981,7 +2275,7 @@ def main() -> None:
             args=args,
         )
         args.blend_alpha = float(tuning_summary["selected_blend_alpha"])
-        if bool(args.query_adaptive_alpha) or bool(args.learned_query_alpha):
+        if bool(args.query_adaptive_alpha) or bool(args.learned_query_alpha) or bool(args.learned_alpha_action):
             args.adaptive_alpha_config = tuning_summary.get("adaptive_alpha_config")
         if not bool(args.skip_retrain_after_tuning):
             X, y, train_meta = build_matrix(
@@ -2002,6 +2296,7 @@ def main() -> None:
             "selected_blend_alpha": float(args.blend_alpha),
             "query_adaptive_alpha": bool(args.query_adaptive_alpha),
             "learned_query_alpha": bool(args.learned_query_alpha),
+            "learned_alpha_action": bool(args.learned_alpha_action),
             "adaptive_alpha_config": tuning_summary.get("adaptive_alpha_config") if tuning_summary else None,
             "fit_train_metadata": fit_train_meta,
             "tuning_summary": tuning_summary,
@@ -2048,10 +2343,14 @@ def main() -> None:
             "auto_tune_blend_alpha": bool(args.auto_tune_blend_alpha),
             "query_adaptive_alpha": bool(args.query_adaptive_alpha),
             "learned_query_alpha": bool(args.learned_query_alpha),
+            "learned_alpha_action": bool(args.learned_alpha_action),
             "query_alpha_bins": int(args.query_alpha_bins),
             "query_alpha_feature_top_k": int(args.query_alpha_feature_top_k),
             "query_alpha_ridge": float(args.query_alpha_ridge),
             "query_alpha_continuous": bool(args.query_alpha_continuous),
+            "query_alpha_action_epochs": int(args.query_alpha_action_epochs),
+            "query_alpha_action_learning_rate": float(args.query_alpha_action_learning_rate),
+            "query_alpha_action_weight_decay": float(args.query_alpha_action_weight_decay),
             "feature_set": args.feature_set,
         },
     }

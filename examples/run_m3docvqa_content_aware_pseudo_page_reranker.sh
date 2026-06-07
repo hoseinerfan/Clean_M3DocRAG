@@ -135,6 +135,9 @@ fi
 if [[ "${LEARNED_QUERY_ALPHA:-0}" == "1" ]]; then
   auto_tune_args+=(--learned-query-alpha)
 fi
+if [[ "${LEARNED_ALPHA_ACTION:-0}" == "1" ]]; then
+  auto_tune_args+=(--learned-alpha-action)
+fi
 if [[ "${QUERY_ALPHA_CONTINUOUS:-0}" == "1" ]]; then
   auto_tune_args+=(--query-alpha-continuous)
 fi
@@ -151,6 +154,7 @@ echo "using_feature_set=$FEATURE_SET"
 echo "using_source_set=$SOURCE_SET"
 echo "using_query_adaptive_alpha=${QUERY_ADAPTIVE_ALPHA:-0}"
 echo "using_learned_query_alpha=${LEARNED_QUERY_ALPHA:-0}"
+echo "using_learned_alpha_action=${LEARNED_ALPHA_ACTION:-0}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -180,6 +184,9 @@ echo "using_learned_query_alpha=${LEARNED_QUERY_ALPHA:-0}"
   --query-alpha-bins "${QUERY_ALPHA_BINS:-3}" \
   --query-alpha-feature-top-k "${QUERY_ALPHA_FEATURE_TOP_K:-20}" \
   --query-alpha-ridge "${QUERY_ALPHA_RIDGE:-1.0}" \
+  --query-alpha-action-epochs "${QUERY_ALPHA_ACTION_EPOCHS:-200}" \
+  --query-alpha-action-learning-rate "${QUERY_ALPHA_ACTION_LEARNING_RATE:-0.05}" \
+  --query-alpha-action-weight-decay "${QUERY_ALPHA_ACTION_WEIGHT_DECAY:-1e-3}" \
   --anchor-top-k "${ANCHOR_TOP_K:-4}" \
   --promotion-rank-min "${PROMOTION_RANK_MIN:-5}" \
   --promotion-rank-max "${PROMOTION_RANK_MAX:-200}" \
