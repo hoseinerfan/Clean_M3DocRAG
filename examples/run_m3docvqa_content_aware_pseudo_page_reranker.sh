@@ -138,6 +138,9 @@ fi
 if [[ "${LEARNED_ALPHA_ACTION:-0}" == "1" ]]; then
   auto_tune_args+=(--learned-alpha-action)
 fi
+if [[ "${LEARNED_ALPHA_UTILITY_GATE:-0}" == "1" ]]; then
+  auto_tune_args+=(--learned-alpha-utility-gate)
+fi
 if [[ "${QUERY_ALPHA_CONTINUOUS:-0}" == "1" ]]; then
   auto_tune_args+=(--query-alpha-continuous)
 fi
@@ -155,6 +158,7 @@ echo "using_source_set=$SOURCE_SET"
 echo "using_query_adaptive_alpha=${QUERY_ADAPTIVE_ALPHA:-0}"
 echo "using_learned_query_alpha=${LEARNED_QUERY_ALPHA:-0}"
 echo "using_learned_alpha_action=${LEARNED_ALPHA_ACTION:-0}"
+echo "using_learned_alpha_utility_gate=${LEARNED_ALPHA_UTILITY_GATE:-0}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -187,6 +191,8 @@ echo "using_learned_alpha_action=${LEARNED_ALPHA_ACTION:-0}"
   --query-alpha-action-epochs "${QUERY_ALPHA_ACTION_EPOCHS:-200}" \
   --query-alpha-action-learning-rate "${QUERY_ALPHA_ACTION_LEARNING_RATE:-0.05}" \
   --query-alpha-action-weight-decay "${QUERY_ALPHA_ACTION_WEIGHT_DECAY:-1e-3}" \
+  --alpha-utility-ridge "${ALPHA_UTILITY_RIDGE:-1.0}" \
+  --alpha-utility-threshold-grid "${ALPHA_UTILITY_THRESHOLD_GRID:-0.00,0.01,0.02,0.05,0.10}" \
   --anchor-top-k "${ANCHOR_TOP_K:-4}" \
   --promotion-rank-min "${PROMOTION_RANK_MIN:-5}" \
   --promotion-rank-max "${PROMOTION_RANK_MAX:-200}" \

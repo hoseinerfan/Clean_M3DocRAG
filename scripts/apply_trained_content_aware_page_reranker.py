@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 from pathlib import Path
 from typing import Any
@@ -60,6 +61,23 @@ def resolved_args(args: argparse.Namespace, model: dict[str, Any]) -> argparse.N
         args.inference_mode = str(model_args.get("inference_mode", "blend_rerank"))
     if float(args.blend_alpha) < 0.0:
         args.blend_alpha = float(model_args.get("blend_alpha", 0.30))
+    adaptive_config = model.get("adaptive_alpha_config")
+    if not isinstance(adaptive_config, dict):
+        adaptive_config = model_args.get("adaptive_alpha_config")
+    if not isinstance(adaptive_config, dict):
+        train_meta = model.get("train_metadata", {})
+        if isinstance(train_meta, dict):
+            adaptive_config = train_meta.get("adaptive_alpha_config")
+    if not isinstance(adaptive_config, dict):
+        adaptive_config = None
+    args.adaptive_alpha_config = adaptive_config
+    mode = str(adaptive_config.get("mode", "")) if adaptive_config else ""
+    args.query_adaptive_alpha = bool(model_args.get("query_adaptive_alpha", False) or mode == "confidence_bins")
+    args.learned_query_alpha = bool(model_args.get("learned_query_alpha", False) or mode == "learned_query_regressor")
+    args.learned_alpha_action = bool(model_args.get("learned_alpha_action", False) or mode == "learned_alpha_action")
+    args.learned_alpha_utility_gate = bool(
+        model_args.get("learned_alpha_utility_gate", False) or mode == "learned_alpha_utility_gate"
+    )
     return args
 
 
@@ -110,7 +128,56 @@ def apply_model(
             bias=bias,
             feature_names=feature_names,
         )
-        reranked = ca.rerank_records(scored_records_qid, args)
+        apply_args = args
+        query_alpha = float(args.blend_alpha)
+        query_alpha_info: dict[str, Any] = {}
+        query_alpha_confidence: float | None = None
+        adaptive_config = getattr(args, "adaptive_alpha_config", None)
+        if bool(getattr(args, "learned_alpha_utility_gate", False)):
+            query_alpha_confidence = ca.query_confidence_score(scored_records_qid, source_maps_by_label, qid)
+            query_alpha, query_alpha_info = ca.predict_learned_alpha_utility_gate(
+                records=scored_records_qid,
+                source_maps_by_label=source_maps_by_label,
+                qid=qid,
+                adaptive_config=adaptive_config,
+                fallback_alpha=float(args.blend_alpha),
+            )
+            apply_args = copy.copy(args)
+            apply_args.blend_alpha = float(query_alpha)
+        elif bool(getattr(args, "learned_alpha_action", False)):
+            query_alpha_confidence = ca.query_confidence_score(scored_records_qid, source_maps_by_label, qid)
+            query_alpha, query_alpha_info = ca.predict_learned_alpha_action(
+                records=scored_records_qid,
+                source_maps_by_label=source_maps_by_label,
+                qid=qid,
+                adaptive_config=adaptive_config,
+                fallback_alpha=float(args.blend_alpha),
+            )
+            apply_args = copy.copy(args)
+            apply_args.blend_alpha = float(query_alpha)
+        elif bool(getattr(args, "learned_query_alpha", False)):
+            query_alpha_confidence = ca.query_confidence_score(scored_records_qid, source_maps_by_label, qid)
+            query_alpha, query_alpha_info = ca.predict_learned_query_alpha(
+                records=scored_records_qid,
+                source_maps_by_label=source_maps_by_label,
+                qid=qid,
+                adaptive_config=adaptive_config,
+                fallback_alpha=float(args.blend_alpha),
+            )
+            apply_args = copy.copy(args)
+            apply_args.blend_alpha = float(query_alpha)
+        elif bool(getattr(args, "query_adaptive_alpha", False)):
+            query_alpha_confidence = ca.query_confidence_score(scored_records_qid, source_maps_by_label, qid)
+            query_alpha, query_alpha_bin = ca.alpha_for_query_confidence(
+                query_alpha_confidence,
+                adaptive_config,
+                float(args.blend_alpha),
+            )
+            query_alpha_info = {"mode": "confidence_bins", "query_alpha_bin": query_alpha_bin}
+            apply_args = copy.copy(args)
+            apply_args.blend_alpha = float(query_alpha)
+
+        reranked = ca.rerank_records(scored_records_qid, apply_args)
         reranked_uids = {str(row["uid"]) for row in reranked}
         raw_by_uid = {str(row["uid"]): row["raw"] for row in records}
         output_rows = [raw_by_uid[str(row["uid"])] for row in reranked if str(row["uid"]) in raw_by_uid]
@@ -130,7 +197,11 @@ def apply_model(
         out_row["trained_content_aware_transfer_metadata"] = {
             "model_json": args.model_json,
             "inference_mode": args.inference_mode,
-            "blend_alpha": float(args.blend_alpha),
+            "blend_alpha": float(query_alpha),
+            "global_blend_alpha": float(args.blend_alpha),
+            "query_alpha_mode": query_alpha_info.get("mode"),
+            "query_alpha_confidence": query_alpha_confidence,
+            "query_alpha_info": query_alpha_info,
             "candidate_top_k": int(args.candidate_top_k),
         }
         output[qid] = out_row
@@ -145,6 +216,7 @@ def apply_model(
                     "base_rank": int(row["base_rank"]),
                     "learned_score": float(row.get("learned_score", 0.0)),
                     "rerank_score": float(row.get("rerank_score", row.get("learned_score", 0.0))),
+                    "selected_blend_alpha": float(query_alpha),
                 }
             )
 
@@ -198,6 +270,7 @@ def main() -> None:
         "candidate_top_k": int(args.candidate_top_k),
         "inference_mode": args.inference_mode,
         "blend_alpha": float(args.blend_alpha),
+        "adaptive_alpha_config": getattr(args, "adaptive_alpha_config", None),
         "metrics": metrics,
         "movement_vs_base": zsc.movement_vs_base(base_pred, output_pred, gold) if gold else {},
         **metadata,
