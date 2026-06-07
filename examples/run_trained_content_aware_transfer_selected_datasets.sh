@@ -29,6 +29,7 @@ MAX_PROMOTIONS_PER_QID="${MAX_PROMOTIONS_PER_QID:-2}"
 PROMOTION_MARGIN="${PROMOTION_MARGIN:-0.05}"
 RECALL_K_VALUES="${RECALL_K_VALUES:-1 2 4 5 10 20 50 100}"
 RUN_DENSE_BASE="${RUN_DENSE_BASE:-1}"
+RUN_GPP_BASE="${RUN_GPP_BASE:-0}"
 RUN_DOCSEED_BASE="${RUN_DOCSEED_BASE:-1}"
 FORCE_RERUN="${FORCE_RERUN:-0}"
 
@@ -162,6 +163,7 @@ run_dataset() {
   local doc_pages="$6"
   local dense_pred="$7"
   local sparse_pred="$8"
+  local gpp_pred="$9"
   local mode_tag
   local alpha_tag
   local out_dir
@@ -178,6 +180,11 @@ run_dataset() {
   if [[ "$RUN_DENSE_BASE" == "1" ]]; then
     run_variant "$display_name" "$data_name" "$gold" "$doc_pages" "$dense_pred" "$sparse_pred" \
       "$out_dir" "${data_name}_trained_content_transfer_dense_${mode_tag}_a${alpha_tag}"
+  fi
+
+  if [[ "$RUN_GPP_BASE" == "1" ]]; then
+    run_variant "$display_name" "$data_name" "$gold" "$doc_pages" "$gpp_pred" "$sparse_pred" \
+      "$out_dir" "${data_name}_trained_content_transfer_gpp_${mode_tag}_a${alpha_tag}"
   fi
 
   if [[ "$RUN_DOCSEED_BASE" == "1" ]]; then
@@ -198,8 +205,9 @@ for dataset in $DATASETS; do
       require_value MMDOCIR_DOC_PAGES
       require_value MMDOCIR_DENSE_PRED
       require_value MMDOCIR_SPARSE_PRED
+      MMDOCIR_GPP_PRED="${MMDOCIR_GPP_PRED:-$MMDocIR_WORK_ROOT/output/mmdocir/graph_ppr_plain_top224_splade/mmdocir_denseheavy125_medium_both.prediction.json}"
       run_dataset "MMDocIR" mmdocir "$MMDocIR_WORK_ROOT" mmdocir \
-        "$MMDOCIR_GOLD" "$MMDOCIR_DOC_PAGES" "$MMDOCIR_DENSE_PRED" "$MMDOCIR_SPARSE_PRED"
+        "$MMDOCIR_GOLD" "$MMDOCIR_DOC_PAGES" "$MMDOCIR_DENSE_PRED" "$MMDOCIR_SPARSE_PRED" "$MMDOCIR_GPP_PRED"
       ;;
     sciegqa)
       require_value SciEGQA_WORK_ROOT
@@ -207,8 +215,9 @@ for dataset in $DATASETS; do
       require_value SCIEGQA_DOC_PAGES
       require_value SCIEGQA_DENSE_PRED
       require_value SCIEGQA_SPARSE_PRED
+      SCIEGQA_GPP_PRED="${SCIEGQA_GPP_PRED:-$SciEGQA_WORK_ROOT/output/sciegqa/graph_ppr_plain_top224_splade/sciegqa_denseheavy125_medium_both.prediction.json}"
       run_dataset "SciEGQA" sciegqa "$SciEGQA_WORK_ROOT" sciegqa \
-        "$SCIEGQA_GOLD" "$SCIEGQA_DOC_PAGES" "$SCIEGQA_DENSE_PRED" "$SCIEGQA_SPARSE_PRED"
+        "$SCIEGQA_GOLD" "$SCIEGQA_DOC_PAGES" "$SCIEGQA_DENSE_PRED" "$SCIEGQA_SPARSE_PRED" "$SCIEGQA_GPP_PRED"
       ;;
     vidoseek)
       require_value VIDOSEEK_WORK_ROOT
@@ -216,8 +225,9 @@ for dataset in $DATASETS; do
       require_value VIDOSEEK_DOC_PAGES
       require_value VIDOSEEK_DENSE_PRED
       require_value VIDOSEEK_SPARSE_PRED
+      VIDOSEEK_GPP_PRED="${VIDOSEEK_GPP_PRED:-$VIDOSEEK_WORK_ROOT/output/vidoseek/graph_ppr_plain_top224_splade/vidoseek_denseheavy125_medium_both.prediction.json}"
       run_dataset "ViDoSeek" vidoseek "$VIDOSEEK_WORK_ROOT" vidoseek \
-        "$VIDOSEEK_GOLD" "$VIDOSEEK_DOC_PAGES" "$VIDOSEEK_DENSE_PRED" "$VIDOSEEK_SPARSE_PRED"
+        "$VIDOSEEK_GOLD" "$VIDOSEEK_DOC_PAGES" "$VIDOSEEK_DENSE_PRED" "$VIDOSEEK_SPARSE_PRED" "$VIDOSEEK_GPP_PRED"
       ;;
     dude)
       require_value DUDE_WORK_ROOT
@@ -225,8 +235,9 @@ for dataset in $DATASETS; do
       require_value DUDE_DOC_PAGES
       require_value DUDE_DENSE_PRED
       require_value DUDE_SPARSE_PRED
+      DUDE_GPP_PRED="${DUDE_GPP_PRED:-$DUDE_WORK_ROOT/output/dude/graph_ppr_plain_top224_splade/dude_denseheavy125_medium_both.prediction.json}"
       run_dataset "DUDE" dude "$DUDE_WORK_ROOT" dude \
-        "$DUDE_GOLD" "$DUDE_DOC_PAGES" "$DUDE_DENSE_PRED" "$DUDE_SPARSE_PRED"
+        "$DUDE_GOLD" "$DUDE_DOC_PAGES" "$DUDE_DENSE_PRED" "$DUDE_SPARSE_PRED" "$DUDE_GPP_PRED"
       ;;
     vidore|vidore-v3)
       require_value VIDORE_WORK_ROOT
@@ -234,8 +245,9 @@ for dataset in $DATASETS; do
       require_value VIDORE_DOC_PAGES
       require_value VIDORE_DENSE_PRED
       require_value VIDORE_SPARSE_PRED
+      VIDORE_GPP_PRED="${VIDORE_GPP_PRED:-$VIDORE_WORK_ROOT/output/vidore-v3/graph_ppr_plain_top224_splade/vidore-v3_denseheavy125_medium_both.prediction.json}"
       run_dataset "ViDoRe-V3" vidore-v3 "$VIDORE_WORK_ROOT" vidore-v3 \
-        "$VIDORE_GOLD" "$VIDORE_DOC_PAGES" "$VIDORE_DENSE_PRED" "$VIDORE_SPARSE_PRED"
+        "$VIDORE_GOLD" "$VIDORE_DOC_PAGES" "$VIDORE_DENSE_PRED" "$VIDORE_SPARSE_PRED" "$VIDORE_GPP_PRED"
       ;;
     opendocvqa)
       require_value OPENDOCVQA_WORK_ROOT
@@ -243,8 +255,9 @@ for dataset in $DATASETS; do
       require_value OPENDOCVQA_DOC_PAGES
       require_value OPENDOCVQA_DENSE_PRED
       require_value OPENDOCVQA_SPARSE_PRED
+      OPENDOCVQA_GPP_PRED="${OPENDOCVQA_GPP_PRED:-$OPENDOCVQA_WORK_ROOT/output/opendocvqa/graph_ppr_plain_top224_splade/opendocvqa_denseheavy125_medium_both.prediction.json}"
       run_dataset "OpenDocVQA" opendocvqa "$OPENDOCVQA_WORK_ROOT" opendocvqa \
-        "$OPENDOCVQA_GOLD" "$OPENDOCVQA_DOC_PAGES" "$OPENDOCVQA_DENSE_PRED" "$OPENDOCVQA_SPARSE_PRED"
+        "$OPENDOCVQA_GOLD" "$OPENDOCVQA_DOC_PAGES" "$OPENDOCVQA_DENSE_PRED" "$OPENDOCVQA_SPARSE_PRED" "$OPENDOCVQA_GPP_PRED"
       ;;
     *)
       echo "unknown_dataset: $dataset" >&2
