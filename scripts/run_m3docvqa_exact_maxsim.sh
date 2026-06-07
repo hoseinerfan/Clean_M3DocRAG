@@ -20,6 +20,12 @@ if [[ ! -f "$BASELINE_PRED" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$QIDS_JSONL" ]]; then
+  echo "missing_qids_jsonl: $QIDS_JSONL"
+  echo "exporting_qids_for_split=$SPLIT"
+  SPLIT="$SPLIT" bash "$SCRIPT_DIR/run_m3docvqa_export_qids.sh"
+fi
+
 mkdir -p "$EXACT_MAXSIM_OUT_DIR"
 
 EMPTY_QUERY_LABELS="$EXACT_MAXSIM_OUT_DIR/empty_query_token_labels.json"
