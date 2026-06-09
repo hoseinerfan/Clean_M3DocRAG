@@ -79,7 +79,13 @@ if [[ "$RUN_EXACT_DENSE_DEV" == "1" ]]; then
   EXACT_MAXSIM_LABEL="$EXACT_DENSE_DEV_LABEL" \
   bash "$REPO_ROOT/scripts/run_m3docvqa_exact_maxsim.sh"
 fi
-require_file exact_dense_dev "$EXACT_DENSE_DEV_PRED"
+if [[
+  "$RUN_EXACT_DENSE_DEV" == "1" ||
+  "$RUN_GPP_DEV" == "1" ||
+  "$RUN_FINAL_EVAL" == "1"
+]]; then
+  require_file exact_dense_dev "$EXACT_DENSE_DEV_PRED"
+fi
 
 if [[ "$RUN_EXACT_DENSE_TRAIN" == "1" ]]; then
   echo
@@ -91,7 +97,12 @@ if [[ "$RUN_EXACT_DENSE_TRAIN" == "1" ]]; then
   EXACT_MAXSIM_LABEL="$EXACT_DENSE_TRAIN_LABEL" \
   bash "$REPO_ROOT/scripts/run_m3docvqa_exact_maxsim.sh"
 fi
-require_file exact_dense_train "$EXACT_DENSE_TRAIN_PRED"
+if [[
+  "$RUN_EXACT_DENSE_TRAIN" == "1" ||
+  "$RUN_GPP_TRAIN" == "1"
+]]; then
+  require_file exact_dense_train "$EXACT_DENSE_TRAIN_PRED"
+fi
 
 if [[ "$RUN_GPP_DEV" == "1" ]]; then
   echo
@@ -104,7 +115,16 @@ if [[ "$RUN_GPP_DEV" == "1" ]]; then
   GRAPH_PROFILE="$GRAPH_PROFILE" \
   bash "$REPO_ROOT/examples/run_m3docvqa_gpp_hyperlink_node_ablation.sh"
 fi
-require_file gpp_dev_no_hyperlink "$GPP_DEV_NO_HYPERLINK"
+if [[
+  "$RUN_GPP_DEV" == "1" ||
+  "$RUN_CONTENT_AWARE_TOPK" == "1" ||
+  "$RUN_FEATURE_ABLATION" == "1" ||
+  "$RUN_PSEUDO_LABEL_ABLATION" == "1" ||
+  "$RUN_OOF_HYBRID" == "1" ||
+  "$RUN_FINAL_EVAL" == "1"
+]]; then
+  require_file gpp_dev_no_hyperlink "$GPP_DEV_NO_HYPERLINK"
+fi
 
 if [[ "$RUN_GPP_TRAIN" == "1" ]]; then
   echo
@@ -117,7 +137,15 @@ if [[ "$RUN_GPP_TRAIN" == "1" ]]; then
   GRAPH_PROFILE="$GRAPH_PROFILE" \
   bash "$REPO_ROOT/examples/run_m3docvqa_gpp_hyperlink_node_ablation.sh"
 fi
-require_file gpp_train_no_hyperlink "$GPP_TRAIN_NO_HYPERLINK"
+if [[
+  "$RUN_GPP_TRAIN" == "1" ||
+  "$RUN_CONTENT_AWARE_TOPK" == "1" ||
+  "$RUN_FEATURE_ABLATION" == "1" ||
+  "$RUN_PSEUDO_LABEL_ABLATION" == "1" ||
+  "$RUN_OOF_HYBRID" == "1"
+]]; then
+  require_file gpp_train_no_hyperlink "$GPP_TRAIN_NO_HYPERLINK"
+fi
 
 if [[ "$RUN_CONTENT_AWARE_TOPK" == "1" ]]; then
   echo
@@ -131,7 +159,13 @@ if [[ "$RUN_CONTENT_AWARE_TOPK" == "1" ]]; then
   FORCE_RERUN="${FORCE_RERUN_CONTENT:-1}" \
   bash "$REPO_ROOT/examples/run_m3docvqa_content_aware_adaptive_topk_ablation.sh"
 fi
-require_file content_page5_pred "$CONTENT_PAGE5_PRED"
+if [[
+  "$RUN_CONTENT_AWARE_TOPK" == "1" ||
+  "$RUN_OOF_HYBRID" == "1" ||
+  "$RUN_FINAL_EVAL" == "1"
+]]; then
+  require_file content_page5_pred "$CONTENT_PAGE5_PRED"
+fi
 
 if [[ "$RUN_FEATURE_ABLATION" == "1" ]]; then
   echo
