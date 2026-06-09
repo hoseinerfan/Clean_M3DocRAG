@@ -40,10 +40,12 @@ first_existing_path() {
 }
 
 SPLIT="${SPLIT:-dev}"
-GOLD="${USER_GOLD:-${M3DOCVQA_GOLD:-$GOLD}}"
+SPLIT_GOLD="$GOLD"
+SPLIT_DOC_PAGES_JSONL="$LOCAL_OUTPUT_DIR/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl"
+GOLD="${USER_GOLD:-$SPLIT_GOLD}"
 DENSE_PRED="${USER_DENSE_PRED:-${M3DOCVQA_DENSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_plain_top224_mmqa_${SPLIT}/mmqa_${SPLIT}_plain_top224_nprobe${FAISS_NPROBE}_effdiag_all.prediction.json}}"
 SPARSE_PRED="${USER_SPARSE_PRED:-${M3DOCVQA_SPARSE_PRED:-$LOCAL_OUTPUT_DIR/m3docvqa_splade_mmqa_${SPLIT}/mmqa_${SPLIT}_splade.prediction.json}}"
-DOC_PAGES_JSONL="${USER_DOC_PAGES_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-$LOCAL_OUTPUT_DIR/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl}}"
+DOC_PAGES_JSONL="${USER_DOC_PAGES_JSONL:-$SPLIT_DOC_PAGES_JSONL}"
 SPLADE_INDEX_PT="${SPLADE_INDEX_PT:-$LOCAL_OUTPUT_DIR/m3docvqa_splade/m3docvqa_${SPLIT}_splade.pt}"
 GRAPH_OUT_DIR="${GRAPH_OUT_DIR:-$LOCAL_OUTPUT_DIR/m3docvqa_gpp_hyperlink_node_ablation}"
 LABEL_PREFIX="${LABEL_PREFIX:-mmqa_${SPLIT}_gpp_hyperlink_node}"
@@ -51,6 +53,8 @@ GRAPH_PROFILE="${GRAPH_PROFILE:-denseheavy125_medium_both}"
 RECALL_K_VALUES="${RECALL_K_VALUES:-1 2 4 5 10 20 50 100 500 1000}"
 
 RUN_BASELINE="${RUN_BASELINE:-1}"
+RUN_DOC_HYPERLINK="${RUN_DOC_HYPERLINK:-1}"
+RUN_PAGE_HYPERLINK="${RUN_PAGE_HYPERLINK:-1}"
 DOC_DOC_EDGE_WEIGHT="${DOC_DOC_EDGE_WEIGHT:-2.25}"
 DOC_DOC_TOP_DOCS="${DOC_DOC_TOP_DOCS:-20}"
 DOC_DOC_MAX_EDGES_PER_DOC="${DOC_DOC_MAX_EDGES_PER_DOC:-8}"
@@ -143,8 +147,13 @@ if [[ "$RUN_BASELINE" == "1" ]]; then
   run_variant no_hyperlink none 0.0 0.0 target_doc
 fi
 
-run_variant docnode_to_hyperlink_docs hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" 0.0 target_doc
-run_variant pagenode_to_hyperlink_pages none 0.0 "$PDF_HYPERLINK_EDGE_WEIGHT" target_pages
+if [[ "$RUN_DOC_HYPERLINK" == "1" ]]; then
+  run_variant docnode_to_hyperlink_docs hyperlink_citation "$DOC_DOC_EDGE_WEIGHT" 0.0 target_doc
+fi
+
+if [[ "$RUN_PAGE_HYPERLINK" == "1" ]]; then
+  run_variant pagenode_to_hyperlink_pages none 0.0 "$PDF_HYPERLINK_EDGE_WEIGHT" target_pages
+fi
 
 analysis_paths=( "$GRAPH_OUT_DIR/${LABEL_PREFIX}_"*.retrieval_analysis.json )
 if [[ -e "${analysis_paths[0]}" ]]; then
