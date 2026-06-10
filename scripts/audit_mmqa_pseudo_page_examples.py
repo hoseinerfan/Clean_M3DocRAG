@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -33,6 +34,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--id-url-mapping-jsonl", required=True)
     parser.add_argument("--qid", action="append", default=[], help="Specific qid to include.")
     parser.add_argument("--limit", type=int, default=12)
+    parser.add_argument(
+        "--sample-mode",
+        choices=["diverse", "random"],
+        default="diverse",
+        help="How to choose qids after any explicit --qid values.",
+    )
+    parser.add_argument("--seed", type=int, default=0, help="Random seed used when --sample-mode=random.")
     parser.add_argument("--min-score", type=float, default=8.0)
     parser.add_argument("--top-pages-per-doc", type=int, default=1)
     parser.add_argument("--top-pages-per-qid", type=int, default=4)
@@ -222,6 +230,9 @@ def choose_qids(
     loose_rows: dict[str, dict[str, Any]],
     explicit_qids: list[str],
     limit: int,
+    *,
+    sample_mode: str,
+    seed: int,
 ) -> list[str]:
     selected: list[str] = []
     seen: set[str] = set()
@@ -233,6 +244,15 @@ def choose_qids(
 
     for qid in explicit_qids:
         add(qid)
+
+    if sample_mode == "random":
+        remaining = [qid for qid in gold_rows if qid not in seen]
+        random.Random(seed).shuffle(remaining)
+        for qid in remaining:
+            add(qid)
+            if len(selected) >= limit:
+                break
+        return selected
 
     buckets: dict[str, list[str]] = defaultdict(list)
     for qid, row in gold_rows.items():
@@ -545,6 +565,8 @@ def main() -> None:
         loose_rows,
         explicit_qids=args.qid,
         limit=int(args.limit),
+        sample_mode=str(args.sample_mode),
+        seed=int(args.seed),
     )
     cases = [
         build_case(
