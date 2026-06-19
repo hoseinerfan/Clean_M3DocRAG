@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import sys
 from collections import Counter
 from pathlib import Path
@@ -55,6 +56,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-accelerate", action="store_true")
     parser.add_argument("--dpi", type=int, default=144)
     parser.add_argument("--qid", action="append", default=[])
+    parser.add_argument("--sample-mode", choices=("first", "random"), default="first")
+    parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--save-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
@@ -269,6 +272,8 @@ def summarize(rows: list[dict[str, Any]], args: argparse.Namespace) -> dict[str,
         "dry_run": bool(args.dry_run),
         "model_name_or_path": str(args.vlm_model_name_or_path),
         "vlm_bits": int(args.vlm_bits),
+        "sample_mode": str(args.sample_mode),
+        "seed": int(args.seed),
     }
 
 
@@ -281,6 +286,8 @@ def main() -> None:
     image_root = Path(args.mmqa_image_root)
     qids = {str(value).strip() for value in args.qid if str(value).strip()}
     cases = build_cases(labels, images_by_id, image_root, qids)
+    if str(args.sample_mode) == "random":
+        random.Random(int(args.seed)).shuffle(cases)
     if int(args.limit) > 0:
         cases = cases[: int(args.limit)]
 
