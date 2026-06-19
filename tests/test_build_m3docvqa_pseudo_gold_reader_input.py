@@ -1,3 +1,4 @@
+import importlib.util
 import json
 import subprocess
 import sys
@@ -7,9 +8,24 @@ from pathlib import Path
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "build_m3docvqa_pseudo_gold_reader_input.py"
+SPEC = importlib.util.spec_from_file_location("build_m3docvqa_pseudo_gold_reader_input", SCRIPT)
+assert SPEC and SPEC.loader
+MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
+SPEC.loader.exec_module(MODULE)
 
 
 class BuildM3DocVQAPseudoGoldReaderInputTests(unittest.TestCase):
+    def test_visual_proxy_control_replaces_only_proxy_pages(self) -> None:
+        rows, missing = MODULE.make_visual_proxy_same_doc_non_gold_rows(
+            gold_uids=["d1_page1", "d2_page2"],
+            supervision_tiers={"d1_page1": "direct", "d2_page2": "visual_proxy"},
+            pages_by_doc={"d1": [0, 1], "d2": [1, 2, 3]},
+            top_pages=4,
+        )
+        self.assertEqual(missing, 0)
+        self.assertEqual([(row[0], row[1]) for row in rows], [("d1", 1), ("d2", 1)])
+
     def test_filters_qids_by_supervision_tier(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -44,6 +44,7 @@ QA_OUT_DIR="${QA_OUT_DIR:-$ORACLE_OUT_DIR/qa}"
 RUN_GOLD_ONLY="${RUN_GOLD_ONLY:-1}"
 RUN_GOLD_PLUS_BASE_FILL="${RUN_GOLD_PLUS_BASE_FILL:-1}"
 RUN_SUPPORT_DOC_NEGATIVE_CONTROL="${RUN_SUPPORT_DOC_NEGATIVE_CONTROL:-0}"
+RUN_VISUAL_PROXY_NEGATIVE_CONTROL="${RUN_VISUAL_PROXY_NEGATIVE_CONTROL:-0}"
 BUILD_INPUTS="${BUILD_INPUTS:-1}"
 RUN_QA="${RUN_QA:-1}"
 REQUIRE_ALL_SUPPORT_DOCS_COVERED="${REQUIRE_ALL_SUPPORT_DOCS_COVERED:-0}"
@@ -213,11 +214,15 @@ if [[ "$MERGE_QA_SHARDS" != "1" ]]; then
   if [[ "$BUILD_INPUTS" == "1" && "$RUN_SUPPORT_DOC_NEGATIVE_CONTROL" == "1" ]]; then
     build_input support_doc_non_gold_only 0 support_doc_non_gold
   fi
+  if [[ "$BUILD_INPUTS" == "1" && "$RUN_VISUAL_PROXY_NEGATIVE_CONTROL" == "1" ]]; then
+    build_input visual_proxy_replaced_same_doc 0 visual_proxy_same_doc_non_gold
+  fi
 
   if [[ "$RUN_QA" == "1" ]]; then
     run_qa pseudo_gold_only "$RUN_GOLD_ONLY"
     run_qa pseudo_gold_plus_gpp_fill "$RUN_GOLD_PLUS_BASE_FILL"
     run_qa support_doc_non_gold_only "$RUN_SUPPORT_DOC_NEGATIVE_CONTROL"
+    run_qa visual_proxy_replaced_same_doc "$RUN_VISUAL_PROXY_NEGATIVE_CONTROL"
   else
     echo "skip_qa=disabled"
   fi
@@ -225,4 +230,5 @@ else
   merge_qa pseudo_gold_only "$RUN_GOLD_ONLY"
   merge_qa pseudo_gold_plus_gpp_fill "$RUN_GOLD_PLUS_BASE_FILL"
   merge_qa support_doc_non_gold_only "$RUN_SUPPORT_DOC_NEGATIVE_CONTROL"
+  merge_qa visual_proxy_replaced_same_doc "$RUN_VISUAL_PROXY_NEGATIVE_CONTROL"
 fi

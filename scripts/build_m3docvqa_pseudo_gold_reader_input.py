@@ -65,13 +65,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--negative-control",
-        choices=("none", "same_doc_non_gold", "support_doc_non_gold"),
+        choices=("none", "same_doc_non_gold", "support_doc_non_gold", "visual_proxy_same_doc_non_gold"),
         default="none",
         help=(
             "Replace pseudo-gold pages with non-pseudo pages for page-label quality "
             "controls. same_doc_non_gold chooses a nearby non-pseudo page from the "
             "same document as each pseudo page. support_doc_non_gold chooses "
-            "non-pseudo pages from the original support-document set."
+            "non-pseudo pages from the original support-document set. "
+            "visual_proxy_same_doc_non_gold keeps direct labels fixed and replaces "
+            "only visual-proxy pages with nearby same-document pages."
         ),
     )
     parser.add_argument(
@@ -228,6 +230,14 @@ def gold_page_uids(row: dict[str, Any]) -> list[str]:
     return out
 
 
+def page_supervision_tiers(row: dict[str, Any]) -> dict[str, str]:
+    metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
+    values = metadata.get("pseudo_gold_page_supervision_tiers", {})
+    if not isinstance(values, dict):
+        return {}
+    return {str(uid): str(tier) for uid, tier in values.items() if str(uid).strip()}
+
+
 def support_doc_ids(row: dict[str, Any]) -> set[str]:
     docs: set[str] = set()
     for ctx in row.get("supporting_context", []):
@@ -346,6 +356,47 @@ def make_same_doc_non_gold_rows(
             missing += 1
             continue
         doc_id, anchor_page_idx = parsed
+        candidates = []
+        for page_idx in pages_by_doc.get(doc_id, []):
+            candidate_uid = page_uid(doc_id, page_idx)
+            if candidate_uid in all_gold_uids or candidate_uid in used_uids:
+                continue
+            candidates.append((abs(int(page_idx) - int(anchor_page_idx)), int(page_idx), candidate_uid))
+        if not candidates:
+            missing += 1
+            continue
+        _, page_idx, candidate_uid = sorted(candidates)[0]
+        used_uids.add(candidate_uid)
+        rows.append([doc_id, page_idx, float(1_000_000 - rank)])
+    return rows, missing
+
+
+def make_visual_proxy_same_doc_non_gold_rows(
+    *,
+    gold_uids: list[str],
+    supervision_tiers: dict[str, str],
+    pages_by_doc: dict[str, list[int]],
+    top_pages: int,
+) -> tuple[list[list[Any]], int]:
+    selected_uids = gold_uids[: max(top_pages, 0)]
+    all_gold_uids = set(gold_uids)
+    used_uids = {
+        uid
+        for uid in selected_uids
+        if supervision_tiers.get(uid) not in {"visual_proxy", "mixed_direct_proxy"}
+    }
+    rows: list[list[Any]] = []
+    missing = 0
+    for rank, uid in enumerate(selected_uids, start=1):
+        parsed = parse_page_uid(uid)
+        if parsed is None:
+            missing += 1
+            continue
+        doc_id, anchor_page_idx = parsed
+        tier = supervision_tiers.get(uid, "")
+        if tier not in {"visual_proxy", "mixed_direct_proxy"}:
+            rows.append([doc_id, anchor_page_idx, float(1_000_000 - rank)])
+            continue
         candidates = []
         for page_idx in pages_by_doc.get(doc_id, []):
             candidate_uid = page_uid(doc_id, page_idx)
@@ -532,6 +583,7 @@ def main() -> None:
             stats["skipped_supervision_tier_mismatch"] += 1
             continue
         gold_uids = gold_page_uids(row)
+        supervision_tiers = page_supervision_tiers(row)
         support_row = support_rows_by_qid.get(qid, row)
         support_docs = support_doc_ids(support_row)
         pseudo_docs = {
@@ -584,7 +636,14 @@ def main() -> None:
             stats["skipped_evidence_unit_count_mismatch"] += 1
             continue
 
-        if args.negative_control == "same_doc_non_gold":
+        if args.negative_control == "visual_proxy_same_doc_non_gold":
+            page_rows, missing_alternatives = make_visual_proxy_same_doc_non_gold_rows(
+                gold_uids=gold_uids,
+                supervision_tiers=supervision_tiers,
+                pages_by_doc=pages_by_doc,
+                top_pages=args.top_pages,
+            )
+        elif args.negative_control == "same_doc_non_gold":
             page_rows, missing_alternatives = make_same_doc_non_gold_rows(
                 gold_uids=gold_uids,
                 pages_by_doc=pages_by_doc,
