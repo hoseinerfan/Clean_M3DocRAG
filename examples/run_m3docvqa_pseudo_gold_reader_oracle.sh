@@ -36,12 +36,14 @@ RUN_EVAL="${RUN_EVAL:-$DEFAULT_RUN_EVAL}"
 AUGMENTED_GOLD="${AUGMENTED_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_dev_pseudo_page_labels_strict.augmented_gold.jsonl}"
 ORIGINAL_GOLD="${ORIGINAL_GOLD:-$GOLD}"
 EVIDENCE_METADATA_JSONL="${EVIDENCE_METADATA_JSONL:-$REPO_ROOT/output/m3docvqa_mmqa_evidence_metadata/mmqa_evidence_metadata_dev.jsonl}"
+DOC_PAGES_JSONL="${DOC_PAGES_JSONL:-${M3DOCVQA_DEV_PAGE_TEXT_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-$CUSTOM_ROOT/outputs/m3docvqa_page_text/m3docvqa_dev_page_text.jsonl}}}"
 BASE_PRED="${BASE_PRED:-$REPO_ROOT/output/m3docvqa_gpp_hyperlink_node_ablation_exact_maxsim/mmqa_dev_exact_maxsim_gpp_hyperlink_node_no_hyperlink.prediction.json}"
 ORACLE_OUT_DIR="${ORACLE_OUT_DIR:-$REPO_ROOT/output/m3docvqa_pseudo_gold_reader_oracle}"
 QA_OUT_DIR="${QA_OUT_DIR:-$ORACLE_OUT_DIR/qa}"
 
 RUN_GOLD_ONLY="${RUN_GOLD_ONLY:-1}"
 RUN_GOLD_PLUS_BASE_FILL="${RUN_GOLD_PLUS_BASE_FILL:-1}"
+RUN_SUPPORT_DOC_NEGATIVE_CONTROL="${RUN_SUPPORT_DOC_NEGATIVE_CONTROL:-0}"
 BUILD_INPUTS="${BUILD_INPUTS:-1}"
 RUN_QA="${RUN_QA:-1}"
 REQUIRE_ALL_SUPPORT_DOCS_COVERED="${REQUIRE_ALL_SUPPORT_DOCS_COVERED:-0}"
@@ -70,6 +72,7 @@ qa_label() {
 build_input() {
   local label="$1"
   local fill_from_base="$2"
+  local negative_control="${3:-none}"
   local output_pred="$ORACLE_OUT_DIR/${label}.prediction.json"
   local output_gold="$ORACLE_OUT_DIR/${label}.gold.jsonl"
   local output_summary="$ORACLE_OUT_DIR/${label}.summary.json"
@@ -83,6 +86,10 @@ build_input() {
     --output-filtered-gold "$output_gold"
     --output-summary "$output_summary"
   )
+  if [[ "$negative_control" != "none" ]]; then
+    require_file doc_pages_jsonl "$DOC_PAGES_JSONL"
+    args+=(--doc-pages-jsonl "$DOC_PAGES_JSONL" --negative-control "$negative_control")
+  fi
   if [[ "$REQUIRE_ALL_SUPPORT_DOCS_COVERED" == "1" ]]; then
     args+=(--require-all-support-docs-covered)
   fi
@@ -194,19 +201,24 @@ mkdir -p "$QA_OUT_DIR"
 
 if [[ "$MERGE_QA_SHARDS" != "1" ]]; then
   if [[ "$BUILD_INPUTS" == "1" && "$RUN_GOLD_ONLY" == "1" ]]; then
-    build_input pseudo_gold_only 0
+    build_input pseudo_gold_only 0 none
   fi
   if [[ "$BUILD_INPUTS" == "1" && "$RUN_GOLD_PLUS_BASE_FILL" == "1" ]]; then
-    build_input pseudo_gold_plus_gpp_fill 1
+    build_input pseudo_gold_plus_gpp_fill 1 none
+  fi
+  if [[ "$BUILD_INPUTS" == "1" && "$RUN_SUPPORT_DOC_NEGATIVE_CONTROL" == "1" ]]; then
+    build_input support_doc_non_gold_only 0 support_doc_non_gold
   fi
 
   if [[ "$RUN_QA" == "1" ]]; then
     run_qa pseudo_gold_only "$RUN_GOLD_ONLY"
     run_qa pseudo_gold_plus_gpp_fill "$RUN_GOLD_PLUS_BASE_FILL"
+    run_qa support_doc_non_gold_only "$RUN_SUPPORT_DOC_NEGATIVE_CONTROL"
   else
     echo "skip_qa=disabled"
   fi
 else
   merge_qa pseudo_gold_only "$RUN_GOLD_ONLY"
   merge_qa pseudo_gold_plus_gpp_fill "$RUN_GOLD_PLUS_BASE_FILL"
+  merge_qa support_doc_non_gold_only "$RUN_SUPPORT_DOC_NEGATIVE_CONTROL"
 fi

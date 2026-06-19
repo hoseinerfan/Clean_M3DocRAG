@@ -45,6 +45,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--doc-pages-jsonl",
+        default="",
+        help=(
+            "Optional exported page-text JSONL. Required by negative controls that "
+            "need to choose non-pseudo pages from support documents."
+        ),
+    )
+    parser.add_argument(
         "--top-pages",
         type=int,
         default=4,
@@ -54,6 +62,17 @@ def parse_args() -> argparse.Namespace:
         "--fill-from-base",
         action="store_true",
         help="Fill remaining reader slots from the base prediction after pseudo-gold pages.",
+    )
+    parser.add_argument(
+        "--negative-control",
+        choices=("none", "same_doc_non_gold", "support_doc_non_gold"),
+        default="none",
+        help=(
+            "Replace pseudo-gold pages with non-pseudo pages for page-label quality "
+            "controls. same_doc_non_gold chooses a nearby non-pseudo page from the "
+            "same document as each pseudo page. support_doc_non_gold chooses "
+            "non-pseudo pages from the original support-document set."
+        ),
     )
     parser.add_argument(
         "--include-unlabeled-with-base",
@@ -134,6 +153,30 @@ def load_jsonl_by_qid(path: Path) -> dict[str, dict[str, Any]]:
         if qid:
             out[qid] = row
     return out
+
+
+def parse_page_idx(row: dict[str, Any]) -> int | None:
+    for key in ("page_idx", "page_id", "page"):
+        if row.get(key) is not None:
+            try:
+                return int(row[key])
+            except (TypeError, ValueError):
+                return None
+    parsed = parse_page_uid(str(row.get("page_uid", "")))
+    return parsed[1] if parsed is not None else None
+
+
+def load_doc_page_indices(path: Path) -> dict[str, list[int]]:
+    pages_by_doc: dict[str, set[int]] = {}
+    for row in load_jsonl(path):
+        doc_id = str(row.get("doc_id", "")).strip()
+        if not doc_id:
+            parsed = parse_page_uid(str(row.get("page_uid", "")))
+            doc_id = parsed[0] if parsed is not None else ""
+        page_idx = parse_page_idx(row)
+        if doc_id and page_idx is not None:
+            pages_by_doc.setdefault(doc_id, set()).add(int(page_idx))
+    return {doc_id: sorted(indices) for doc_id, indices in pages_by_doc.items()}
 
 
 def load_prediction(path: Path) -> dict[str, dict[str, Any]]:
@@ -278,6 +321,78 @@ def make_gold_rows(gold_uids: list[str], top_pages: int) -> list[list[Any]]:
     return rows
 
 
+def make_same_doc_non_gold_rows(
+    *,
+    gold_uids: list[str],
+    pages_by_doc: dict[str, list[int]],
+    top_pages: int,
+) -> tuple[list[list[Any]], int]:
+    all_gold_uids = set(gold_uids)
+    used_uids: set[str] = set()
+    rows: list[list[Any]] = []
+    missing = 0
+    for rank, uid in enumerate(gold_uids[: max(top_pages, 0)], start=1):
+        parsed = parse_page_uid(uid)
+        if parsed is None:
+            missing += 1
+            continue
+        doc_id, anchor_page_idx = parsed
+        candidates = []
+        for page_idx in pages_by_doc.get(doc_id, []):
+            candidate_uid = page_uid(doc_id, page_idx)
+            if candidate_uid in all_gold_uids or candidate_uid in used_uids:
+                continue
+            candidates.append((abs(int(page_idx) - int(anchor_page_idx)), int(page_idx), candidate_uid))
+        if not candidates:
+            missing += 1
+            continue
+        _, page_idx, candidate_uid = sorted(candidates)[0]
+        used_uids.add(candidate_uid)
+        rows.append([doc_id, page_idx, float(1_000_000 - rank)])
+    return rows, missing
+
+
+def make_support_doc_non_gold_rows(
+    *,
+    gold_uids: list[str],
+    support_docs: set[str],
+    pages_by_doc: dict[str, list[int]],
+    top_pages: int,
+) -> tuple[list[list[Any]], int]:
+    all_gold_uids = set(gold_uids)
+    anchors_by_doc: dict[str, list[int]] = {}
+    for uid in gold_uids:
+        parsed = parse_page_uid(uid)
+        if parsed is not None:
+            anchors_by_doc.setdefault(parsed[0], []).append(int(parsed[1]))
+
+    support_doc_order = {doc_id: idx for idx, doc_id in enumerate(sorted(support_docs))}
+    candidates: list[tuple[int, int, int, str, int, str]] = []
+    for doc_id in sorted(support_docs):
+        for page_idx in pages_by_doc.get(doc_id, []):
+            candidate_uid = page_uid(doc_id, page_idx)
+            if candidate_uid in all_gold_uids:
+                continue
+            anchor_distances = [abs(int(page_idx) - anchor_idx) for anchor_idx in anchors_by_doc.get(doc_id, [])]
+            nearest_same_doc_gold = min(anchor_distances) if anchor_distances else 1_000_000
+            candidates.append(
+                (
+                    nearest_same_doc_gold,
+                    support_doc_order.get(doc_id, 1_000_000),
+                    int(page_idx),
+                    doc_id,
+                    int(page_idx),
+                    candidate_uid,
+                )
+            )
+
+    target_count = min(max(top_pages, 0), len(gold_uids))
+    rows: list[list[Any]] = []
+    for rank, (_, _, _, doc_id, page_idx, _) in enumerate(sorted(candidates)[:target_count], start=1):
+        rows.append([doc_id, page_idx, float(1_000_000 - rank)])
+    return rows, max(0, target_count - len(rows))
+
+
 def append_base_fill(
     *,
     rows: list[list[Any]],
@@ -316,6 +431,8 @@ def main() -> None:
         raise ValueError("--fill-from-base requires --base-prediction")
     if args.include_unlabeled_with_base and not args.fill_from_base:
         raise ValueError("--include-unlabeled-with-base requires --fill-from-base")
+    if args.negative_control != "none" and not args.doc_pages_jsonl:
+        raise ValueError("--negative-control requires --doc-pages-jsonl")
     if args.require_pseudo_page_count_matches_evidence_unit_count and not args.evidence_metadata_jsonl:
         raise ValueError(
             "--require-pseudo-page-count-matches-evidence-unit-count requires "
@@ -331,6 +448,11 @@ def main() -> None:
     evidence_meta_by_qid = (
         load_jsonl_by_qid(Path(args.evidence_metadata_jsonl))
         if args.evidence_metadata_jsonl
+        else {}
+    )
+    pages_by_doc = (
+        load_doc_page_indices(Path(args.doc_pages_jsonl))
+        if args.doc_pages_jsonl
         else {}
     )
     base = load_prediction(Path(args.base_prediction)) if args.base_prediction else {}
@@ -356,6 +478,7 @@ def main() -> None:
         "shorter_than_top_pages_qids": 0,
         "top_pages": int(args.top_pages),
         "fill_from_base": bool(args.fill_from_base),
+        "negative_control": str(args.negative_control),
         "include_unlabeled_with_base": bool(args.include_unlabeled_with_base),
         "require_all_support_docs_covered": bool(args.require_all_support_docs_covered),
         "require_pseudo_pages_match_support_docs": bool(args.require_pseudo_pages_match_support_docs),
@@ -368,6 +491,8 @@ def main() -> None:
         "support_doc_count_hist": {},
         "evidence_unit_count_hist": {},
         "pseudo_page_count_hist": {},
+        "negative_control_missing_alternative_pages": 0,
+        "negative_control_incomplete_qids": 0,
         "written_support_doc_count_hist": {},
         "written_evidence_unit_count_hist": {},
         "written_pseudo_page_count_hist": {},
@@ -437,7 +562,26 @@ def main() -> None:
             stats["skipped_evidence_unit_count_mismatch"] += 1
             continue
 
-        page_rows = make_gold_rows(gold_uids, args.top_pages)
+        if args.negative_control == "same_doc_non_gold":
+            page_rows, missing_alternatives = make_same_doc_non_gold_rows(
+                gold_uids=gold_uids,
+                pages_by_doc=pages_by_doc,
+                top_pages=args.top_pages,
+            )
+        elif args.negative_control == "support_doc_non_gold":
+            page_rows, missing_alternatives = make_support_doc_non_gold_rows(
+                gold_uids=gold_uids,
+                support_docs=support_docs,
+                pages_by_doc=pages_by_doc,
+                top_pages=args.top_pages,
+            )
+        else:
+            page_rows = make_gold_rows(gold_uids, args.top_pages)
+            missing_alternatives = 0
+        if missing_alternatives:
+            stats["negative_control_missing_alternative_pages"] += missing_alternatives
+            stats["negative_control_incomplete_qids"] += 1
+
         if args.fill_from_base:
             before_fill_count = len(page_rows)
             page_rows = append_base_fill(rows=page_rows, base_row=base.get(qid), top_pages=args.top_pages)
