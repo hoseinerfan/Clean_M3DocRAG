@@ -45,6 +45,7 @@ BUILD_INPUTS="${BUILD_INPUTS:-1}"
 RUN_QA="${RUN_QA:-1}"
 REQUIRE_ALL_SUPPORT_DOCS_COVERED="${REQUIRE_ALL_SUPPORT_DOCS_COVERED:-0}"
 REQUIRE_PSEUDO_PAGES_MATCH_SUPPORT_DOCS="${REQUIRE_PSEUDO_PAGES_MATCH_SUPPORT_DOCS:-0}"
+REQUIRE_PSEUDO_PAGE_COUNT_MATCH_SUPPORT_DOC_COUNT="${REQUIRE_PSEUDO_PAGE_COUNT_MATCH_SUPPORT_DOC_COUNT:-0}"
 
 require_file() {
   local name="$1"
@@ -85,6 +86,9 @@ build_input() {
   fi
   if [[ "$REQUIRE_PSEUDO_PAGES_MATCH_SUPPORT_DOCS" == "1" ]]; then
     args+=(--require-pseudo-pages-match-support-docs)
+  fi
+  if [[ "$REQUIRE_PSEUDO_PAGE_COUNT_MATCH_SUPPORT_DOC_COUNT" == "1" ]]; then
+    args+=(--require-pseudo-page-count-matches-support-doc-count)
   fi
   if [[ "$fill_from_base" == "1" ]]; then
     require_file base_prediction "$BASE_PRED"

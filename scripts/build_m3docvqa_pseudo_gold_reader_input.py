@@ -74,6 +74,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--require-pseudo-page-count-matches-support-doc-count",
+        action="store_true",
+        help=(
+            "Keep only QIDs where the number of pseudo-page labels equals the "
+            "number of original MMQA supporting documents. This checks the "
+            "required evidence count, not exact document identity."
+        ),
+    )
+    parser.add_argument(
         "--output-prediction-json",
         required=True,
         help="Output prediction JSON for run_m3docvqa_external_retrieval_qa.py.",
@@ -298,8 +307,10 @@ def main() -> None:
         "written_qids": 0,
         "support_complete_labeled_qids": 0,
         "support_exact_match_labeled_qids": 0,
+        "support_count_match_labeled_qids": 0,
         "skipped_incomplete_support_doc_coverage": 0,
         "skipped_support_doc_count_mismatch": 0,
+        "skipped_support_doc_count_only_mismatch": 0,
         "unlabeled_written_with_base": 0,
         "gold_page_count": 0,
         "mean_gold_pages_per_written_qid": 0.0,
@@ -310,6 +321,9 @@ def main() -> None:
         "include_unlabeled_with_base": bool(args.include_unlabeled_with_base),
         "require_all_support_docs_covered": bool(args.require_all_support_docs_covered),
         "require_pseudo_pages_match_support_docs": bool(args.require_pseudo_pages_match_support_docs),
+        "require_pseudo_page_count_matches_support_doc_count": bool(
+            args.require_pseudo_page_count_matches_support_doc_count
+        ),
         "support_doc_count_hist": {},
         "pseudo_page_count_hist": {},
         "written_support_doc_count_hist": {},
@@ -342,6 +356,8 @@ def main() -> None:
                 stats["support_complete_labeled_qids"] += 1
             if support_docs and support_docs == pseudo_docs and len(gold_uids) == len(support_docs):
                 stats["support_exact_match_labeled_qids"] += 1
+            if support_docs and len(gold_uids) == len(support_docs):
+                stats["support_count_match_labeled_qids"] += 1
         elif not args.include_unlabeled_with_base:
             continue
 
@@ -352,6 +368,11 @@ def main() -> None:
             support_docs and support_docs == pseudo_docs and len(gold_uids) == len(support_docs)
         ):
             stats["skipped_support_doc_count_mismatch"] += 1
+            continue
+        if args.require_pseudo_page_count_matches_support_doc_count and not (
+            support_docs and len(gold_uids) == len(support_docs)
+        ):
+            stats["skipped_support_doc_count_only_mismatch"] += 1
             continue
 
         page_rows = make_gold_rows(gold_uids, args.top_pages)
