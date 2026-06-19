@@ -354,17 +354,23 @@ def write_summary_md(path: Path, summaries: list[dict[str, Any]]) -> None:
     lines: list[str] = [
         "# MMQA Evidence Metadata Summary",
         "",
-        "| split | qids | mean support docs | mean evidence units | qids with >1 evidence unit in same doc | evidence units > support docs | max evidence units/doc | pseudo count = support doc count |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        "| split | qids | mean support docs | mean evidence units | qids with >1 evidence unit in same doc | evidence units > support docs | max evidence units/doc | pseudo count = support doc count | pseudo count = evidence unit count |",
+        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
     ]
     for item in summaries:
-        pseudo_match = item.get("qids_pseudo_count_matches_support_doc_count")
-        pseudo_match_text = "" if pseudo_match is None else str(pseudo_match)
+        pseudo_support_match = item.get("qids_pseudo_count_matches_support_doc_count")
+        pseudo_support_match_text = "" if pseudo_support_match is None else str(pseudo_support_match)
+        pseudo_evidence_match = item.get("qids_pseudo_count_matches_evidence_unit_count")
+        pseudo_evidence_match_text = "" if pseudo_evidence_match is None else str(pseudo_evidence_match)
         lines.append(
             "| {split} | {qid_count} | {mean_support_doc_count:.3f} | "
             "{mean_evidence_unit_count:.3f} | {qids_with_multi_evidence_same_doc} | "
             "{qids_with_evidence_count_gt_support_doc_count} | {max_evidence_units_per_doc} | "
-            "{pseudo_match_text} |".format(**item, pseudo_match_text=pseudo_match_text)
+            "{pseudo_support_match_text} | {pseudo_evidence_match_text} |".format(
+                **item,
+                pseudo_support_match_text=pseudo_support_match_text,
+                pseudo_evidence_match_text=pseudo_evidence_match_text,
+            )
         )
 
     for item in summaries:
