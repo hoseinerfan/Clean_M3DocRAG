@@ -526,12 +526,19 @@ def qid_supervision_tier(
     selected: list[PageLabel],
     units: list[EvidenceUnit],
     mapped_unit_ids: set[str],
+    gold_doc_ids: list[str] | None = None,
 ) -> str:
     if not selected:
         return "exclude_unlabeled"
     complete = len(mapped_unit_ids) == len(units)
     page_tiers = {page_supervision_tier(label) for label in selected}
     has_proxy = bool(page_tiers & {"visual_proxy", "mixed_direct_proxy"})
+    selected_docs = {label.doc_id for label in selected}
+    support_complete = set(gold_doc_ids or []).issubset(selected_docs)
+    if not support_complete:
+        if has_proxy:
+            return "support_incomplete_hybrid_positive_only"
+        return "support_incomplete_direct_positive_only"
     if complete and not has_proxy and page_tiers == {"direct"}:
         return "complete_direct"
     if complete:
@@ -597,6 +604,9 @@ def augmented_gold_row(
     metadata["pseudo_gold_unmapped_evidence_unit_ids"] = sorted(
         unit.unit_id for unit in units if unit.unit_id not in mapped_unit_ids
     )
+    gold_doc_ids = base.supporting_doc_ids(row)
+    selected_doc_ids = {item.doc_id for item in selected}
+    metadata["pseudo_gold_uncovered_support_doc_ids"] = sorted(set(gold_doc_ids) - selected_doc_ids)
     metadata["pseudo_gold_negative_supervision_scope"] = "non_support_docs_only"
     return out
 
@@ -766,6 +776,7 @@ def main() -> None:
                     selected=selected,
                     units=units,
                     mapped_unit_ids=mapped_unit_ids,
+                    gold_doc_ids=gold_docs,
                 )
                 status_counts[status] += 1
                 supervision_tier_counts[supervision_tier] += 1
@@ -810,6 +821,8 @@ def main() -> None:
                     "positive_training_page_uids": [item.page_uid for item in selected],
                     "negative_supervision_scope": "non_support_docs_only",
                     "negative_sampling_excluded_doc_ids": gold_docs,
+                    "support_doc_coverage_complete": set(gold_docs).issubset(selected_docs),
+                    "uncovered_support_doc_ids": sorted(set(gold_docs) - selected_docs),
                     "adaptive_doc_caps": adaptive_doc_caps(units, max_pages_per_doc=int(args.max_pages_per_doc)),
                     "pseudo_gold_page_uids": [item.page_uid for item in selected],
                     "pseudo_gold_pages": [

@@ -110,7 +110,7 @@ def page_audit(page: dict[str, Any]) -> dict[str, Any]:
     primary_any = bool(all_sources & direct_sources)
     any_exact = bool(exact)
     fuzzy_only = bool(fuzzy) and not any_exact
-    contextual_only = bool(all_sources) and not primary_any
+    contextual_only = bool(all_sources) and not primary_any and not visual_proxy
     weak_only = bool(all_sources) and all_sources.issubset(WEAK_CONTEXT_SOURCES)
     title_only = bool(all_sources) and all_sources.issubset(
         {"image_doc_title", "table_title", "supporting_doc_title", "image_title"}
@@ -146,16 +146,22 @@ def audit_tier(
     label_count: int,
     status: str,
     page_audits: list[dict[str, Any]],
+    support_complete: bool,
 ) -> str:
     if label_count == 0:
         return "unlabeled"
     all_units_mapped = status == "matched_all_units"
+    has_proxy = any(page["visual_proxy"] for page in page_audits)
+    if not support_complete:
+        return "support_incomplete_hybrid" if has_proxy else "support_incomplete_direct"
     if all_units_mapped and all(page["has_primary_direct_exact"] for page in page_audits):
         return "strong_direct"
-    if all_units_mapped and any(page["visual_proxy"] for page in page_audits):
+    if all_units_mapped and has_proxy:
         return "complete_hybrid_proxy"
     if all_units_mapped and all(page["has_any_exact"] for page in page_audits):
         return "strong_corroborated"
+    if has_proxy:
+        return "partial_hybrid_proxy"
     if any(page["fuzzy_only"] or page["contextual_only"] for page in page_audits):
         return "review_recommended"
     return "supported_partial"
@@ -172,7 +178,12 @@ def summarize_row(row: dict[str, Any], current_row: dict[str, Any] | None) -> di
     covered_docs = gold_docs & selected_docs
     status = str(row.get("status", ""))
     label_count = len(selected_uids)
-    tier = audit_tier(label_count=label_count, status=status, page_audits=audits)
+    tier = audit_tier(
+        label_count=label_count,
+        status=status,
+        page_audits=audits,
+        support_complete=not gold_docs or covered_docs == gold_docs,
+    )
 
     risk_flags: list[str] = []
     if label_count == 0:

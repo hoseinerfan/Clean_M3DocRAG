@@ -126,6 +126,14 @@ class EvidenceUnitAwarePseudoPageLabelsTests(unittest.TestCase):
         )
         self.assertEqual(tier, "partial_direct_positive_only")
 
+        support_incomplete_tier = MODULE.qid_supervision_tier(
+            selected=[label],
+            units=[direct_unit],
+            mapped_unit_ids={direct_unit.unit_id},
+            gold_doc_ids=["doc1", "doc2"],
+        )
+        self.assertEqual(support_incomplete_tier, "support_incomplete_direct_positive_only")
+
         augmented = MODULE.augmented_gold_row(
             {"qid": "q1", "metadata": {}},
             [label],

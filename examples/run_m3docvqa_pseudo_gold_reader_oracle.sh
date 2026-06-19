@@ -50,6 +50,7 @@ REQUIRE_ALL_SUPPORT_DOCS_COVERED="${REQUIRE_ALL_SUPPORT_DOCS_COVERED:-0}"
 REQUIRE_PSEUDO_PAGES_MATCH_SUPPORT_DOCS="${REQUIRE_PSEUDO_PAGES_MATCH_SUPPORT_DOCS:-0}"
 REQUIRE_PSEUDO_PAGE_COUNT_MATCH_SUPPORT_DOC_COUNT="${REQUIRE_PSEUDO_PAGE_COUNT_MATCH_SUPPORT_DOC_COUNT:-0}"
 REQUIRE_PSEUDO_PAGE_COUNT_MATCH_EVIDENCE_UNIT_COUNT="${REQUIRE_PSEUDO_PAGE_COUNT_MATCH_EVIDENCE_UNIT_COUNT:-0}"
+QID_SUPERVISION_TIERS="${QID_SUPERVISION_TIERS:-}"
 
 require_file() {
   local name="$1"
@@ -105,6 +106,9 @@ build_input() {
       --evidence-metadata-jsonl "$EVIDENCE_METADATA_JSONL"
       --require-pseudo-page-count-matches-evidence-unit-count
     )
+  fi
+  if [[ -n "$QID_SUPERVISION_TIERS" ]]; then
+    args+=(--qid-supervision-tier "$QID_SUPERVISION_TIERS")
   fi
   if [[ "$fill_from_base" == "1" ]]; then
     require_file base_prediction "$BASE_PRED"

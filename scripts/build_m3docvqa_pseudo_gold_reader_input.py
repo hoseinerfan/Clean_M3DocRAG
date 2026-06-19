@@ -119,6 +119,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--qid-supervision-tier",
+        action="append",
+        default=[],
+        help=(
+            "Keep only augmented-gold rows whose metadata.pseudo_gold_qid_supervision_tier "
+            "matches one of these values. May be repeated or supplied as a comma-separated list."
+        ),
+    )
+    parser.add_argument(
         "--output-prediction-json",
         required=True,
         help="Output prediction JSON for run_m3docvqa_external_retrieval_qa.py.",
@@ -440,6 +449,12 @@ def main() -> None:
         )
 
     gold_rows = load_jsonl(Path(args.augmented_gold))
+    allowed_supervision_tiers = {
+        value.strip()
+        for raw in args.qid_supervision_tier
+        for value in str(raw).split(",")
+        if value.strip()
+    }
     support_rows_by_qid = {
         str(row.get("qid", "")).strip(): row
         for row in (load_jsonl(Path(args.original_gold)) if args.original_gold else gold_rows)
@@ -471,6 +486,7 @@ def main() -> None:
         "skipped_support_doc_count_mismatch": 0,
         "skipped_support_doc_count_only_mismatch": 0,
         "skipped_evidence_unit_count_mismatch": 0,
+        "skipped_supervision_tier_mismatch": 0,
         "unlabeled_written_with_base": 0,
         "gold_page_count": 0,
         "mean_gold_pages_per_written_qid": 0.0,
@@ -488,6 +504,7 @@ def main() -> None:
         "require_pseudo_page_count_matches_evidence_unit_count": bool(
             args.require_pseudo_page_count_matches_evidence_unit_count
         ),
+        "qid_supervision_tiers": sorted(allowed_supervision_tiers),
         "support_doc_count_hist": {},
         "evidence_unit_count_hist": {},
         "pseudo_page_count_hist": {},
@@ -508,6 +525,11 @@ def main() -> None:
     for row in gold_rows:
         qid = str(row.get("qid", "")).strip()
         if not qid:
+            continue
+        metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
+        supervision_tier = str(metadata.get("pseudo_gold_qid_supervision_tier", "")).strip()
+        if allowed_supervision_tiers and supervision_tier not in allowed_supervision_tiers:
+            stats["skipped_supervision_tier_mismatch"] += 1
             continue
         gold_uids = gold_page_uids(row)
         support_row = support_rows_by_qid.get(qid, row)
