@@ -29,6 +29,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--evidence-metadata-jsonl",
+        default="",
+        help=(
+            "Optional JSONL produced by export_mmqa_evidence_metadata.py. "
+            "Used by --require-pseudo-page-count-matches-evidence-unit-count."
+        ),
+    )
+    parser.add_argument(
         "--base-prediction",
         default="",
         help=(
@@ -83,6 +91,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--require-pseudo-page-count-matches-evidence-unit-count",
+        action="store_true",
+        help=(
+            "Keep only QIDs where the number of pseudo-page labels equals the "
+            "document-grounded MMQA evidence-unit count from --evidence-metadata-jsonl. "
+            "This is a stricter diagnostic than matching support-document count."
+        ),
+    )
+    parser.add_argument(
         "--output-prediction-json",
         required=True,
         help="Output prediction JSON for run_m3docvqa_external_retrieval_qa.py.",
@@ -108,6 +125,15 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
             if line:
                 rows.append(json.loads(line))
     return rows
+
+
+def load_jsonl_by_qid(path: Path) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for row in load_jsonl(path):
+        qid = str(row.get("qid", "")).strip()
+        if qid:
+            out[qid] = row
+    return out
 
 
 def load_prediction(path: Path) -> dict[str, dict[str, Any]]:
@@ -290,6 +316,11 @@ def main() -> None:
         raise ValueError("--fill-from-base requires --base-prediction")
     if args.include_unlabeled_with_base and not args.fill_from_base:
         raise ValueError("--include-unlabeled-with-base requires --fill-from-base")
+    if args.require_pseudo_page_count_matches_evidence_unit_count and not args.evidence_metadata_jsonl:
+        raise ValueError(
+            "--require-pseudo-page-count-matches-evidence-unit-count requires "
+            "--evidence-metadata-jsonl"
+        )
 
     gold_rows = load_jsonl(Path(args.augmented_gold))
     support_rows_by_qid = {
@@ -297,6 +328,11 @@ def main() -> None:
         for row in (load_jsonl(Path(args.original_gold)) if args.original_gold else gold_rows)
         if str(row.get("qid", "")).strip()
     }
+    evidence_meta_by_qid = (
+        load_jsonl_by_qid(Path(args.evidence_metadata_jsonl))
+        if args.evidence_metadata_jsonl
+        else {}
+    )
     base = load_prediction(Path(args.base_prediction)) if args.base_prediction else {}
 
     output: dict[str, dict[str, Any]] = {}
@@ -308,9 +344,11 @@ def main() -> None:
         "support_complete_labeled_qids": 0,
         "support_exact_match_labeled_qids": 0,
         "support_count_match_labeled_qids": 0,
+        "evidence_unit_count_match_labeled_qids": 0,
         "skipped_incomplete_support_doc_coverage": 0,
         "skipped_support_doc_count_mismatch": 0,
         "skipped_support_doc_count_only_mismatch": 0,
+        "skipped_evidence_unit_count_mismatch": 0,
         "unlabeled_written_with_base": 0,
         "gold_page_count": 0,
         "mean_gold_pages_per_written_qid": 0.0,
@@ -324,16 +362,23 @@ def main() -> None:
         "require_pseudo_page_count_matches_support_doc_count": bool(
             args.require_pseudo_page_count_matches_support_doc_count
         ),
+        "require_pseudo_page_count_matches_evidence_unit_count": bool(
+            args.require_pseudo_page_count_matches_evidence_unit_count
+        ),
         "support_doc_count_hist": {},
+        "evidence_unit_count_hist": {},
         "pseudo_page_count_hist": {},
         "written_support_doc_count_hist": {},
+        "written_evidence_unit_count_hist": {},
         "written_pseudo_page_count_hist": {},
     }
 
     gold_counts: list[int] = []
     support_doc_count_hist: dict[int, int] = {}
+    evidence_unit_count_hist: dict[int, int] = {}
     pseudo_page_count_hist: dict[int, int] = {}
     written_support_doc_count_hist: dict[int, int] = {}
+    written_evidence_unit_count_hist: dict[int, int] = {}
     written_pseudo_page_count_hist: dict[int, int] = {}
     for row in gold_rows:
         qid = str(row.get("qid", "")).strip()
@@ -347,7 +392,17 @@ def main() -> None:
             for uid in gold_uids
             if (parsed := parse_page_uid(uid)) is not None
         }
+        evidence_meta = evidence_meta_by_qid.get(qid, {})
+        raw_evidence_count = evidence_meta.get("evidence_unit_count")
+        evidence_count: int | None = None
+        if raw_evidence_count is not None:
+            try:
+                evidence_count = int(raw_evidence_count)
+            except (TypeError, ValueError):
+                evidence_count = None
         support_doc_count_hist[len(support_docs)] = support_doc_count_hist.get(len(support_docs), 0) + 1
+        if evidence_count is not None:
+            evidence_unit_count_hist[evidence_count] = evidence_unit_count_hist.get(evidence_count, 0) + 1
         pseudo_page_count_hist[len(gold_uids)] = pseudo_page_count_hist.get(len(gold_uids), 0) + 1
         if gold_uids:
             stats["labeled_qids"] += 1
@@ -358,6 +413,8 @@ def main() -> None:
                 stats["support_exact_match_labeled_qids"] += 1
             if support_docs and len(gold_uids) == len(support_docs):
                 stats["support_count_match_labeled_qids"] += 1
+            if evidence_count is not None and len(gold_uids) == evidence_count:
+                stats["evidence_unit_count_match_labeled_qids"] += 1
         elif not args.include_unlabeled_with_base:
             continue
 
@@ -373,6 +430,11 @@ def main() -> None:
             support_docs and len(gold_uids) == len(support_docs)
         ):
             stats["skipped_support_doc_count_only_mismatch"] += 1
+            continue
+        if args.require_pseudo_page_count_matches_evidence_unit_count and not (
+            evidence_count is not None and len(gold_uids) == evidence_count
+        ):
+            stats["skipped_evidence_unit_count_mismatch"] += 1
             continue
 
         page_rows = make_gold_rows(gold_uids, args.top_pages)
@@ -391,6 +453,10 @@ def main() -> None:
         written_support_doc_count_hist[len(support_docs)] = (
             written_support_doc_count_hist.get(len(support_docs), 0) + 1
         )
+        if evidence_count is not None:
+            written_evidence_unit_count_hist[evidence_count] = (
+                written_evidence_unit_count_hist.get(evidence_count, 0) + 1
+            )
         written_pseudo_page_count_hist[len(gold_uids)] = (
             written_pseudo_page_count_hist.get(len(gold_uids), 0) + 1
         )
@@ -416,9 +482,15 @@ def main() -> None:
     if gold_counts:
         stats["mean_gold_pages_per_written_qid"] = sum(gold_counts) / len(gold_counts)
     stats["support_doc_count_hist"] = {str(k): v for k, v in sorted(support_doc_count_hist.items())}
+    stats["evidence_unit_count_hist"] = {
+        str(k): v for k, v in sorted(evidence_unit_count_hist.items())
+    }
     stats["pseudo_page_count_hist"] = {str(k): v for k, v in sorted(pseudo_page_count_hist.items())}
     stats["written_support_doc_count_hist"] = {
         str(k): v for k, v in sorted(written_support_doc_count_hist.items())
+    }
+    stats["written_evidence_unit_count_hist"] = {
+        str(k): v for k, v in sorted(written_evidence_unit_count_hist.items())
     }
     stats["written_pseudo_page_count_hist"] = {
         str(k): v for k, v in sorted(written_pseudo_page_count_hist.items())

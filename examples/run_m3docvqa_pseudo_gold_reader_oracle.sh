@@ -35,6 +35,7 @@ RUN_EVAL="${RUN_EVAL:-$DEFAULT_RUN_EVAL}"
 
 AUGMENTED_GOLD="${AUGMENTED_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_dev_pseudo_page_labels_strict.augmented_gold.jsonl}"
 ORIGINAL_GOLD="${ORIGINAL_GOLD:-$GOLD}"
+EVIDENCE_METADATA_JSONL="${EVIDENCE_METADATA_JSONL:-$REPO_ROOT/output/m3docvqa_mmqa_evidence_metadata/mmqa_evidence_metadata_dev.jsonl}"
 BASE_PRED="${BASE_PRED:-$REPO_ROOT/output/m3docvqa_gpp_hyperlink_node_ablation_exact_maxsim/mmqa_dev_exact_maxsim_gpp_hyperlink_node_no_hyperlink.prediction.json}"
 ORACLE_OUT_DIR="${ORACLE_OUT_DIR:-$REPO_ROOT/output/m3docvqa_pseudo_gold_reader_oracle}"
 QA_OUT_DIR="${QA_OUT_DIR:-$ORACLE_OUT_DIR/qa}"
@@ -46,6 +47,7 @@ RUN_QA="${RUN_QA:-1}"
 REQUIRE_ALL_SUPPORT_DOCS_COVERED="${REQUIRE_ALL_SUPPORT_DOCS_COVERED:-0}"
 REQUIRE_PSEUDO_PAGES_MATCH_SUPPORT_DOCS="${REQUIRE_PSEUDO_PAGES_MATCH_SUPPORT_DOCS:-0}"
 REQUIRE_PSEUDO_PAGE_COUNT_MATCH_SUPPORT_DOC_COUNT="${REQUIRE_PSEUDO_PAGE_COUNT_MATCH_SUPPORT_DOC_COUNT:-0}"
+REQUIRE_PSEUDO_PAGE_COUNT_MATCH_EVIDENCE_UNIT_COUNT="${REQUIRE_PSEUDO_PAGE_COUNT_MATCH_EVIDENCE_UNIT_COUNT:-0}"
 
 require_file() {
   local name="$1"
@@ -89,6 +91,13 @@ build_input() {
   fi
   if [[ "$REQUIRE_PSEUDO_PAGE_COUNT_MATCH_SUPPORT_DOC_COUNT" == "1" ]]; then
     args+=(--require-pseudo-page-count-matches-support-doc-count)
+  fi
+  if [[ "$REQUIRE_PSEUDO_PAGE_COUNT_MATCH_EVIDENCE_UNIT_COUNT" == "1" ]]; then
+    require_file evidence_metadata_jsonl "$EVIDENCE_METADATA_JSONL"
+    args+=(
+      --evidence-metadata-jsonl "$EVIDENCE_METADATA_JSONL"
+      --require-pseudo-page-count-matches-evidence-unit-count
+    )
   fi
   if [[ "$fill_from_base" == "1" ]]; then
     require_file base_prediction "$BASE_PRED"
