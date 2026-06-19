@@ -297,9 +297,17 @@ def main() -> None:
         existing = {
             str(row.get("case_id", "")): row
             for row in load_jsonl(output_path)
-            if str(row.get("case_id", ""))
+            if str(row.get("case_id", "")) and str(row.get("decision", "")) in FINAL_DECISIONS
         }
-    rows = [existing.get(str(case["case_id"]), case) for case in cases]
+    rows = []
+    for case in cases:
+        prior = existing.get(str(case["case_id"]))
+        if prior:
+            merged = dict(case)
+            merged.update(prior)
+            rows.append(merged)
+        else:
+            rows.append(case)
 
     page_paths = load_page_image_paths(Path(args.doc_pages_jsonl)) if args.doc_pages_jsonl else {}
     pdf_dir = Path(args.pdf_dir) if args.pdf_dir else None
