@@ -35,6 +35,7 @@ class UnitPageMatch:
     page_idx: int
     score: float
     direct_gate: str = ""
+    supervision_tier: str = ""
     exact_matches: list[dict[str, Any]] = field(default_factory=list)
     fuzzy_matches: list[dict[str, Any]] = field(default_factory=list)
 
@@ -130,6 +131,22 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.90,
         help="Minimum overlap for a fuzzy direct-evidence match to pass the direct gate.",
+    )
+    parser.add_argument(
+        "--image-evidence-mode",
+        choices=("legacy_direct", "proxy", "exclude"),
+        default="legacy_direct",
+        help=(
+            "How image-title localization is interpreted. legacy_direct preserves prior behavior; "
+            "proxy records title-localized image pages as visual proxies; exclude leaves image "
+            "units unresolved until a direct visual matcher is available."
+        ),
+    )
+    parser.add_argument(
+        "--image-title-proxy-min-score",
+        type=float,
+        default=7.0,
+        help="Minimum score for an image-title visual proxy when --image-evidence-mode=proxy.",
     )
     parser.add_argument("--output-jsonl", required=True)
     parser.add_argument("--output-summary-json", required=True)
@@ -370,11 +387,15 @@ def score_unit_pages(
     require_exact_or_high_confidence_fuzzy: bool,
     require_direct_evidence_gate: bool,
     direct_fuzzy_overlap: float,
+    image_evidence_mode: str = "legacy_direct",
+    image_title_proxy_min_score: float = 7.0,
 ) -> list[UnitPageMatch]:
+    if unit.unit_type == "image_instance" and image_evidence_mode == "exclude":
+        return []
     direct_sources_by_unit_type = {
         "text_instance": {"text_instance"},
         "table_cell": {"table_answer_cell"},
-        "image_instance": {"image_title"},
+        "image_instance": {"image_title"} if image_evidence_mode == "legacy_direct" else set(),
     }
     direct_sources = direct_sources_by_unit_type.get(unit.unit_type, set())
     matches: list[UnitPageMatch] = []
@@ -394,7 +415,9 @@ def score_unit_pages(
                 fuzzy_matches.append(
                     {"source": item.source, "text": item.text, "overlap": float(overlap), "weight": float(gain)}
                 )
-        if score < float(min_score):
+        is_visual_proxy = unit.unit_type == "image_instance" and image_evidence_mode == "proxy"
+        effective_min_score = float(image_title_proxy_min_score) if is_visual_proxy else float(min_score)
+        if score < effective_min_score:
             continue
         direct_exact = any(str(item.get("source", "")) in direct_sources for item in exact_matches)
         direct_fuzzy = any(
@@ -402,10 +425,27 @@ def score_unit_pages(
             and float(item.get("overlap", 0.0)) >= float(direct_fuzzy_overlap)
             for item in fuzzy_matches
         )
-        if require_direct_evidence_gate and not (direct_exact or direct_fuzzy):
+        proxy_exact = is_visual_proxy and any(
+            str(item.get("source", "")) == "image_title" for item in exact_matches
+        )
+        proxy_fuzzy = is_visual_proxy and any(
+            str(item.get("source", "")) == "image_title"
+            and float(item.get("overlap", 0.0)) >= float(direct_fuzzy_overlap)
+            for item in fuzzy_matches
+        )
+        if is_visual_proxy and not (proxy_exact or proxy_fuzzy):
+            continue
+        gate_passed = direct_exact or direct_fuzzy or proxy_exact or proxy_fuzzy
+        if require_direct_evidence_gate and not gate_passed:
             continue
         if require_exact_or_high_confidence_fuzzy and not exact_matches and score < float(high_confidence_score):
             continue
+        if is_visual_proxy:
+            supervision_tier = "visual_proxy"
+            gate_mode = "exact" if proxy_exact else ("fuzzy" if proxy_fuzzy else "not_required")
+        else:
+            supervision_tier = "direct" if direct_exact or direct_fuzzy else "contextual"
+            gate_mode = "exact" if direct_exact else ("fuzzy" if direct_fuzzy else "not_required")
         matches.append(
             UnitPageMatch(
                 unit=unit,
@@ -413,7 +453,8 @@ def score_unit_pages(
                 doc_id=unit.doc_id,
                 page_idx=int(page["page_idx"]),
                 score=float(score),
-                direct_gate="exact" if direct_exact else ("fuzzy" if direct_fuzzy else "not_required"),
+                direct_gate=gate_mode,
+                supervision_tier=supervision_tier,
                 exact_matches=exact_matches,
                 fuzzy_matches=fuzzy_matches,
             )
@@ -469,6 +510,37 @@ def confidence(score: float, *, high_confidence_score: float, min_score: float) 
     return "none"
 
 
+def page_supervision_tier(label: PageLabel) -> str:
+    tiers = {item.supervision_tier for item in label.unit_matches if item.supervision_tier}
+    if tiers == {"direct"}:
+        return "direct"
+    if tiers == {"visual_proxy"}:
+        return "visual_proxy"
+    if "direct" in tiers and "visual_proxy" in tiers:
+        return "mixed_direct_proxy"
+    return "contextual"
+
+
+def qid_supervision_tier(
+    *,
+    selected: list[PageLabel],
+    units: list[EvidenceUnit],
+    mapped_unit_ids: set[str],
+) -> str:
+    if not selected:
+        return "exclude_unlabeled"
+    complete = len(mapped_unit_ids) == len(units)
+    page_tiers = {page_supervision_tier(label) for label in selected}
+    has_proxy = bool(page_tiers & {"visual_proxy", "mixed_direct_proxy"})
+    if complete and not has_proxy and page_tiers == {"direct"}:
+        return "complete_direct"
+    if complete:
+        return "complete_hybrid"
+    if has_proxy:
+        return "partial_hybrid_positive_only"
+    return "partial_direct_positive_only"
+
+
 def page_label_record(
     label: PageLabel,
     *,
@@ -481,6 +553,7 @@ def page_label_record(
         "page_idx": int(label.page_idx),
         "score": round(float(label.score), 6),
         "confidence": confidence(label.score, high_confidence_score=high_confidence_score, min_score=min_score),
+        "supervision_tier": page_supervision_tier(label),
         "evidence_units": [
             {
                 "unit_id": item.unit.unit_id,
@@ -488,6 +561,7 @@ def page_label_record(
                 "doc_id": item.unit.doc_id,
                 "score": round(float(item.score), 6),
                 "direct_gate": item.direct_gate,
+                "supervision_tier": item.supervision_tier,
                 "metadata": item.unit.metadata,
                 "exact_matches": item.exact_matches[:20],
                 "fuzzy_matches": item.fuzzy_matches[:20],
@@ -497,7 +571,14 @@ def page_label_record(
     }
 
 
-def augmented_gold_row(row: dict[str, Any], selected: list[PageLabel]) -> dict[str, Any]:
+def augmented_gold_row(
+    row: dict[str, Any],
+    selected: list[PageLabel],
+    *,
+    supervision_tier: str,
+    mapped_unit_ids: set[str],
+    units: list[EvidenceUnit],
+) -> dict[str, Any]:
     out = json.loads(json.dumps(row))
     metadata = out.setdefault("metadata", {})
     if not isinstance(metadata, dict):
@@ -508,6 +589,15 @@ def augmented_gold_row(row: dict[str, Any], selected: list[PageLabel]) -> dict[s
     metadata["gold_page_uids"] = uids
     metadata["pseudo_gold_page_label_source"] = "mmqa_evidence_unit_aware_page_text"
     metadata["pseudo_gold_page_label_scores"] = {item.page_uid: round(float(item.score), 6) for item in selected}
+    metadata["pseudo_gold_page_supervision_tiers"] = {
+        item.page_uid: page_supervision_tier(item) for item in selected
+    }
+    metadata["pseudo_gold_qid_supervision_tier"] = supervision_tier
+    metadata["pseudo_gold_mapped_evidence_unit_ids"] = sorted(mapped_unit_ids)
+    metadata["pseudo_gold_unmapped_evidence_unit_ids"] = sorted(
+        unit.unit_id for unit in units if unit.unit_id not in mapped_unit_ids
+    )
+    metadata["pseudo_gold_negative_supervision_scope"] = "non_support_docs_only"
     return out
 
 
@@ -541,6 +631,31 @@ def write_summary_md(path: Path, summary: dict[str, Any]) -> None:
     ]
     for key, value in summary["status_counts"].items():
         lines.append(f"- `{key}`: `{value}`")
+    lines.extend(["", "## QID Supervision Tiers", ""])
+    for key, value in summary["supervision_tier_counts"].items():
+        lines.append(f"- `{key}`: `{value}`")
+    lines.extend(["", "## Page Supervision Tiers", ""])
+    for key, value in summary["page_supervision_tier_counts"].items():
+        lines.append(f"- `{key}`: `{value}`")
+    lines.extend(["", "## Evidence Unit Mapping by Type", ""])
+    lines.extend(
+        [
+            "| unit type | total | mapped | unmapped | selected |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    unit_types = sorted(
+        set(summary["unit_type_counts"])
+        | set(summary["mapped_unit_type_counts"])
+        | set(summary["unmapped_unit_type_counts"])
+    )
+    for unit_type in unit_types:
+        lines.append(
+            f"| {unit_type} | {summary['unit_type_counts'].get(unit_type, 0)} | "
+            f"{summary['mapped_unit_type_counts'].get(unit_type, 0)} | "
+            f"{summary['unmapped_unit_type_counts'].get(unit_type, 0)} | "
+            f"{summary['selected_unit_type_counts'].get(unit_type, 0)} |"
+        )
     lines.extend(["", "## Confidence Counts", ""])
     for key, value in summary["confidence_counts"].items():
         lines.append(f"- `{key}`: `{value}`")
@@ -568,6 +683,11 @@ def main() -> None:
     status_counts: Counter[str] = Counter()
     confidence_counts: Counter[str] = Counter()
     unit_type_counts: Counter[str] = Counter()
+    mapped_unit_type_counts: Counter[str] = Counter()
+    unmapped_unit_type_counts: Counter[str] = Counter()
+    selected_unit_type_counts: Counter[str] = Counter()
+    supervision_tier_counts: Counter[str] = Counter()
+    page_supervision_tier_counts: Counter[str] = Counter()
     matched_qtype_counts: Counter[str] = Counter()
     qtype_counts: Counter[str] = Counter()
     label_counts: list[int] = []
@@ -614,10 +734,15 @@ def main() -> None:
                         require_exact_or_high_confidence_fuzzy=bool(args.require_exact_or_high_confidence_fuzzy),
                         require_direct_evidence_gate=bool(args.require_direct_evidence_gate),
                         direct_fuzzy_overlap=float(args.direct_fuzzy_overlap),
+                        image_evidence_mode=str(args.image_evidence_mode),
+                        image_title_proxy_min_score=float(args.image_title_proxy_min_score),
                     )
                     if unit_matches:
                         mapped_unit_ids.add(unit.unit_id)
+                        mapped_unit_type_counts[unit.unit_type] += 1
                         best_unit_matches.append(unit_matches[0])
+                    else:
+                        unmapped_unit_type_counts[unit.unit_type] += 1
                 mapped_evidence_unit_count += len(mapped_unit_ids)
 
                 forced_status = ""
@@ -637,12 +762,22 @@ def main() -> None:
                     forced_status = "excluded_incomplete_support_doc_coverage"
 
                 status = forced_status or status_for(selected, units, mapped_unit_ids, missing_docs)
+                supervision_tier = qid_supervision_tier(
+                    selected=selected,
+                    units=units,
+                    mapped_unit_ids=mapped_unit_ids,
+                )
                 status_counts[status] += 1
+                supervision_tier_counts[supervision_tier] += 1
                 label_counts.append(len(selected))
                 if selected:
                     matched_qids += 1
                     matched_qtype_counts[question_type] += 1
                     for label in selected:
+                        page_supervision_tier_counts[page_supervision_tier(label)] += 1
+                        selected_unit_type_counts.update(
+                            item.unit.unit_type for item in label.unit_matches
+                        )
                         score_values.append(float(label.score))
                         confidence_counts[
                             confidence(
@@ -658,8 +793,23 @@ def main() -> None:
                     "question_type": question_type,
                     "gold_doc_ids": gold_docs,
                     "status": status,
+                    "supervision_tier": supervision_tier,
                     "evidence_unit_count": len(units),
                     "mapped_evidence_unit_count": len(mapped_unit_ids),
+                    "mapped_evidence_unit_ids": sorted(mapped_unit_ids),
+                    "unmapped_evidence_unit_ids": sorted(
+                        unit.unit_id for unit in units if unit.unit_id not in mapped_unit_ids
+                    ),
+                    "evidence_unit_type_counts": dict(sorted(Counter(unit.unit_type for unit in units).items())),
+                    "mapped_evidence_unit_type_counts": dict(
+                        sorted(Counter(unit.unit_type for unit in units if unit.unit_id in mapped_unit_ids).items())
+                    ),
+                    "unmapped_evidence_unit_type_counts": dict(
+                        sorted(Counter(unit.unit_type for unit in units if unit.unit_id not in mapped_unit_ids).items())
+                    ),
+                    "positive_training_page_uids": [item.page_uid for item in selected],
+                    "negative_supervision_scope": "non_support_docs_only",
+                    "negative_sampling_excluded_doc_ids": gold_docs,
                     "adaptive_doc_caps": adaptive_doc_caps(units, max_pages_per_doc=int(args.max_pages_per_doc)),
                     "pseudo_gold_page_uids": [item.page_uid for item in selected],
                     "pseudo_gold_pages": [
@@ -684,11 +834,25 @@ def main() -> None:
                         "deduplicate_normalized_phrases": bool(args.deduplicate_normalized_phrases),
                         "require_direct_evidence_gate": bool(args.require_direct_evidence_gate),
                         "direct_fuzzy_overlap": float(args.direct_fuzzy_overlap),
+                        "image_evidence_mode": str(args.image_evidence_mode),
+                        "image_title_proxy_min_score": float(args.image_title_proxy_min_score),
                     },
                 }
                 out_handle.write(json.dumps(output_row, ensure_ascii=False) + "\n")
                 if aug_handle is not None:
-                    aug_handle.write(json.dumps(augmented_gold_row(row, selected), ensure_ascii=False) + "\n")
+                    aug_handle.write(
+                        json.dumps(
+                            augmented_gold_row(
+                                row,
+                                selected,
+                                supervision_tier=supervision_tier,
+                                mapped_unit_ids=mapped_unit_ids,
+                                units=units,
+                            ),
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
         finally:
             if aug_handle is not None:
                 aug_handle.close()
@@ -710,7 +874,12 @@ def main() -> None:
         ),
         "status_counts": dict(sorted(status_counts.items())),
         "confidence_counts": dict(sorted(confidence_counts.items())),
+        "supervision_tier_counts": dict(sorted(supervision_tier_counts.items())),
+        "page_supervision_tier_counts": dict(sorted(page_supervision_tier_counts.items())),
         "unit_type_counts": dict(sorted(unit_type_counts.items())),
+        "mapped_unit_type_counts": dict(sorted(mapped_unit_type_counts.items())),
+        "unmapped_unit_type_counts": dict(sorted(unmapped_unit_type_counts.items())),
+        "selected_unit_type_counts": dict(sorted(selected_unit_type_counts.items())),
         "question_type_counts": dict(sorted(qtype_counts.items())),
         "matched_by_question_type": dict(sorted(matched_qtype_counts.items())),
         "missing_page_text_doc_ref_count": int(missing_doc_count),
@@ -726,6 +895,8 @@ def main() -> None:
         "deduplicate_normalized_phrases": bool(args.deduplicate_normalized_phrases),
         "require_direct_evidence_gate": bool(args.require_direct_evidence_gate),
         "direct_fuzzy_overlap": float(args.direct_fuzzy_overlap),
+        "image_evidence_mode": str(args.image_evidence_mode),
+        "image_title_proxy_min_score": float(args.image_title_proxy_min_score),
         "output_jsonl": str(output_path),
         "output_augmented_gold_jsonl": str(augmented_path) if augmented_path else "",
     }

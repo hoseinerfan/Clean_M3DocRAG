@@ -32,6 +32,8 @@ ALLOW_FUZZY_ONLY_MEDIUM="${ALLOW_FUZZY_ONLY_MEDIUM:-0}"
 DEDUPLICATE_NORMALIZED_PHRASES="${DEDUPLICATE_NORMALIZED_PHRASES:-0}"
 REQUIRE_DIRECT_EVIDENCE_GATE="${REQUIRE_DIRECT_EVIDENCE_GATE:-0}"
 DIRECT_FUZZY_OVERLAP="${DIRECT_FUZZY_OVERLAP:-0.90}"
+IMAGE_EVIDENCE_MODE="${IMAGE_EVIDENCE_MODE:-legacy_direct}"
+IMAGE_TITLE_PROXY_MIN_SCORE="${IMAGE_TITLE_PROXY_MIN_SCORE:-7.0}"
 
 mkdir -p "$OUT_DIR"
 
@@ -47,6 +49,8 @@ echo "using_min_score=$MIN_SCORE"
 echo "using_high_confidence_score=$HIGH_CONFIDENCE_SCORE"
 echo "using_top_pages_per_qid=$TOP_PAGES_PER_QID"
 echo "using_max_pages_per_doc=$MAX_PAGES_PER_DOC"
+echo "using_image_evidence_mode=$IMAGE_EVIDENCE_MODE"
+echo "using_image_title_proxy_min_score=$IMAGE_TITLE_PROXY_MIN_SCORE"
 
 args=(
   --gold "$GOLD"
@@ -61,6 +65,8 @@ args=(
   --max-pages-per-doc "$MAX_PAGES_PER_DOC"
   --min-token-overlap "$MIN_TOKEN_OVERLAP"
   --direct-fuzzy-overlap "$DIRECT_FUZZY_OVERLAP"
+  --image-evidence-mode "$IMAGE_EVIDENCE_MODE"
+  --image-title-proxy-min-score "$IMAGE_TITLE_PROXY_MIN_SCORE"
   --output-jsonl "$OUT_DIR/${LABEL}.jsonl"
   --output-summary-json "$OUT_DIR/${LABEL}.summary.json"
   --output-augmented-gold-jsonl "$OUT_DIR/${LABEL}.augmented_gold.jsonl"

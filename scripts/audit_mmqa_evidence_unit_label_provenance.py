@@ -73,19 +73,25 @@ def page_uids(row: dict[str, Any] | None) -> list[str]:
     return [str(value) for value in values if str(value).strip()]
 
 
-def flatten_page_matches(page: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+def flatten_page_matches(
+    page: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str], list[str]]:
     exact: list[dict[str, Any]] = []
     fuzzy: list[dict[str, Any]] = []
     unit_types: list[str] = []
+    supervision_tiers: list[str] = []
     for unit in page.get("evidence_units", []) or []:
         if not isinstance(unit, dict):
             continue
         unit_type = str(unit.get("unit_type", "")).strip()
         if unit_type:
             unit_types.append(unit_type)
+        supervision_tier = str(unit.get("supervision_tier", "")).strip()
+        if supervision_tier:
+            supervision_tiers.append(supervision_tier)
         exact.extend(item for item in unit.get("exact_matches", []) or [] if isinstance(item, dict))
         fuzzy.extend(item for item in unit.get("fuzzy_matches", []) or [] if isinstance(item, dict))
-    return exact, fuzzy, unit_types
+    return exact, fuzzy, unit_types, supervision_tiers
 
 
 def source_set(matches: list[dict[str, Any]]) -> set[str]:
@@ -93,12 +99,15 @@ def source_set(matches: list[dict[str, Any]]) -> set[str]:
 
 
 def page_audit(page: dict[str, Any]) -> dict[str, Any]:
-    exact, fuzzy, unit_types = flatten_page_matches(page)
+    exact, fuzzy, unit_types, unit_supervision_tiers = flatten_page_matches(page)
     exact_sources = source_set(exact)
     fuzzy_sources = source_set(fuzzy)
     all_sources = exact_sources | fuzzy_sources
-    primary_exact = bool(exact_sources & PRIMARY_DIRECT_SOURCES)
-    primary_any = bool(all_sources & PRIMARY_DIRECT_SOURCES)
+    explicit_tier = str(page.get("supervision_tier", "")).strip()
+    visual_proxy = explicit_tier in {"visual_proxy", "mixed_direct_proxy"} or "visual_proxy" in unit_supervision_tiers
+    direct_sources = PRIMARY_DIRECT_SOURCES - ({"image_title"} if visual_proxy else set())
+    primary_exact = bool(exact_sources & direct_sources)
+    primary_any = bool(all_sources & direct_sources)
     any_exact = bool(exact)
     fuzzy_only = bool(fuzzy) and not any_exact
     contextual_only = bool(all_sources) and not primary_any
@@ -112,6 +121,7 @@ def page_audit(page: dict[str, Any]) -> dict[str, Any]:
         "page_idx": page.get("page_idx"),
         "score": page.get("score"),
         "confidence": str(page.get("confidence", "")),
+        "supervision_tier": explicit_tier or "legacy_unspecified",
         "unit_types": sorted(set(unit_types)),
         "unit_count": len(page.get("evidence_units", []) or []),
         "exact_match_count": len(exact),
@@ -126,6 +136,7 @@ def page_audit(page: dict[str, Any]) -> dict[str, Any]:
         "contextual_only": contextual_only,
         "weak_only": weak_only,
         "title_only": title_only,
+        "visual_proxy": visual_proxy,
         "evidence_units": page.get("evidence_units", []) or [],
     }
 
@@ -141,6 +152,8 @@ def audit_tier(
     all_units_mapped = status == "matched_all_units"
     if all_units_mapped and all(page["has_primary_direct_exact"] for page in page_audits):
         return "strong_direct"
+    if all_units_mapped and any(page["visual_proxy"] for page in page_audits):
+        return "complete_hybrid_proxy"
     if all_units_mapped and all(page["has_any_exact"] for page in page_audits):
         return "strong_corroborated"
     if any(page["fuzzy_only"] or page["contextual_only"] for page in page_audits):
@@ -176,6 +189,8 @@ def summarize_row(row: dict[str, Any], current_row: dict[str, Any] | None) -> di
         risk_flags.append("weak_only_page")
     if any(page["title_only"] for page in audits):
         risk_flags.append("title_only_page")
+    if any(page["visual_proxy"] for page in audits):
+        risk_flags.append("visual_proxy_page")
     doc_counts = Counter(page["doc_id"] for page in audits if page["doc_id"])
     if any(count > 1 for count in doc_counts.values()):
         risk_flags.append("multi_page_same_doc")
@@ -187,6 +202,7 @@ def summarize_row(row: dict[str, Any], current_row: dict[str, Any] | None) -> di
         "question": str(row.get("question", "")),
         "question_type": str(row.get("question_type", "")),
         "status": status,
+        "supervision_tier": str(row.get("supervision_tier", "legacy_unspecified")),
         "audit_tier": tier,
         "risk_flags": risk_flags,
         "support_doc_count": len(gold_docs),
@@ -194,6 +210,9 @@ def summarize_row(row: dict[str, Any], current_row: dict[str, Any] | None) -> di
         "support_doc_coverage": (len(covered_docs) / len(gold_docs)) if gold_docs else None,
         "evidence_unit_count": int(row.get("evidence_unit_count", 0) or 0),
         "mapped_evidence_unit_count": int(row.get("mapped_evidence_unit_count", 0) or 0),
+        "evidence_unit_type_counts": row.get("evidence_unit_type_counts", {}) or {},
+        "mapped_evidence_unit_type_counts": row.get("mapped_evidence_unit_type_counts", {}) or {},
+        "unmapped_evidence_unit_type_counts": row.get("unmapped_evidence_unit_type_counts", {}) or {},
         "label_count": label_count,
         "high_label_count": sum(page["confidence"] == "high" for page in audits),
         "medium_label_count": sum(page["confidence"] == "medium" for page in audits),
@@ -201,6 +220,7 @@ def summarize_row(row: dict[str, Any], current_row: dict[str, Any] | None) -> di
         "any_exact_page_count": sum(page["has_any_exact"] for page in audits),
         "fuzzy_only_page_count": sum(page["fuzzy_only"] for page in audits),
         "contextual_only_page_count": sum(page["contextual_only"] for page in audits),
+        "visual_proxy_page_count": sum(page["visual_proxy"] for page in audits),
         "selected_page_uids": selected_uids,
         "current_strict_page_uids": current_uids,
         "page_overlap_with_current": len(set(selected_uids) & set(current_uids)),
@@ -229,6 +249,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "qid",
         "question_type",
         "status",
+        "supervision_tier",
         "audit_tier",
         "risk_flags",
         "support_doc_count",
@@ -243,6 +264,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
         "any_exact_page_count",
         "fuzzy_only_page_count",
         "contextual_only_page_count",
+        "visual_proxy_page_count",
         "selected_page_uids",
         "current_strict_page_uids",
         "page_overlap_with_current",
@@ -264,7 +286,13 @@ def write_md(path: Path, rows: list[dict[str, Any]], max_examples: int) -> None:
     risk_counts = Counter(flag for row in rows for flag in row["risk_flags"])
     source_counts: Counter[str] = Counter()
     exact_source_counts: Counter[str] = Counter()
+    unit_type_counts: Counter[str] = Counter()
+    mapped_unit_type_counts: Counter[str] = Counter()
+    unmapped_unit_type_counts: Counter[str] = Counter()
     for row in rows:
+        unit_type_counts.update(row.get("evidence_unit_type_counts", {}))
+        mapped_unit_type_counts.update(row.get("mapped_evidence_unit_type_counts", {}))
+        unmapped_unit_type_counts.update(row.get("unmapped_evidence_unit_type_counts", {}))
         for page in row["page_audits"]:
             source_counts.update(page["all_sources"])
             exact_source_counts.update(page["exact_sources"])
@@ -287,6 +315,22 @@ def write_md(path: Path, rows: list[dict[str, Any]], max_examples: int) -> None:
     lines.extend(["", "## Risk Flags", "", "| flag | qids |", "| --- | ---: |"])
     for flag, count in risk_counts.most_common():
         lines.append(f"| {flag} | {count} |")
+
+    lines.extend(
+        [
+            "",
+            "## Evidence Unit Mapping by Type",
+            "",
+            "| unit type | total | mapped | unmapped | mapped fraction |",
+            "| --- | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for unit_type in sorted(unit_type_counts):
+        total = unit_type_counts[unit_type]
+        mapped = mapped_unit_type_counts[unit_type]
+        unmapped = unmapped_unit_type_counts[unit_type]
+        fraction = mapped / total if total else 0.0
+        lines.append(f"| {unit_type} | {total} | {mapped} | {unmapped} | {fraction:.2%} |")
 
     lines.extend(["", "## Evidence Sources", "", "| source | pages using source | pages with exact source |", "| --- | ---: | ---: |"])
     for source, count in source_counts.most_common():
