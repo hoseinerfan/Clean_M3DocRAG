@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
 import csv
-import io
 import json
 import sys
 from pathlib import Path
@@ -15,7 +13,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from m3docrag.datasets.m3_docvqa import evaluate_prediction_file
+from m3docrag.datasets.m3_docvqa.evaluate import (
+    MULTI_HOP_QUESTION_TYPES,
+    eval_retrieval,
+    evaluate_predictions,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +54,23 @@ def gold_qid_count(path: Path) -> int:
     return count
 
 
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def load_prediction(path: Path) -> dict[str, dict[str, Any]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise TypeError(f"Prediction file must be a JSON object: {path}")
+    return {str(qid): row for qid, row in payload.items() if isinstance(row, dict)}
+
+
 def pct(value: Any) -> str:
     if value is None:
         return ""
@@ -66,11 +85,39 @@ def recall_at(scores: dict[str, Any], k: int) -> float | None:
 def summarize(label: str, pred_path: Path, gold_path: Path, n_gold: int) -> dict[str, Any]:
     if not pred_path.exists():
         raise FileNotFoundError(f"Missing prediction for {label}: {pred_path}")
-    with contextlib.redirect_stdout(io.StringIO()):
-        scores = evaluate_prediction_file(str(pred_path), str(gold_path))
-    overall = scores.get("overall", {})
-    modalities = scores.get("modalities", {})
-    hops = scores.get("hop_types", {})
+
+    predictions = load_prediction(pred_path)
+    examples = load_jsonl(gold_path)
+    qid2predicted_answers: dict[str, str] = {}
+    qid2retrieval_results: dict[str, list[Any]] = {}
+    for qid, row in predictions.items():
+        qid2predicted_answers[qid] = str(row.get("pred_answer", "")).strip()
+        qid2retrieval_results[qid] = row.get("page_retrieval_results", [])
+
+    gold_answers: dict[str, list[list[str]]] = {}
+    answer_modalities: dict[str, str] = {}
+    hop_types: dict[str, str] = {}
+    for example in examples:
+        qid = str(example["qid"])
+        gold_answer = [str(item["answer"]) for item in example["answers"]]
+        gold_answers[qid] = [gold_answer]
+        answer_modality = {str(item["modality"]) for item in example["answers"]}
+        if len(answer_modality) != 1:
+            raise ValueError(f"Expected one answer modality for {qid}, got {sorted(answer_modality)}")
+        answer_modalities[qid] = answer_modality.pop()
+        qtype = str(example["metadata"]["type"])
+        hop_types[qid] = "Multi-hop" if qtype in MULTI_HOP_QUESTION_TYPES else "Single-hop"
+
+    retrieval_scores = eval_retrieval(qid2retrieval_results, examples)
+    overall, _ = evaluate_predictions(qid2predicted_answers, gold_answers)
+    _, _, modalities = evaluate_predictions(qid2predicted_answers, gold_answers, answer_modalities)
+    _, _, hops = evaluate_predictions(qid2predicted_answers, gold_answers, hop_types)
+    scores = {
+        "overall": overall,
+        "modalities": modalities,
+        "hop_types": hops,
+        "average_recall_at_k": retrieval_scores.get("average_recall_at_k", {}),
+    }
     return {
         "label": label,
         "prediction_path": str(pred_path),
