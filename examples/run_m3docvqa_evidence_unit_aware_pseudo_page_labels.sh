@@ -12,7 +12,18 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 SPLIT="${SPLIT:-dev}"
 DATA_ROOT="${M3DOCVQA_DATA_ROOT:-$REPO_ROOT/data/m3-docvqa}"
 GOLD="${GOLD:-$DATA_ROOT/multimodalqa/MMQA_${SPLIT}.jsonl}"
-DOC_PAGES_JSONL="${DOC_PAGES_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-${LOCAL_OUTPUT_DIR:-$REPO_ROOT/output}/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl}}"
+case "$SPLIT" in
+  train)
+    DEFAULT_DOC_PAGES_JSONL="${M3DOCVQA_TRAIN_PAGE_TEXT_JSONL:-${LOCAL_OUTPUT_DIR:-$REPO_ROOT/output}/m3docvqa_page_text/m3docvqa_train_page_text.jsonl}"
+    ;;
+  dev)
+    DEFAULT_DOC_PAGES_JSONL="${M3DOCVQA_DEV_PAGE_TEXT_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-${LOCAL_OUTPUT_DIR:-$REPO_ROOT/output}/m3docvqa_page_text/m3docvqa_dev_page_text.jsonl}}"
+    ;;
+  *)
+    DEFAULT_DOC_PAGES_JSONL="${LOCAL_OUTPUT_DIR:-$REPO_ROOT/output}/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl"
+    ;;
+esac
+DOC_PAGES_JSONL="${DOC_PAGES_JSONL:-$DEFAULT_DOC_PAGES_JSONL}"
 MMQA_TEXTS_JSONL="${MMQA_TEXTS_JSONL:-$DATA_ROOT/multimodalqa/MMQA_texts.jsonl}"
 MMQA_TABLES_JSONL="${MMQA_TABLES_JSONL:-$DATA_ROOT/multimodalqa/MMQA_tables.jsonl}"
 MMQA_IMAGES_JSONL="${MMQA_IMAGES_JSONL:-$DATA_ROOT/multimodalqa/MMQA_images.jsonl}"
