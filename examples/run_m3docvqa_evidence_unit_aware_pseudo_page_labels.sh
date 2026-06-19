@@ -27,7 +27,11 @@ MAX_PAGES_PER_DOC="${MAX_PAGES_PER_DOC:-3}"
 MIN_TOKEN_OVERLAP="${MIN_TOKEN_OVERLAP:-0.72}"
 INCLUDE_QUESTION_CONTEXT_SIGNALS="${INCLUDE_QUESTION_CONTEXT_SIGNALS:-0}"
 REQUIRE_ALL_UNITS_MAPPED="${REQUIRE_ALL_UNITS_MAPPED:-0}"
+REQUIRE_ALL_SUPPORT_DOCS_COVERED="${REQUIRE_ALL_SUPPORT_DOCS_COVERED:-0}"
 ALLOW_FUZZY_ONLY_MEDIUM="${ALLOW_FUZZY_ONLY_MEDIUM:-0}"
+DEDUPLICATE_NORMALIZED_PHRASES="${DEDUPLICATE_NORMALIZED_PHRASES:-0}"
+REQUIRE_DIRECT_EVIDENCE_GATE="${REQUIRE_DIRECT_EVIDENCE_GATE:-0}"
+DIRECT_FUZZY_OVERLAP="${DIRECT_FUZZY_OVERLAP:-0.90}"
 
 mkdir -p "$OUT_DIR"
 
@@ -56,6 +60,7 @@ args=(
   --top-pages-per-qid "$TOP_PAGES_PER_QID"
   --max-pages-per-doc "$MAX_PAGES_PER_DOC"
   --min-token-overlap "$MIN_TOKEN_OVERLAP"
+  --direct-fuzzy-overlap "$DIRECT_FUZZY_OVERLAP"
   --output-jsonl "$OUT_DIR/${LABEL}.jsonl"
   --output-summary-json "$OUT_DIR/${LABEL}.summary.json"
   --output-augmented-gold-jsonl "$OUT_DIR/${LABEL}.augmented_gold.jsonl"
@@ -67,8 +72,17 @@ fi
 if [[ "$REQUIRE_ALL_UNITS_MAPPED" == "1" ]]; then
   args+=(--require-all-units-mapped)
 fi
+if [[ "$REQUIRE_ALL_SUPPORT_DOCS_COVERED" == "1" ]]; then
+  args+=(--require-all-support-docs-covered)
+fi
 if [[ "$ALLOW_FUZZY_ONLY_MEDIUM" == "1" ]]; then
   args+=(--allow-fuzzy-only-medium)
+fi
+if [[ "$DEDUPLICATE_NORMALIZED_PHRASES" == "1" ]]; then
+  args+=(--deduplicate-normalized-phrases)
+fi
+if [[ "$REQUIRE_DIRECT_EVIDENCE_GATE" == "1" ]]; then
+  args+=(--require-direct-evidence-gate)
 fi
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/build_mmqa_evidence_unit_aware_pseudo_page_labels.py" "${args[@]}"

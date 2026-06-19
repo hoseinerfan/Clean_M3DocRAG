@@ -34,6 +34,7 @@ class UnitPageMatch:
     doc_id: str
     page_idx: int
     score: float
+    direct_gate: str = ""
     exact_matches: list[dict[str, Any]] = field(default_factory=list)
     fuzzy_matches: list[dict[str, Any]] = field(default_factory=list)
 
@@ -98,6 +99,38 @@ def parse_args() -> argparse.Namespace:
             "maps to at least one page above threshold."
         ),
     )
+    parser.add_argument(
+        "--require-all-support-docs-covered",
+        action="store_true",
+        help=(
+            "Leave the QID unlabeled unless selected pages cover every original "
+            "MMQA supporting document. Intended for high-precision training labels."
+        ),
+    )
+    parser.add_argument(
+        "--deduplicate-normalized-phrases",
+        action="store_true",
+        help=(
+            "Within each evidence unit, count each normalized phrase once and "
+            "retain only its strongest source weight. This prevents repeated "
+            "titles or answer strings from inflating confidence."
+        ),
+    )
+    parser.add_argument(
+        "--require-direct-evidence-gate",
+        action="store_true",
+        help=(
+            "Require the page to match the unit's direct evidence source: "
+            "text_instance, table_answer_cell, or image_title. Context and title "
+            "signals can rank eligible pages but cannot make a page eligible."
+        ),
+    )
+    parser.add_argument(
+        "--direct-fuzzy-overlap",
+        type=float,
+        default=0.90,
+        help="Minimum overlap for a fuzzy direct-evidence match to pass the direct gate.",
+    )
     parser.add_argument("--output-jsonl", required=True)
     parser.add_argument("--output-summary-json", required=True)
     parser.add_argument("--output-augmented-gold-jsonl", default="")
@@ -156,6 +189,22 @@ def context_evidence_for_doc(
     return evidence
 
 
+def deduplicate_evidence_phrases(evidence: list[base.Evidence]) -> list[base.Evidence]:
+    best_by_phrase: dict[str, base.Evidence] = {}
+    insertion_order: list[str] = []
+    for item in evidence:
+        normalized = base.normalize_text(item.text)
+        if not normalized:
+            continue
+        if normalized not in best_by_phrase:
+            best_by_phrase[normalized] = item
+            insertion_order.append(normalized)
+            continue
+        if float(item.weight) > float(best_by_phrase[normalized].weight):
+            best_by_phrase[normalized] = item
+    return [best_by_phrase[key] for key in insertion_order]
+
+
 def evidence_units_for_row(
     row: dict[str, Any],
     *,
@@ -165,6 +214,7 @@ def evidence_units_for_row(
     id_map: dict[str, dict[str, Any]],
     url_to_id: dict[str, str],
     include_question_context_signals: bool,
+    deduplicate_normalized_phrases: bool,
 ) -> list[EvidenceUnit]:
     qid = str(row.get("qid", "")).strip()
     table_id = table_id_for_row(row)
@@ -191,12 +241,15 @@ def evidence_units_for_row(
             include_question_context_signals=include_question_context_signals,
         )
         unit_id = f"{qid}::unit{len(units)}"
+        combined_evidence = unit_evidence + context
+        if deduplicate_normalized_phrases:
+            combined_evidence = deduplicate_evidence_phrases(combined_evidence)
         units.append(
             EvidenceUnit(
                 unit_id=unit_id,
                 unit_type=unit_type,
                 doc_id=clean_doc_id,
-                evidence=tuple(unit_evidence + context),
+                evidence=tuple(combined_evidence),
                 metadata=metadata,
             )
         )
@@ -315,7 +368,15 @@ def score_unit_pages(
     high_confidence_score: float,
     min_token_overlap: float,
     require_exact_or_high_confidence_fuzzy: bool,
+    require_direct_evidence_gate: bool,
+    direct_fuzzy_overlap: float,
 ) -> list[UnitPageMatch]:
+    direct_sources_by_unit_type = {
+        "text_instance": {"text_instance"},
+        "table_cell": {"table_answer_cell"},
+        "image_instance": {"image_title"},
+    }
+    direct_sources = direct_sources_by_unit_type.get(unit.unit_type, set())
     matches: list[UnitPageMatch] = []
     for page in pages_by_doc.get(unit.doc_id, []):
         score = 0.0
@@ -335,6 +396,14 @@ def score_unit_pages(
                 )
         if score < float(min_score):
             continue
+        direct_exact = any(str(item.get("source", "")) in direct_sources for item in exact_matches)
+        direct_fuzzy = any(
+            str(item.get("source", "")) in direct_sources
+            and float(item.get("overlap", 0.0)) >= float(direct_fuzzy_overlap)
+            for item in fuzzy_matches
+        )
+        if require_direct_evidence_gate and not (direct_exact or direct_fuzzy):
+            continue
         if require_exact_or_high_confidence_fuzzy and not exact_matches and score < float(high_confidence_score):
             continue
         matches.append(
@@ -344,6 +413,7 @@ def score_unit_pages(
                 doc_id=unit.doc_id,
                 page_idx=int(page["page_idx"]),
                 score=float(score),
+                direct_gate="exact" if direct_exact else ("fuzzy" if direct_fuzzy else "not_required"),
                 exact_matches=exact_matches,
                 fuzzy_matches=fuzzy_matches,
             )
@@ -417,6 +487,7 @@ def page_label_record(
                 "unit_type": item.unit.unit_type,
                 "doc_id": item.unit.doc_id,
                 "score": round(float(item.score), 6),
+                "direct_gate": item.direct_gate,
                 "metadata": item.unit.metadata,
                 "exact_matches": item.exact_matches[:20],
                 "fuzzy_matches": item.fuzzy_matches[:20],
@@ -526,6 +597,7 @@ def main() -> None:
                     id_map=id_map,
                     url_to_id=url_to_id,
                     include_question_context_signals=bool(args.include_question_context_signals),
+                    deduplicate_normalized_phrases=bool(args.deduplicate_normalized_phrases),
                 )
                 unit_type_counts.update(unit.unit_type for unit in units)
                 evidence_unit_count += len(units)
@@ -540,14 +612,18 @@ def main() -> None:
                         high_confidence_score=float(args.high_confidence_score),
                         min_token_overlap=float(args.min_token_overlap),
                         require_exact_or_high_confidence_fuzzy=bool(args.require_exact_or_high_confidence_fuzzy),
+                        require_direct_evidence_gate=bool(args.require_direct_evidence_gate),
+                        direct_fuzzy_overlap=float(args.direct_fuzzy_overlap),
                     )
                     if unit_matches:
                         mapped_unit_ids.add(unit.unit_id)
                         best_unit_matches.append(unit_matches[0])
                 mapped_evidence_unit_count += len(mapped_unit_ids)
 
+                forced_status = ""
                 if args.require_all_units_mapped and len(mapped_unit_ids) != len(units):
                     selected: list[PageLabel] = []
+                    forced_status = "excluded_incomplete_evidence_unit_mapping"
                 else:
                     selected = merge_unit_matches(
                         best_unit_matches,
@@ -555,7 +631,12 @@ def main() -> None:
                         top_pages_per_qid=int(args.top_pages_per_qid),
                     )
 
-                status = status_for(selected, units, mapped_unit_ids, missing_docs)
+                selected_docs = {item.doc_id for item in selected}
+                if args.require_all_support_docs_covered and not set(gold_docs).issubset(selected_docs):
+                    selected = []
+                    forced_status = "excluded_incomplete_support_doc_coverage"
+
+                status = forced_status or status_for(selected, units, mapped_unit_ids, missing_docs)
                 status_counts[status] += 1
                 label_counts.append(len(selected))
                 if selected:
@@ -599,6 +680,10 @@ def main() -> None:
                         "require_exact_or_high_confidence_fuzzy": bool(args.require_exact_or_high_confidence_fuzzy),
                         "include_question_context_signals": bool(args.include_question_context_signals),
                         "require_all_units_mapped": bool(args.require_all_units_mapped),
+                        "require_all_support_docs_covered": bool(args.require_all_support_docs_covered),
+                        "deduplicate_normalized_phrases": bool(args.deduplicate_normalized_phrases),
+                        "require_direct_evidence_gate": bool(args.require_direct_evidence_gate),
+                        "direct_fuzzy_overlap": float(args.direct_fuzzy_overlap),
                     },
                 }
                 out_handle.write(json.dumps(output_row, ensure_ascii=False) + "\n")
@@ -637,6 +722,10 @@ def main() -> None:
         "require_exact_or_high_confidence_fuzzy": bool(args.require_exact_or_high_confidence_fuzzy),
         "include_question_context_signals": bool(args.include_question_context_signals),
         "require_all_units_mapped": bool(args.require_all_units_mapped),
+        "require_all_support_docs_covered": bool(args.require_all_support_docs_covered),
+        "deduplicate_normalized_phrases": bool(args.deduplicate_normalized_phrases),
+        "require_direct_evidence_gate": bool(args.require_direct_evidence_gate),
+        "direct_fuzzy_overlap": float(args.direct_fuzzy_overlap),
         "output_jsonl": str(output_path),
         "output_augmented_gold_jsonl": str(augmented_path) if augmented_path else "",
     }
