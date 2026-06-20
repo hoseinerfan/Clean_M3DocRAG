@@ -239,6 +239,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--candidate-top-k", type=int, default=1000)
     parser.add_argument("--negatives-per-band", type=int, default=10)
     parser.add_argument("--max-negatives-per-qid", type=int, default=64)
+    parser.add_argument(
+        "--respect-pseudo-supervision-tiers",
+        action="store_true",
+        help=(
+            "Honor evidence-unit-aware pseudo-label metadata. QIDs marked exclude_unlabeled "
+            "are skipped, *_positive_only tiers contribute positives without same-query "
+            "negatives, and non_support_docs_only negative scopes avoid support-doc pages."
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -817,6 +826,43 @@ def gold_doc_ids(row: dict[str, Any]) -> set[str]:
     return docs
 
 
+def support_doc_ids(row: dict[str, Any]) -> set[str]:
+    docs = set()
+    for ctx in row.get("supporting_context", []):
+        if isinstance(ctx, dict) and ctx.get("doc_id"):
+            docs.add(str(ctx["doc_id"]).strip())
+    return docs or gold_doc_ids(row)
+
+
+def pseudo_supervision_metadata(row: dict[str, Any]) -> dict[str, Any]:
+    metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
+    return metadata
+
+
+def qid_supervision_tier(row: dict[str, Any]) -> str:
+    metadata = pseudo_supervision_metadata(row)
+    return str(
+        metadata.get("pseudo_gold_qid_supervision_tier")
+        or metadata.get("vlm_training_tier")
+        or row.get("supervision_tier")
+        or ""
+    ).strip()
+
+
+def negative_supervision_scope(row: dict[str, Any]) -> str:
+    metadata = pseudo_supervision_metadata(row)
+    return str(
+        metadata.get("pseudo_gold_negative_supervision_scope")
+        or metadata.get("negative_supervision_scope")
+        or row.get("negative_supervision_scope")
+        or ""
+    ).strip()
+
+
+def is_positive_only_supervision_tier(tier: str) -> bool:
+    return "positive_only" in tier
+
+
 def split_gold_for_tuning(
     gold: dict[str, dict[str, Any]],
     *,
@@ -836,7 +882,14 @@ def split_gold_for_tuning(
     return fit, tune
 
 
-def pick_negative_indices(records: list[dict[str, Any]], positive_uids: set[str], args: argparse.Namespace) -> list[int]:
+def pick_negative_indices(
+    records: list[dict[str, Any]],
+    positive_uids: set[str],
+    args: argparse.Namespace,
+    *,
+    excluded_doc_ids: set[str] | None = None,
+) -> list[int]:
+    excluded_doc_ids = excluded_doc_ids or set()
     negative_indices: list[int] = []
     used: set[int] = set()
     bands = [
@@ -850,7 +903,14 @@ def pick_negative_indices(records: list[dict[str, Any]], positive_uids: set[str]
         count = 0
         for idx, record in enumerate(records):
             rank = int(record["base_rank"])
-            if rank < lo or rank > hi or record["uid"] in positive_uids or idx in used:
+            doc_id = str(record.get("doc_id", "")).strip()
+            if (
+                rank < lo
+                or rank > hi
+                or record["uid"] in positive_uids
+                or idx in used
+                or doc_id in excluded_doc_ids
+            ):
                 continue
             negative_indices.append(idx)
             used.add(idx)
@@ -876,11 +936,29 @@ def build_matrix(
     qid_with_positive_in_pool = 0
     skipped_no_page_gold = 0
     skipped_no_positive_in_pool = 0
+    skipped_exclude_unlabeled_tier = 0
+    skipped_no_negative_rows = 0
+    positive_only_qid_count = 0
+    qid_with_negative_rows = 0
+    qid_without_negative_rows = 0
     positive_count = 0
     negative_count = 0
+    supervision_tier_counts: Counter[str] = Counter()
+    negative_scope_counts: Counter[str] = Counter()
+    negative_excluded_support_doc_qids = 0
 
     rng = random.Random(int(args.seed))
+    respect_tiers = bool(getattr(args, "respect_pseudo_supervision_tiers", False))
     for qid, gold_row in gold.items():
+        tier = qid_supervision_tier(gold_row)
+        if tier:
+            supervision_tier_counts[tier] += 1
+        scope = negative_supervision_scope(gold_row)
+        if scope:
+            negative_scope_counts[scope] += 1
+        if respect_tiers and tier == "exclude_unlabeled":
+            skipped_exclude_unlabeled_tier += 1
+            continue
         positive_uids = gold_page_uids(gold_row)
         if not positive_uids:
             skipped_no_page_gold += 1
@@ -895,8 +973,28 @@ def build_matrix(
             skipped_no_positive_in_pool += 1
             continue
         qid_with_positive_in_pool += 1
-        negative_indices = pick_negative_indices(records, positive_uids, args)
-        if not negative_indices:
+        positive_only_tier = respect_tiers and is_positive_only_supervision_tier(tier)
+        negative_indices: list[int] = []
+        if positive_only_tier:
+            positive_only_qid_count += 1
+        else:
+            excluded_doc_ids: set[str] = set()
+            if respect_tiers and scope == "non_support_docs_only":
+                excluded_doc_ids = support_doc_ids(gold_row)
+                if excluded_doc_ids:
+                    negative_excluded_support_doc_qids += 1
+            negative_indices = pick_negative_indices(
+                records,
+                positive_uids,
+                args,
+                excluded_doc_ids=excluded_doc_ids,
+            )
+        if negative_indices:
+            qid_with_negative_rows += 1
+        else:
+            qid_without_negative_rows += 1
+        if not negative_indices and not respect_tiers:
+            skipped_no_negative_rows += 1
             continue
         rng.shuffle(negative_indices)
         negative_indices = negative_indices[: int(args.max_negatives_per_qid)]
@@ -948,9 +1046,18 @@ def build_matrix(
         "train_qid_with_positive_in_pool": int(qid_with_positive_in_pool),
         "skipped_no_page_gold": int(skipped_no_page_gold),
         "skipped_no_positive_in_pool": int(skipped_no_positive_in_pool),
+        "skipped_exclude_unlabeled_tier": int(skipped_exclude_unlabeled_tier),
+        "skipped_no_negative_rows": int(skipped_no_negative_rows),
+        "positive_only_qid_count": int(positive_only_qid_count),
+        "qid_with_negative_rows": int(qid_with_negative_rows),
+        "qid_without_negative_rows": int(qid_without_negative_rows),
         "positive_count": int(positive_count),
         "negative_count": int(negative_count),
         "row_count": int(len(vectors)),
+        "respect_pseudo_supervision_tiers": bool(respect_tiers),
+        "negative_excluded_support_doc_qids": int(negative_excluded_support_doc_qids),
+        "supervision_tier_counts": dict(sorted(supervision_tier_counts.items())),
+        "negative_scope_counts": dict(sorted(negative_scope_counts.items())),
     }
     return np.asarray(vectors, dtype=np.float32), np.asarray(labels, dtype=np.float32), metadata
 
@@ -3052,6 +3159,7 @@ def main() -> None:
             "alpha_utility_threshold_grid": str(args.alpha_utility_threshold_grid),
             "alpha_utility_risk_penalty_grid": str(args.alpha_utility_risk_penalty_grid),
             "feature_set": args.feature_set,
+            "respect_pseudo_supervision_tiers": bool(args.respect_pseudo_supervision_tiers),
         },
     }
     output_model_json = Path(args.output_model_json)

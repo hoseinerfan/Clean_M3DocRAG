@@ -3,6 +3,7 @@ import json
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 
 
@@ -19,6 +20,93 @@ SPEC.loader.exec_module(MODULE)
 class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
     def write_jsonl(self, path: Path, rows: list[dict]) -> None:
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    def test_build_matrix_respects_evidence_unit_supervision_tiers(self) -> None:
+        gold = {
+            "q_complete": {
+                "qid": "q_complete",
+                "question": "Where is the complete evidence?",
+                "supporting_context": [{"doc_id": "docA", "doc_part": "text"}],
+                "metadata": {
+                    "gold_page_uids": ["docA_page0"],
+                    "pseudo_gold_qid_supervision_tier": "complete_direct",
+                    "pseudo_gold_negative_supervision_scope": "non_support_docs_only",
+                },
+            },
+            "q_positive_only": {
+                "qid": "q_positive_only",
+                "question": "Where is the partial evidence?",
+                "supporting_context": [{"doc_id": "docB", "doc_part": "text"}],
+                "metadata": {
+                    "gold_page_uids": ["docB_page0"],
+                    "pseudo_gold_qid_supervision_tier": "partial_direct_positive_only",
+                    "pseudo_gold_negative_supervision_scope": "non_support_docs_only",
+                },
+            },
+            "q_exclude": {
+                "qid": "q_exclude",
+                "question": "Where is the excluded evidence?",
+                "supporting_context": [{"doc_id": "docC", "doc_part": "text"}],
+                "metadata": {
+                    "gold_page_uids": ["docC_page0"],
+                    "pseudo_gold_qid_supervision_tier": "exclude_unlabeled",
+                    "pseudo_gold_negative_supervision_scope": "non_support_docs_only",
+                },
+            },
+        }
+        base_pred = {
+            "q_complete": {
+                "qid": "q_complete",
+                "page_retrieval_results": [
+                    ["docA", 0, 10.0],
+                    ["docA", 1, 9.0],
+                    ["docNoise", 0, 8.0],
+                ],
+            },
+            "q_positive_only": {
+                "qid": "q_positive_only",
+                "page_retrieval_results": [
+                    ["docB", 0, 10.0],
+                    ["docB", 1, 9.0],
+                    ["docOther", 0, 8.0],
+                ],
+            },
+            "q_exclude": {
+                "qid": "q_exclude",
+                "page_retrieval_results": [
+                    ["docC", 0, 10.0],
+                    ["docOther", 1, 9.0],
+                ],
+            },
+        }
+        args = Namespace(
+            candidate_top_k=4,
+            negatives_per_band=3,
+            max_negatives_per_qid=3,
+            seed=13,
+            active_feature_names=MODULE.FEATURE_NAMES,
+            respect_pseudo_supervision_tiers=True,
+        )
+
+        _X, y, metadata = MODULE.build_matrix(
+            gold=gold,
+            base_pred=base_pred,
+            page_features={},
+            source_maps_by_label={},
+            args=args,
+        )
+
+        self.assertEqual(int(y.sum()), 2)
+        self.assertEqual(metadata["positive_count"], 2)
+        self.assertEqual(metadata["negative_count"], 1)
+        self.assertEqual(metadata["positive_only_qid_count"], 1)
+        self.assertEqual(metadata["skipped_exclude_unlabeled_tier"], 1)
+        self.assertEqual(metadata["negative_excluded_support_doc_qids"], 1)
+        self.assertEqual(metadata["qid_with_negative_rows"], 1)
+        self.assertEqual(metadata["qid_without_negative_rows"], 1)
+        self.assertEqual(metadata["supervision_tier_counts"]["complete_direct"], 1)
+        self.assertEqual(metadata["supervision_tier_counts"]["partial_direct_positive_only"], 1)
+        self.assertEqual(metadata["supervision_tier_counts"]["exclude_unlabeled"], 1)
 
     def test_content_reranker_promotes_question_matching_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

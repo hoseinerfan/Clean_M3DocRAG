@@ -148,6 +148,11 @@ if [[ "${QUERY_ALPHA_CONTINUOUS:-0}" == "1" ]]; then
   auto_tune_args+=(--query-alpha-continuous)
 fi
 
+supervision_tier_args=()
+if [[ "${RESPECT_PSEUDO_SUPERVISION_TIERS:-0}" == "1" ]]; then
+  supervision_tier_args+=(--respect-pseudo-supervision-tiers)
+fi
+
 echo "using_train_gold=$TRAIN_GOLD"
 echo "using_eval_gold=$EVAL_GOLD"
 echo "using_train_page_text_jsonl=$TRAIN_PAGE_TEXT_JSONL"
@@ -163,6 +168,7 @@ echo "using_learned_query_alpha=${LEARNED_QUERY_ALPHA:-0}"
 echo "using_learned_alpha_action=${LEARNED_ALPHA_ACTION:-0}"
 echo "using_learned_alpha_utility_gate=${LEARNED_ALPHA_UTILITY_GATE:-0}"
 echo "using_base_aware_alpha_utility_gate=${BASE_AWARE_ALPHA_UTILITY_GATE:-0}"
+echo "using_respect_pseudo_supervision_tiers=${RESPECT_PSEUDO_SUPERVISION_TIERS:-0}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -186,6 +192,7 @@ echo "using_base_aware_alpha_utility_gate=${BASE_AWARE_ALPHA_UTILITY_GATE:-0}"
   --inference-mode "${INFERENCE_MODE:-blend_rerank}" \
   --blend-alpha "${BLEND_ALPHA:-0.30}" \
   "${auto_tune_args[@]}" \
+  "${supervision_tier_args[@]}" \
   --tune-fraction "${TUNE_FRACTION:-0.20}" \
   --tune-blend-alpha-grid "${TUNE_BLEND_ALPHA_GRID:-0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50}" \
   --tune-hit-k "${TUNE_HIT_K:-4}" \
