@@ -27,6 +27,10 @@ MIN_TOKEN_OVERLAP="${MIN_TOKEN_OVERLAP:-0.72}"
 SELECTION_POLICY="${SELECTION_POLICY:-score}"
 COVERAGE_MIN_MATCH_WEIGHT="${COVERAGE_MIN_MATCH_WEIGHT:-3.0}"
 EVIDENCE_WEIGHT_OVERRIDES="${EVIDENCE_WEIGHT_OVERRIDES:-}"
+TEXT_INSTANCE_CONTEXT_WINDOW_CHARS="${TEXT_INSTANCE_CONTEXT_WINDOW_CHARS:-0}"
+TEXT_INSTANCE_CONTEXT_MAX_PHRASES="${TEXT_INSTANCE_CONTEXT_MAX_PHRASES:-6}"
+TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT="${TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT:-4}"
+TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN="${TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN:-4}"
 
 mkdir -p "$OUT_DIR"
 
@@ -41,6 +45,10 @@ echo "using_label=$LABEL"
 echo "using_selection_policy=$SELECTION_POLICY"
 echo "using_coverage_min_match_weight=$COVERAGE_MIN_MATCH_WEIGHT"
 echo "using_evidence_weight_overrides=$EVIDENCE_WEIGHT_OVERRIDES"
+echo "using_text_instance_context_window_chars=$TEXT_INSTANCE_CONTEXT_WINDOW_CHARS"
+echo "using_text_instance_context_max_phrases=$TEXT_INSTANCE_CONTEXT_MAX_PHRASES"
+echo "using_text_instance_context_phrase_token_count=$TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT"
+echo "using_text_instance_context_min_token_len=$TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/build_mmqa_pseudo_page_labels.py" \
   --gold "$GOLD" \
@@ -56,6 +64,10 @@ echo "using_evidence_weight_overrides=$EVIDENCE_WEIGHT_OVERRIDES"
   --selection-policy "$SELECTION_POLICY" \
   --coverage-min-match-weight "$COVERAGE_MIN_MATCH_WEIGHT" \
   --evidence-weight-overrides "$EVIDENCE_WEIGHT_OVERRIDES" \
+  --text-instance-context-window-chars "$TEXT_INSTANCE_CONTEXT_WINDOW_CHARS" \
+  --text-instance-context-max-phrases "$TEXT_INSTANCE_CONTEXT_MAX_PHRASES" \
+  --text-instance-context-phrase-token-count "$TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT" \
+  --text-instance-context-min-token-len "$TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN" \
   --output-jsonl "$OUT_DIR/${LABEL}.jsonl" \
   --output-summary-json "$OUT_DIR/${LABEL}.summary.json" \
   --output-augmented-gold-jsonl "$OUT_DIR/${LABEL}.augmented_gold.jsonl"

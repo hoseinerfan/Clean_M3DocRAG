@@ -237,6 +237,108 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
         )
         self.assertNotIn("docA_page2", {item.page_uid for item in selected})
 
+    def test_text_instance_start_byte_context_breaks_page_tie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gold = root / "MMQA_dev.jsonl"
+            pages = root / "page_text.jsonl"
+            texts = root / "MMQA_texts.jsonl"
+            out = root / "labels.jsonl"
+            summary = root / "summary.json"
+            augmented = root / "augmented.jsonl"
+
+            full_text = (
+                "Introductory material. target answer alpha river mountain canyon "
+                "contains the local evidence context."
+            )
+            start_byte = len("Introductory material. ".encode("utf-8"))
+
+            self.write_jsonl(
+                gold,
+                [
+                    {
+                        "qid": "q_context",
+                        "question": "Which page contains the target answer?",
+                        "answers": [
+                            {
+                                "answer": "target answer",
+                                "text_instances": [
+                                    {
+                                        "doc_id": "text_doc",
+                                        "text": "target answer",
+                                        "start_byte": start_byte,
+                                    }
+                                ],
+                                "table_indices": [],
+                                "image_instances": [],
+                            }
+                        ],
+                        "metadata": {"type": "TextQ"},
+                        "supporting_context": [{"doc_id": "text_doc", "doc_part": "text"}],
+                    }
+                ],
+            )
+            self.write_jsonl(
+                pages,
+                [
+                    {"doc_id": "text_doc", "page_idx": 0, "text": "target answer appears in a generic note."},
+                    {
+                        "doc_id": "text_doc",
+                        "page_idx": 1,
+                        "text": "target answer alpha river mountain canyon contains the local evidence context.",
+                    },
+                ],
+            )
+            self.write_jsonl(
+                texts,
+                [
+                    {
+                        "id": "text_doc",
+                        "title": "Text Document",
+                        "url": "https://en.wikipedia.org/wiki/Text_Document",
+                        "text": full_text,
+                    }
+                ],
+            )
+
+            old_argv = sys.argv
+            try:
+                sys.argv = [
+                    "build_mmqa_pseudo_page_labels.py",
+                    "--gold",
+                    str(gold),
+                    "--doc-pages-jsonl",
+                    str(pages),
+                    "--mmqa-texts-jsonl",
+                    str(texts),
+                    "--min-score",
+                    "8",
+                    "--top-pages-per-doc",
+                    "1",
+                    "--top-pages-per-qid",
+                    "4",
+                    "--text-instance-context-window-chars",
+                    "80",
+                    "--text-instance-context-max-phrases",
+                    "2",
+                    "--text-instance-context-phrase-token-count",
+                    "4",
+                    "--output-jsonl",
+                    str(out),
+                    "--output-summary-json",
+                    str(summary),
+                    "--output-augmented-gold-jsonl",
+                    str(augmented),
+                ]
+                MODULE.main()
+            finally:
+                sys.argv = old_argv
+
+            row = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(row["pseudo_gold_page_uids"], ["text_doc_page1"])
+            sources = row["evidence_source_counts"]
+            self.assertGreater(sources.get("text_instance_context", 0), 0)
+
     def test_evidence_weight_overrides_update_selected_sources_only(self) -> None:
         weights = MODULE.parse_evidence_weight_overrides(
             "question_entity=0,pseudo_question_slot=0,supporting_doc_title=2.5"

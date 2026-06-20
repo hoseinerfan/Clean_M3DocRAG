@@ -15,6 +15,7 @@ from typing import Any
 DEFAULT_EVIDENCE_WEIGHTS: dict[str, float] = {
     "answer_text": 5.0,
     "text_instance": 9.0,
+    "text_instance_context": 2.0,
     "image_title": 7.0,
     "image_doc_title": 4.0,
     "table_title": 4.0,
@@ -74,6 +75,34 @@ def parse_args() -> argparse.Namespace:
             "'question_entity=0,pseudo_question_slot=0,supporting_doc_title=2'. "
             "Unspecified evidence sources keep their default weights."
         ),
+    )
+    parser.add_argument(
+        "--text-instance-context-window-chars",
+        type=int,
+        default=0,
+        help=(
+            "If positive, add weak contextual evidence phrases from MMQA_texts around "
+            "text_instances[].start_byte. The default keeps the original strict labels "
+            "unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--text-instance-context-max-phrases",
+        type=int,
+        default=6,
+        help="Maximum context phrases to add per text instance when start_byte context is enabled.",
+    )
+    parser.add_argument(
+        "--text-instance-context-phrase-token-count",
+        type=int,
+        default=4,
+        help="Number of content tokens per text-instance context phrase.",
+    )
+    parser.add_argument(
+        "--text-instance-context-min-token-len",
+        type=int,
+        default=4,
+        help="Minimum normalized token length used in text-instance context phrases.",
     )
     parser.add_argument("--output-jsonl", required=True)
     parser.add_argument("--output-summary-json", required=True)
@@ -265,6 +294,125 @@ def tokenize(text: str) -> list[str]:
     return re.findall(r"[a-z0-9]+", normalize_text(text))
 
 
+CONTEXT_STOPWORDS = {
+    "about",
+    "after",
+    "also",
+    "among",
+    "because",
+    "before",
+    "being",
+    "between",
+    "during",
+    "from",
+    "have",
+    "into",
+    "that",
+    "their",
+    "there",
+    "these",
+    "they",
+    "this",
+    "through",
+    "where",
+    "which",
+    "while",
+    "with",
+    "would",
+}
+
+
+def text_document_body(row: dict[str, Any]) -> str:
+    for key in ("text", "content", "paragraphs"):
+        value = row.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, list):
+            parts = [str(item).strip() for item in value if str(item).strip()]
+            if parts:
+                return "\n".join(parts)
+    return ""
+
+
+def byte_offset_to_char_index(text: str, start_byte: Any) -> int | None:
+    try:
+        offset = int(start_byte)
+    except (TypeError, ValueError):
+        return None
+    if offset < 0:
+        return None
+    encoded = text.encode("utf-8")
+    offset = min(offset, len(encoded))
+    return len(encoded[:offset].decode("utf-8", errors="ignore"))
+
+
+def text_instance_context_window(
+    *,
+    text_row: dict[str, Any],
+    start_byte: Any,
+    instance_text: str,
+    window_chars: int,
+) -> str:
+    full_text = text_document_body(text_row)
+    if not full_text or int(window_chars) <= 0:
+        return ""
+    char_idx = byte_offset_to_char_index(full_text, start_byte)
+    if char_idx is None:
+        normalized_instance = normalize_text(instance_text)
+        normalized_full = normalize_text(full_text)
+        if not normalized_instance:
+            return ""
+        approx = normalized_full.find(normalized_instance)
+        if approx < 0:
+            return ""
+        char_idx = approx
+    start = max(0, int(char_idx) - int(window_chars))
+    end = min(len(full_text), int(char_idx) + len(str(instance_text or "")) + int(window_chars))
+    return full_text[start:end]
+
+
+def text_instance_context_phrases(
+    *,
+    text_row: dict[str, Any],
+    start_byte: Any,
+    instance_text: str,
+    window_chars: int,
+    max_phrases: int,
+    phrase_token_count: int,
+    min_token_len: int,
+) -> list[str]:
+    context = text_instance_context_window(
+        text_row=text_row,
+        start_byte=start_byte,
+        instance_text=instance_text,
+        window_chars=window_chars,
+    )
+    if not context or int(max_phrases) <= 0:
+        return []
+    answer_tokens = set(tokenize(instance_text))
+    tokens: list[str] = []
+    seen: set[str] = set()
+    for token in tokenize(context):
+        if len(token) < int(min_token_len):
+            continue
+        if token in CONTEXT_STOPWORDS or token in answer_tokens:
+            continue
+        if token in seen:
+            continue
+        seen.add(token)
+        tokens.append(token)
+    phrase_len = max(2, int(phrase_token_count))
+    phrases: list[str] = []
+    for idx in range(0, len(tokens), phrase_len):
+        phrase_tokens = tokens[idx : idx + phrase_len]
+        if len(phrase_tokens) < min(phrase_len, 2):
+            continue
+        phrases.append(" ".join(phrase_tokens))
+        if len(phrases) >= int(max_phrases):
+            break
+    return phrases
+
+
 def clean_phrase(text: Any) -> str:
     value = str(text or "").strip()
     value = re.sub(r"\s+", " ", value)
@@ -396,6 +544,10 @@ def evidence_for_row(
     id_map: dict[str, dict[str, Any]],
     url_to_id: dict[str, str],
     evidence_weights: dict[str, float],
+    text_instance_context_window_chars: int = 0,
+    text_instance_context_max_phrases: int = 6,
+    text_instance_context_phrase_token_count: int = 4,
+    text_instance_context_min_token_len: int = 4,
 ) -> tuple[list[Evidence], dict[str, Any]]:
     evidence: list[Evidence] = []
     seen: set[tuple[str, str]] = set()
@@ -421,6 +573,26 @@ def evidence_for_row(
                 weight=evidence_weights["text_instance"],
                 doc_id=instance.get("doc_id", ""),
             )
+            if int(text_instance_context_window_chars) > 0:
+                doc_id = str(instance.get("doc_id", "") or "").strip()
+                text_row = texts_by_id.get(doc_id, {})
+                for phrase in text_instance_context_phrases(
+                    text_row=text_row,
+                    start_byte=instance.get("start_byte"),
+                    instance_text=str(instance.get("text", "") or ""),
+                    window_chars=int(text_instance_context_window_chars),
+                    max_phrases=int(text_instance_context_max_phrases),
+                    phrase_token_count=int(text_instance_context_phrase_token_count),
+                    min_token_len=int(text_instance_context_min_token_len),
+                ):
+                    add_evidence(
+                        evidence,
+                        seen,
+                        text=phrase,
+                        source="text_instance_context",
+                        weight=evidence_weights["text_instance_context"],
+                        doc_id=doc_id,
+                    )
 
         for instance in answer.get("image_instances", []) or []:
             if not isinstance(instance, dict):
@@ -834,6 +1006,10 @@ def main() -> None:
                     id_map=id_map,
                     url_to_id=url_to_id,
                     evidence_weights=evidence_weights,
+                    text_instance_context_window_chars=int(args.text_instance_context_window_chars),
+                    text_instance_context_max_phrases=int(args.text_instance_context_max_phrases),
+                    text_instance_context_phrase_token_count=int(args.text_instance_context_phrase_token_count),
+                    text_instance_context_min_token_len=int(args.text_instance_context_min_token_len),
                 )
                 source_counts.update(evidence_meta["evidence_source_counts"])
                 scored, missing_docs = score_pages(
@@ -933,6 +1109,10 @@ def main() -> None:
         "coverage_min_match_weight": float(args.coverage_min_match_weight),
         "evidence_weight_overrides": str(args.evidence_weight_overrides),
         "evidence_weights": dict(sorted(evidence_weights.items())),
+        "text_instance_context_window_chars": int(args.text_instance_context_window_chars),
+        "text_instance_context_max_phrases": int(args.text_instance_context_max_phrases),
+        "text_instance_context_phrase_token_count": int(args.text_instance_context_phrase_token_count),
+        "text_instance_context_min_token_len": int(args.text_instance_context_min_token_len),
         "output_jsonl": str(output_jsonl),
         "output_augmented_gold_jsonl": str(augmented_path) if augmented_path else "",
     }
