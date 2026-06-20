@@ -155,6 +155,9 @@ fi
 if [[ "${PSEUDO_SUPERVISION_WEIGHTING:-0}" == "1" ]]; then
   supervision_tier_args+=(--pseudo-supervision-weighting)
 fi
+if [[ "${STRICT_LABEL_SCORE_WEIGHTING:-0}" == "1" ]]; then
+  supervision_tier_args+=(--strict-label-score-weighting)
+fi
 if [[ "${INCLUDE_SAFE_SUPPORT_DOC_NEGATIVES:-0}" == "1" ]]; then
   supervision_tier_args+=(--include-safe-support-doc-negatives)
 fi
@@ -176,6 +179,7 @@ echo "using_learned_alpha_utility_gate=${LEARNED_ALPHA_UTILITY_GATE:-0}"
 echo "using_base_aware_alpha_utility_gate=${BASE_AWARE_ALPHA_UTILITY_GATE:-0}"
 echo "using_respect_pseudo_supervision_tiers=${RESPECT_PSEUDO_SUPERVISION_TIERS:-0}"
 echo "using_pseudo_supervision_weighting=${PSEUDO_SUPERVISION_WEIGHTING:-0}"
+echo "using_strict_label_score_weighting=${STRICT_LABEL_SCORE_WEIGHTING:-0}"
 echo "using_include_safe_support_doc_negatives=${INCLUDE_SAFE_SUPPORT_DOC_NEGATIVES:-0}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
@@ -201,6 +205,11 @@ echo "using_include_safe_support_doc_negatives=${INCLUDE_SAFE_SUPPORT_DOC_NEGATI
   --blend-alpha "${BLEND_ALPHA:-0.30}" \
   "${auto_tune_args[@]}" \
   "${supervision_tier_args[@]}" \
+  --strict-high-score-threshold "${STRICT_HIGH_SCORE_THRESHOLD:-14.0}" \
+  --strict-min-score-threshold "${STRICT_MIN_SCORE_THRESHOLD:-8.0}" \
+  --strict-medium-positive-weight "${STRICT_MEDIUM_POSITIVE_WEIGHT:-0.70}" \
+  --strict-low-positive-weight "${STRICT_LOW_POSITIVE_WEIGHT:-0.50}" \
+  --strict-missing-score-positive-weight "${STRICT_MISSING_SCORE_POSITIVE_WEIGHT:-1.0}" \
   --hybrid-positive-weight "${HYBRID_POSITIVE_WEIGHT:-0.80}" \
   --visual-proxy-positive-weight "${VISUAL_PROXY_POSITIVE_WEIGHT:-0.60}" \
   --partial-positive-weight "${PARTIAL_POSITIVE_WEIGHT:-0.50}" \

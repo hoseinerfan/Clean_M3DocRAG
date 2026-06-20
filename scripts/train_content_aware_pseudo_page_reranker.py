@@ -257,6 +257,20 @@ def parse_args() -> argparse.Namespace:
             "downweighted; optional safe support-doc negatives are low-weight."
         ),
     )
+    parser.add_argument(
+        "--strict-label-score-weighting",
+        action="store_true",
+        help=(
+            "Downweight strict pseudo-page positives by their MMQA evidence-alignment score. "
+            "This keeps strict-label coverage while reducing the influence of medium-score "
+            "pseudo positives."
+        ),
+    )
+    parser.add_argument("--strict-high-score-threshold", type=float, default=14.0)
+    parser.add_argument("--strict-min-score-threshold", type=float, default=8.0)
+    parser.add_argument("--strict-medium-positive-weight", type=float, default=0.70)
+    parser.add_argument("--strict-low-positive-weight", type=float, default=0.50)
+    parser.add_argument("--strict-missing-score-positive-weight", type=float, default=1.0)
     parser.add_argument("--hybrid-positive-weight", type=float, default=0.80)
     parser.add_argument("--visual-proxy-positive-weight", type=float, default=0.60)
     parser.add_argument("--partial-positive-weight", type=float, default=0.50)
@@ -894,20 +908,58 @@ def page_supervision_tiers(row: dict[str, Any]) -> dict[str, str]:
     return {str(uid): str(tier) for uid, tier in values.items()}
 
 
-def positive_row_weight(uid: str, row: dict[str, Any], args: argparse.Namespace) -> float:
-    if not bool(getattr(args, "pseudo_supervision_weighting", False)):
+def pseudo_page_label_scores(row: dict[str, Any]) -> dict[str, float]:
+    metadata = pseudo_supervision_metadata(row)
+    values = metadata.get("pseudo_gold_page_label_scores", {})
+    if not isinstance(values, dict):
+        return {}
+    out: dict[str, float] = {}
+    for uid, score in values.items():
+        try:
+            out[str(uid)] = float(score)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def strict_label_score_band(uid: str, row: dict[str, Any], args: argparse.Namespace) -> str:
+    score = pseudo_page_label_scores(row).get(uid)
+    if score is None:
+        return "missing"
+    if score >= float(getattr(args, "strict_high_score_threshold", 14.0)):
+        return "high"
+    if score >= float(getattr(args, "strict_min_score_threshold", 8.0)):
+        return "medium"
+    return "low"
+
+
+def strict_label_score_weight(uid: str, row: dict[str, Any], args: argparse.Namespace) -> float:
+    band = strict_label_score_band(uid, row, args)
+    if band == "high":
         return 1.0
+    if band == "medium":
+        return float(getattr(args, "strict_medium_positive_weight", 0.70))
+    if band == "low":
+        return float(getattr(args, "strict_low_positive_weight", 0.50))
+    return float(getattr(args, "strict_missing_score_positive_weight", 1.0))
+
+
+def positive_row_weight(uid: str, row: dict[str, Any], args: argparse.Namespace) -> float:
+    weight = 1.0
     qid_tier = qid_supervision_tier(row)
     page_tier = page_supervision_tiers(row).get(uid, "")
-    if "partial" in qid_tier or "support_incomplete" in qid_tier:
-        return float(args.partial_positive_weight)
-    if page_tier == "visual_proxy":
-        return float(args.visual_proxy_positive_weight)
-    if page_tier in {"mixed_direct_proxy", "direct_visual_verified"}:
-        return float(args.hybrid_positive_weight)
-    if "hybrid" in qid_tier:
-        return float(args.hybrid_positive_weight)
-    return 1.0
+    if bool(getattr(args, "pseudo_supervision_weighting", False)):
+        if "partial" in qid_tier or "support_incomplete" in qid_tier:
+            weight *= float(args.partial_positive_weight)
+        elif page_tier == "visual_proxy":
+            weight *= float(args.visual_proxy_positive_weight)
+        elif page_tier in {"mixed_direct_proxy", "direct_visual_verified"}:
+            weight *= float(args.hybrid_positive_weight)
+        elif "hybrid" in qid_tier:
+            weight *= float(args.hybrid_positive_weight)
+    if bool(getattr(args, "strict_label_score_weighting", False)):
+        weight *= strict_label_score_weight(uid, row, args)
+    return float(weight)
 
 
 def positive_page_locations(positive_uids: set[str]) -> dict[str, set[int]]:
@@ -1031,6 +1083,7 @@ def build_matrix(
     safe_support_doc_negative_count = 0
     supervision_tier_counts: Counter[str] = Counter()
     negative_scope_counts: Counter[str] = Counter()
+    strict_score_band_counts: Counter[str] = Counter()
     negative_excluded_support_doc_qids = 0
 
     rng = random.Random(int(args.seed))
@@ -1103,6 +1156,10 @@ def build_matrix(
         doc_rank, doc_page_rank, doc_page_count = doc_rank_maps(records)
         q_profile = question_profile(gold_row)
         for idx in positive_indices:
+            if bool(getattr(args, "strict_label_score_weighting", False)):
+                strict_score_band_counts[
+                    strict_label_score_band(records[idx]["uid"], gold_row, args)
+                ] += 1
             vectors.append(
                 feature_vector(
                     records[idx],
@@ -1168,12 +1225,16 @@ def build_matrix(
         "row_count": int(len(vectors)),
         "respect_pseudo_supervision_tiers": bool(respect_tiers),
         "pseudo_supervision_weighting": bool(getattr(args, "pseudo_supervision_weighting", False)),
+        "strict_label_score_weighting": bool(
+            getattr(args, "strict_label_score_weighting", False)
+        ),
         "include_safe_support_doc_negatives": bool(
             getattr(args, "include_safe_support_doc_negatives", False)
         ),
         "negative_excluded_support_doc_qids": int(negative_excluded_support_doc_qids),
         "supervision_tier_counts": dict(sorted(supervision_tier_counts.items())),
         "negative_scope_counts": dict(sorted(negative_scope_counts.items())),
+        "strict_score_band_counts": dict(sorted(strict_score_band_counts.items())),
     }
     return (
         np.asarray(vectors, dtype=np.float32),
@@ -3295,6 +3356,12 @@ def main() -> None:
             "feature_set": args.feature_set,
             "respect_pseudo_supervision_tiers": bool(args.respect_pseudo_supervision_tiers),
             "pseudo_supervision_weighting": bool(args.pseudo_supervision_weighting),
+            "strict_label_score_weighting": bool(args.strict_label_score_weighting),
+            "strict_high_score_threshold": float(args.strict_high_score_threshold),
+            "strict_min_score_threshold": float(args.strict_min_score_threshold),
+            "strict_medium_positive_weight": float(args.strict_medium_positive_weight),
+            "strict_low_positive_weight": float(args.strict_low_positive_weight),
+            "strict_missing_score_positive_weight": float(args.strict_missing_score_positive_weight),
             "hybrid_positive_weight": float(args.hybrid_positive_weight),
             "visual_proxy_positive_weight": float(args.visual_proxy_positive_weight),
             "partial_positive_weight": float(args.partial_positive_weight),

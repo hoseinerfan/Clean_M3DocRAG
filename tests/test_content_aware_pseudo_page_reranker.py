@@ -188,6 +188,73 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
         self.assertIn(0.5, row_weights.tolist())
         self.assertIn(0.25, row_weights.tolist())
 
+    def test_build_matrix_can_downweight_medium_score_strict_labels(self) -> None:
+        gold = {
+            "q_high": {
+                "qid": "q_high",
+                "question": "Where is the high confidence evidence?",
+                "supporting_context": [{"doc_id": "docA", "doc_part": "text"}],
+                "metadata": {
+                    "gold_page_uids": ["docA_page0"],
+                    "pseudo_gold_page_label_scores": {"docA_page0": 18.0},
+                },
+            },
+            "q_medium": {
+                "qid": "q_medium",
+                "question": "Where is the medium confidence evidence?",
+                "supporting_context": [{"doc_id": "docB", "doc_part": "text"}],
+                "metadata": {
+                    "gold_page_uids": ["docB_page0"],
+                    "pseudo_gold_page_label_scores": {"docB_page0": 10.0},
+                },
+            },
+        }
+        base_pred = {
+            "q_high": {
+                "qid": "q_high",
+                "page_retrieval_results": [
+                    ["docA", 0, 10.0],
+                    ["docNoise", 0, 9.0],
+                ],
+            },
+            "q_medium": {
+                "qid": "q_medium",
+                "page_retrieval_results": [
+                    ["docB", 0, 10.0],
+                    ["docNoise", 1, 9.0],
+                ],
+            },
+        }
+        args = Namespace(
+            candidate_top_k=2,
+            negatives_per_band=2,
+            max_negatives_per_qid=2,
+            seed=13,
+            active_feature_names=MODULE.FEATURE_NAMES,
+            respect_pseudo_supervision_tiers=False,
+            pseudo_supervision_weighting=False,
+            strict_label_score_weighting=True,
+            strict_high_score_threshold=14.0,
+            strict_min_score_threshold=8.0,
+            strict_medium_positive_weight=0.7,
+            strict_low_positive_weight=0.5,
+            strict_missing_score_positive_weight=1.0,
+        )
+
+        _X, y, row_weights, metadata = MODULE.build_matrix(
+            gold=gold,
+            base_pred=base_pred,
+            page_features={},
+            source_maps_by_label={},
+            args=args,
+        )
+
+        positive_weights = row_weights[y == 1].tolist()
+        self.assertEqual([round(value, 3) for value in sorted(positive_weights)], [0.7, 1.0])
+        self.assertTrue(metadata["strict_label_score_weighting"])
+        self.assertEqual(metadata["strict_score_band_counts"]["high"], 1)
+        self.assertEqual(metadata["strict_score_band_counts"]["medium"], 1)
+
     def test_content_reranker_promotes_question_matching_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
