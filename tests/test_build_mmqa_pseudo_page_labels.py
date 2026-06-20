@@ -237,6 +237,23 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
         )
         self.assertNotIn("docA_page2", {item.page_uid for item in selected})
 
+    def test_evidence_weight_overrides_update_selected_sources_only(self) -> None:
+        weights = MODULE.parse_evidence_weight_overrides(
+            "question_entity=0,pseudo_question_slot=0,supporting_doc_title=2.5"
+        )
+
+        self.assertEqual(weights["question_entity"], 0.0)
+        self.assertEqual(weights["pseudo_question_slot"], 0.0)
+        self.assertEqual(weights["supporting_doc_title"], 2.5)
+        self.assertEqual(
+            weights["text_instance"],
+            MODULE.DEFAULT_EVIDENCE_WEIGHTS["text_instance"],
+        )
+
+    def test_evidence_weight_overrides_reject_unknown_source(self) -> None:
+        with self.assertRaises(ValueError):
+            MODULE.parse_evidence_weight_overrides("unknown_signal=1")
+
 
 if __name__ == "__main__":
     unittest.main()

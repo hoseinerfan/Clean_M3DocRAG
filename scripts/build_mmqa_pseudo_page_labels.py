@@ -12,6 +12,23 @@ from statistics import fmean
 from typing import Any
 
 
+DEFAULT_EVIDENCE_WEIGHTS: dict[str, float] = {
+    "answer_text": 5.0,
+    "text_instance": 9.0,
+    "image_title": 7.0,
+    "image_doc_title": 4.0,
+    "table_title": 4.0,
+    "table_answer_cell": 10.0,
+    "table_row_cell": 2.0,
+    "table_row_link_text": 1.5,
+    "table_row_link_title": 1.5,
+    "supporting_doc_title": 3.0,
+    "answer_entity": 4.0,
+    "question_entity": 1.2,
+    "pseudo_question_slot": 1.0,
+}
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
@@ -49,6 +66,15 @@ def parse_args() -> argparse.Namespace:
             "This prevents weak question/entity overlaps from forcing extra pages."
         ),
     )
+    parser.add_argument(
+        "--evidence-weight-overrides",
+        default="",
+        help=(
+            "Optional comma-separated evidence weights, for example "
+            "'question_entity=0,pseudo_question_slot=0,supporting_doc_title=2'. "
+            "Unspecified evidence sources keep their default weights."
+        ),
+    )
     parser.add_argument("--output-jsonl", required=True)
     parser.add_argument("--output-summary-json", required=True)
     parser.add_argument(
@@ -60,6 +86,41 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     return parser.parse_args()
+
+
+def parse_evidence_weight_overrides(raw: str) -> dict[str, float]:
+    weights = dict(DEFAULT_EVIDENCE_WEIGHTS)
+    value = str(raw or "").strip()
+    if not value:
+        return weights
+
+    if value.startswith("{"):
+        parsed = json.loads(value)
+        if not isinstance(parsed, dict):
+            raise ValueError("--evidence-weight-overrides JSON value must be an object")
+        items = parsed.items()
+    else:
+        pairs = [item.strip() for item in value.split(",") if item.strip()]
+        items = []
+        for pair in pairs:
+            if "=" not in pair:
+                raise ValueError(
+                    "Evidence weight overrides must use source=value pairs; "
+                    f"got {pair!r}"
+                )
+            source, weight = pair.split("=", 1)
+            items.append((source.strip(), weight.strip()))
+
+    for source, weight in items:
+        source = str(source).strip()
+        if source not in weights:
+            valid = ", ".join(sorted(weights))
+            raise ValueError(f"Unknown evidence source {source!r}. Valid sources: {valid}")
+        numeric_weight = float(weight)
+        if numeric_weight < 0:
+            raise ValueError(f"Evidence weight for {source!r} must be non-negative")
+        weights[source] = numeric_weight
+    return weights
 
 
 @dataclass(frozen=True)
@@ -334,6 +395,7 @@ def evidence_for_row(
     images_by_id: dict[str, dict[str, Any]],
     id_map: dict[str, dict[str, Any]],
     url_to_id: dict[str, str],
+    evidence_weights: dict[str, float],
 ) -> tuple[list[Evidence], dict[str, Any]]:
     evidence: list[Evidence] = []
     seen: set[tuple[str, str]] = set()
@@ -345,7 +407,7 @@ def evidence_for_row(
             seen,
             text=answer.get("answer"),
             source="answer_text",
-            weight=5.0,
+            weight=evidence_weights["answer_text"],
         )
 
         for instance in answer.get("text_instances", []) or []:
@@ -356,7 +418,7 @@ def evidence_for_row(
                 seen,
                 text=instance.get("text"),
                 source="text_instance",
-                weight=9.0,
+                weight=evidence_weights["text_instance"],
                 doc_id=instance.get("doc_id", ""),
             )
 
@@ -370,7 +432,7 @@ def evidence_for_row(
                 seen,
                 text=image_row.get("title"),
                 source="image_title",
-                weight=7.0,
+                weight=evidence_weights["image_title"],
                 doc_id=doc_id,
             )
             add_evidence(
@@ -378,7 +440,7 @@ def evidence_for_row(
                 seen,
                 text=doc_title_from_map(doc_id, image_row, id_map),
                 source="image_doc_title",
-                weight=4.0,
+                weight=evidence_weights["image_doc_title"],
                 doc_id=doc_id,
             )
 
@@ -392,7 +454,7 @@ def evidence_for_row(
                 seen,
                 text=table.get("title"),
                 source="table_title",
-                weight=4.0,
+                weight=evidence_weights["table_title"],
                 doc_id=table_id,
             )
             cell_text = table_cell_text(table, int(row_idx), int(col_idx))
@@ -401,7 +463,7 @@ def evidence_for_row(
                 seen,
                 text=cell_text,
                 source="table_answer_cell",
-                weight=10.0,
+                weight=evidence_weights["table_answer_cell"],
                 doc_id=table_id,
             )
             for cell in table_row_cells(table, int(row_idx)):
@@ -410,7 +472,7 @@ def evidence_for_row(
                     seen,
                     text=cell.get("text"),
                     source="table_row_cell",
-                    weight=2.0,
+                    weight=evidence_weights["table_row_cell"],
                     doc_id=table_id,
                 )
                 for link in cell.get("links", []) or []:
@@ -422,7 +484,7 @@ def evidence_for_row(
                         seen,
                         text=link.get("text"),
                         source="table_row_link_text",
-                        weight=1.5,
+                        weight=evidence_weights["table_row_link_text"],
                         doc_id=linked_doc_id,
                     )
                     add_evidence(
@@ -430,7 +492,7 @@ def evidence_for_row(
                         seen,
                         text=link.get("wiki_title"),
                         source="table_row_link_title",
-                        weight=1.5,
+                        weight=evidence_weights["table_row_link_title"],
                         doc_id=linked_doc_id,
                     )
 
@@ -441,16 +503,34 @@ def evidence_for_row(
             seen,
             text=doc_title_from_map(doc_id, side_row, id_map),
             source="supporting_doc_title",
-            weight=3.0,
+            weight=evidence_weights["supporting_doc_title"],
             doc_id=doc_id,
         )
 
     for term in collect_answer_entity_terms(row):
-        add_evidence(evidence, seen, text=term, source="answer_entity", weight=4.0)
+        add_evidence(
+            evidence,
+            seen,
+            text=term,
+            source="answer_entity",
+            weight=evidence_weights["answer_entity"],
+        )
     for term in collect_question_entity_terms(row):
-        add_evidence(evidence, seen, text=term, source="question_entity", weight=1.2)
+        add_evidence(
+            evidence,
+            seen,
+            text=term,
+            source="question_entity",
+            weight=evidence_weights["question_entity"],
+        )
     for term in bracketed_pseudo_question_terms(row):
-        add_evidence(evidence, seen, text=term, source="pseudo_question_slot", weight=1.0)
+        add_evidence(
+            evidence,
+            seen,
+            text=term,
+            source="pseudo_question_slot",
+            weight=evidence_weights["pseudo_question_slot"],
+        )
 
     source_counts = Counter(item.source for item in evidence)
     return evidence, {
@@ -718,6 +798,7 @@ def main() -> None:
     images_by_id = load_by_id(args.mmqa_images_jsonl)
     id_map = load_id_map(args.id_url_mapping_jsonl)
     url_to_id = load_url_to_id(args.id_url_mapping_jsonl)
+    evidence_weights = parse_evidence_weight_overrides(args.evidence_weight_overrides)
 
     output_jsonl = Path(args.output_jsonl)
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -752,6 +833,7 @@ def main() -> None:
                     images_by_id=images_by_id,
                     id_map=id_map,
                     url_to_id=url_to_id,
+                    evidence_weights=evidence_weights,
                 )
                 source_counts.update(evidence_meta["evidence_source_counts"])
                 scored, missing_docs = score_pages(
@@ -849,6 +931,8 @@ def main() -> None:
         "min_token_overlap": float(args.min_token_overlap),
         "selection_policy": str(args.selection_policy),
         "coverage_min_match_weight": float(args.coverage_min_match_weight),
+        "evidence_weight_overrides": str(args.evidence_weight_overrides),
+        "evidence_weights": dict(sorted(evidence_weights.items())),
         "output_jsonl": str(output_jsonl),
         "output_augmented_gold_jsonl": str(augmented_path) if augmented_path else "",
     }
