@@ -255,6 +255,40 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
         self.assertEqual(metadata["strict_score_band_counts"]["high"], 1)
         self.assertEqual(metadata["strict_score_band_counts"]["medium"], 1)
 
+    def test_mlp_scorer_learns_and_round_trips(self) -> None:
+        X = MODULE.np.asarray(
+            [
+                [1.0, 0.0],
+                [0.9, 0.1],
+                [-1.0, 0.0],
+                [-0.9, -0.1],
+            ],
+            dtype=MODULE.np.float32,
+        )
+        y = MODULE.np.asarray([1.0, 1.0, 0.0, 0.0], dtype=MODULE.np.float32)
+        args = Namespace(
+            model_type="mlp",
+            mlp_hidden_dim=4,
+            seed=7,
+            positive_weight_cap=20.0,
+            epochs=120,
+            learning_rate=0.05,
+            weight_decay=0.0,
+            batch_size=4,
+        )
+
+        weights, bias, history = MODULE.train_scorer(X, y, args)
+        probs = MODULE.predict_scorer_proba(X, weights, bias)
+
+        self.assertGreater(float(probs[:2].mean()), 0.8)
+        self.assertLess(float(probs[2:].mean()), 0.2)
+        self.assertGreater(len(history), 0)
+
+        payload = MODULE.scorer_to_json(weights, bias)
+        restored_weights, restored_bias = MODULE.scorer_from_model_json(payload)
+        restored_probs = MODULE.predict_scorer_proba(X, restored_weights, restored_bias)
+        self.assertTrue(MODULE.np.allclose(probs, restored_probs, atol=1e-6))
+
     def test_content_reranker_promotes_question_matching_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -290,6 +290,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--batch-size", type=int, default=65536)
     parser.add_argument("--positive-weight-cap", type=float, default=20.0)
+    parser.add_argument(
+        "--model-type",
+        choices=["logistic", "mlp"],
+        default="logistic",
+        help=(
+            "Evidence scorer used before blending with the base ranking. logistic is the "
+            "original linear model; mlp uses one hidden ReLU layer over the same features."
+        ),
+    )
+    parser.add_argument("--mlp-hidden-dim", type=int, default=32)
     parser.add_argument("--seed", type=int, default=13)
     parser.add_argument(
         "--inference-mode",
@@ -1330,6 +1340,206 @@ def train_logistic(
     return w.astype(np.float32), float(b), history
 
 
+def weighted_training_weights(
+    y: np.ndarray,
+    args: argparse.Namespace,
+    *,
+    row_weights: np.ndarray | None = None,
+) -> np.ndarray:
+    base_weights = (
+        np.ones_like(y, dtype=np.float32)
+        if row_weights is None
+        else np.asarray(row_weights, dtype=np.float32)
+    )
+    if base_weights.shape != y.shape:
+        raise ValueError(f"row_weights shape {base_weights.shape} does not match y shape {y.shape}")
+    pos = float(base_weights[y > 0.5].sum())
+    neg = float(base_weights[y <= 0.5].sum())
+    pos_weight = min(float(args.positive_weight_cap), neg / max(pos, 1.0))
+    return (base_weights * np.where(y > 0.5, pos_weight, 1.0)).astype(np.float32)
+
+
+def adam_update(
+    param: np.ndarray,
+    grad: np.ndarray,
+    m: np.ndarray,
+    v: np.ndarray,
+    *,
+    step: int,
+    learning_rate: float,
+    beta1: float = 0.9,
+    beta2: float = 0.999,
+    eps: float = 1e-8,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    m = beta1 * m + (1.0 - beta1) * grad
+    v = beta2 * v + (1.0 - beta2) * (grad * grad)
+    m_hat = m / (1.0 - beta1**step)
+    v_hat = v / (1.0 - beta2**step)
+    param = param - float(learning_rate) * m_hat / (np.sqrt(v_hat) + eps)
+    return param.astype(np.float32), m.astype(np.float32), v.astype(np.float32)
+
+
+def train_mlp(
+    X: np.ndarray,
+    y: np.ndarray,
+    args: argparse.Namespace,
+    *,
+    row_weights: np.ndarray | None = None,
+) -> tuple[dict[str, Any], float, list[dict[str, float]]]:
+    if int(args.mlp_hidden_dim) <= 0:
+        raise ValueError(f"--mlp-hidden-dim must be positive, got {args.mlp_hidden_dim}")
+    rng = np.random.default_rng(int(args.seed))
+    input_dim = int(X.shape[1])
+    hidden_dim = int(args.mlp_hidden_dim)
+    w1 = rng.normal(0.0, math.sqrt(2.0 / max(input_dim, 1)), size=(input_dim, hidden_dim)).astype(np.float32)
+    b1 = np.zeros(hidden_dim, dtype=np.float32)
+    w2 = rng.normal(0.0, math.sqrt(2.0 / max(hidden_dim, 1)), size=(hidden_dim,)).astype(np.float32)
+    b2 = np.float32(0.0)
+
+    m_w1 = np.zeros_like(w1)
+    v_w1 = np.zeros_like(w1)
+    m_b1 = np.zeros_like(b1)
+    v_b1 = np.zeros_like(b1)
+    m_w2 = np.zeros_like(w2)
+    v_w2 = np.zeros_like(w2)
+    m_b2 = np.float32(0.0)
+    v_b2 = np.float32(0.0)
+
+    weights = weighted_training_weights(y, args, row_weights=row_weights)
+    history: list[dict[str, float]] = []
+    step = 0
+    lr = float(args.learning_rate)
+    batch_size = int(args.batch_size)
+
+    for epoch in range(1, int(args.epochs) + 1):
+        order = rng.permutation(len(y))
+        total_loss = 0.0
+        total_weight = 0.0
+        for start in range(0, len(order), batch_size):
+            idx = order[start : start + batch_size]
+            xb = X[idx]
+            yb = y[idx]
+            wb = weights[idx]
+            z1 = xb @ w1 + b1
+            h1 = np.maximum(z1, 0.0)
+            logits = h1 @ w2 + b2
+            probs = sigmoid(logits)
+            error = (probs - yb) * wb
+            denom = max(float(wb.sum()), 1.0)
+
+            grad_w2 = (h1.T @ error) / denom + float(args.weight_decay) * w2
+            grad_b2 = np.float32(error.sum() / denom)
+            grad_h1 = error.reshape(-1, 1) * w2.reshape(1, -1)
+            grad_z1 = grad_h1 * (z1 > 0.0)
+            grad_w1 = (xb.T @ grad_z1) / denom + float(args.weight_decay) * w1
+            grad_b1 = grad_z1.sum(axis=0) / denom
+
+            step += 1
+            w1, m_w1, v_w1 = adam_update(w1, grad_w1.astype(np.float32), m_w1, v_w1, step=step, learning_rate=lr)
+            b1, m_b1, v_b1 = adam_update(b1, grad_b1.astype(np.float32), m_b1, v_b1, step=step, learning_rate=lr)
+            w2, m_w2, v_w2 = adam_update(w2, grad_w2.astype(np.float32), m_w2, v_w2, step=step, learning_rate=lr)
+            b2_arr, m_b2_arr, v_b2_arr = adam_update(
+                np.asarray([b2], dtype=np.float32),
+                np.asarray([grad_b2], dtype=np.float32),
+                np.asarray([m_b2], dtype=np.float32),
+                np.asarray([v_b2], dtype=np.float32),
+                step=step,
+                learning_rate=lr,
+            )
+            b2 = np.float32(b2_arr[0])
+            m_b2 = np.float32(m_b2_arr[0])
+            v_b2 = np.float32(v_b2_arr[0])
+
+            loss = -(
+                yb * np.log(np.clip(probs, 1e-6, 1.0))
+                + (1.0 - yb) * np.log(np.clip(1.0 - probs, 1e-6, 1.0))
+            )
+            total_loss += float((loss * wb).sum())
+            total_weight += float(wb.sum())
+        if epoch == 1 or epoch == int(args.epochs) or epoch % max(1, int(args.epochs) // 10) == 0:
+            history.append({"epoch": float(epoch), "loss": total_loss / max(total_weight, 1.0)})
+
+    params = {
+        "model_type": "mlp",
+        "hidden_dim": int(hidden_dim),
+        "input_to_hidden": w1.astype(np.float32),
+        "hidden_bias": b1.astype(np.float32),
+        "hidden_to_output": w2.astype(np.float32),
+        "output_bias": float(b2),
+    }
+    return params, 0.0, history
+
+
+def train_scorer(
+    X: np.ndarray,
+    y: np.ndarray,
+    args: argparse.Namespace,
+    *,
+    row_weights: np.ndarray | None = None,
+) -> tuple[Any, float, list[dict[str, float]]]:
+    if str(getattr(args, "model_type", "logistic")) == "mlp":
+        return train_mlp(X, y, args, row_weights=row_weights)
+    return train_logistic(X, y, args, row_weights=row_weights)
+
+
+def predict_scorer_proba(X: np.ndarray, weights: Any, bias: float) -> np.ndarray:
+    if isinstance(weights, dict) and weights.get("model_type") == "mlp":
+        w1 = np.asarray(weights["input_to_hidden"], dtype=np.float32)
+        b1 = np.asarray(weights["hidden_bias"], dtype=np.float32)
+        w2 = np.asarray(weights["hidden_to_output"], dtype=np.float32)
+        b2 = np.float32(weights.get("output_bias", 0.0))
+        hidden = np.maximum(X @ w1 + b1, 0.0)
+        return sigmoid(hidden @ w2 + b2)
+    return sigmoid(X @ np.asarray(weights, dtype=np.float32) + np.float32(bias))
+
+
+def scorer_to_json(weights: Any, bias: float) -> dict[str, Any]:
+    if isinstance(weights, dict) and weights.get("model_type") == "mlp":
+        return {
+            "model_type": "mlp",
+            "weights": [],
+            "bias": 0.0,
+            "mlp": {
+                "hidden_dim": int(weights["hidden_dim"]),
+                "input_to_hidden": [
+                    [float(value) for value in row]
+                    for row in np.asarray(weights["input_to_hidden"], dtype=np.float32).tolist()
+                ],
+                "hidden_bias": [float(value) for value in np.asarray(weights["hidden_bias"], dtype=np.float32).tolist()],
+                "hidden_to_output": [
+                    float(value) for value in np.asarray(weights["hidden_to_output"], dtype=np.float32).tolist()
+                ],
+                "output_bias": float(weights.get("output_bias", 0.0)),
+            },
+        }
+    return {
+        "model_type": "logistic",
+        "weights": [float(value) for value in np.asarray(weights, dtype=np.float32).tolist()],
+        "bias": float(bias),
+    }
+
+
+def scorer_from_model_json(model: dict[str, Any]) -> tuple[Any, float]:
+    model_args = model.get("args", {}) if isinstance(model.get("args"), dict) else {}
+    model_type = str(model.get("model_type") or model_args.get("model_type", "logistic"))
+    if model_type == "mlp":
+        mlp = model.get("mlp", {})
+        if not isinstance(mlp, dict):
+            raise ValueError("MLP model is missing the 'mlp' parameter block.")
+        return (
+            {
+                "model_type": "mlp",
+                "hidden_dim": int(mlp.get("hidden_dim", 0)),
+                "input_to_hidden": np.asarray(mlp["input_to_hidden"], dtype=np.float32),
+                "hidden_bias": np.asarray(mlp["hidden_bias"], dtype=np.float32),
+                "hidden_to_output": np.asarray(mlp["hidden_to_output"], dtype=np.float32),
+                "output_bias": float(mlp.get("output_bias", 0.0)),
+            },
+            0.0,
+        )
+    return np.asarray(model["weights"], dtype=np.float32), float(model["bias"])
+
+
 def score_records(
     *,
     qid: str,
@@ -1339,7 +1549,7 @@ def score_records(
     source_maps_by_label: dict[str, dict[str, dict[str, float]]],
     mean: np.ndarray,
     std: np.ndarray,
-    weights: np.ndarray,
+    weights: Any,
     bias: float,
     feature_names: list[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -1365,7 +1575,7 @@ def score_records(
         for record in records
     ]
     X = standardize_eval(np.asarray(vectors, dtype=np.float32), mean, std)
-    probs = sigmoid(X @ weights + np.float32(bias))
+    probs = predict_scorer_proba(X, weights, bias)
     for record, prob in zip(records, probs):
         record["learned_score"] = float(prob)
     return records
@@ -2718,7 +2928,7 @@ def tune_blend_alpha(
     source_maps_by_label: dict[str, dict[str, dict[str, float]]],
     mean: np.ndarray,
     std: np.ndarray,
-    weights: np.ndarray,
+    weights: Any,
     bias: float,
     args: argparse.Namespace,
 ) -> dict[str, Any]:
@@ -2921,7 +3131,7 @@ def apply_reranker(
     source_maps_by_label: dict[str, dict[str, dict[str, float]]],
     mean: np.ndarray,
     std: np.ndarray,
-    weights: np.ndarray,
+    weights: Any,
     bias: float,
     args: argparse.Namespace,
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]]]:
@@ -3246,7 +3456,7 @@ def main() -> None:
         args=args,
     )
     X_train, mean, std = standardize_train(X)
-    weights, bias, history = train_logistic(X_train, y, args, row_weights=row_weights)
+    weights, bias, history = train_scorer(X_train, y, args, row_weights=row_weights)
 
     tuning_summary: dict[str, Any] | None = None
     if bool(args.auto_tune_blend_alpha):
@@ -3280,7 +3490,7 @@ def main() -> None:
                 args=args,
             )
             X_train, mean, std = standardize_train(X)
-            weights, bias, history = train_logistic(X_train, y, args, row_weights=row_weights)
+            weights, bias, history = train_scorer(X_train, y, args, row_weights=row_weights)
         train_meta = {
             **train_meta,
             "auto_tune_blend_alpha": True,
@@ -3322,12 +3532,12 @@ def main() -> None:
     output_prediction_json.parent.mkdir(parents=True, exist_ok=True)
     output_prediction_json.write_text(json.dumps(output_pred) + "\n", encoding="utf-8")
 
+    scorer_payload = scorer_to_json(weights, bias)
     model = {
+        **scorer_payload,
         "feature_names": list(args.active_feature_names),
         "all_feature_names": FEATURE_NAMES,
         "feature_set": args.feature_set,
-        "weights": [float(value) for value in weights.tolist()],
-        "bias": float(bias),
         "mean": [float(value) for value in mean.tolist()],
         "std": [float(value) for value in std.tolist()],
         "history": history,
@@ -3335,6 +3545,8 @@ def main() -> None:
         "adaptive_alpha_config": train_meta.get("adaptive_alpha_config") if isinstance(train_meta, dict) else None,
         "args": {
             "candidate_top_k": int(args.candidate_top_k),
+            "model_type": str(args.model_type),
+            "mlp_hidden_dim": int(args.mlp_hidden_dim),
             "inference_mode": args.inference_mode,
             "blend_alpha": float(args.blend_alpha),
             "auto_tune_blend_alpha": bool(args.auto_tune_blend_alpha),

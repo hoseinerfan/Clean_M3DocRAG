@@ -172,6 +172,8 @@ echo "using_out_dir=$OUT_DIR"
 echo "using_label=$LABEL"
 echo "using_feature_set=$FEATURE_SET"
 echo "using_source_set=$SOURCE_SET"
+echo "using_model_type=${MODEL_TYPE:-logistic}"
+echo "using_mlp_hidden_dim=${MLP_HIDDEN_DIM:-32}"
 echo "using_query_adaptive_alpha=${QUERY_ADAPTIVE_ALPHA:-0}"
 echo "using_learned_query_alpha=${LEARNED_QUERY_ALPHA:-0}"
 echo "using_learned_alpha_action=${LEARNED_ALPHA_ACTION:-0}"
@@ -200,6 +202,8 @@ echo "using_include_safe_support_doc_negatives=${INCLUDE_SAFE_SUPPORT_DOC_NEGATI
   --weight-decay "${WEIGHT_DECAY:-1e-4}" \
   --batch-size "${BATCH_SIZE:-65536}" \
   --positive-weight-cap "${POSITIVE_WEIGHT_CAP:-20}" \
+  --model-type "${MODEL_TYPE:-logistic}" \
+  --mlp-hidden-dim "${MLP_HIDDEN_DIM:-32}" \
   --seed "${SEED:-13}" \
   --inference-mode "${INFERENCE_MODE:-blend_rerank}" \
   --blend-alpha "${BLEND_ALPHA:-0.30}" \

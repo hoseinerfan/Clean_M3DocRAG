@@ -95,8 +95,7 @@ def apply_model(
 ) -> tuple[dict[str, dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     mean = np.asarray(model["mean"], dtype=np.float32)
     std = np.asarray(model["std"], dtype=np.float32)
-    weights = np.asarray(model["weights"], dtype=np.float32)
-    bias = float(model["bias"])
+    weights, bias = ca.scorer_from_model_json(model)
     feature_names = list(model.get("feature_names") or ca.FEATURE_NAMES)
 
     output: dict[str, dict[str, Any]] = {}
@@ -279,6 +278,10 @@ def main() -> None:
         "model_json": args.model_json,
         "feature_names": model_feature_names,
         "feature_set": model.get("feature_set", ""),
+        "model_type": str(
+            model.get("model_type")
+            or (model.get("args", {}) if isinstance(model.get("args"), dict) else {}).get("model_type", "logistic")
+        ),
         "base_pred": args.base_pred,
         "page_text_jsonl": args.page_text_jsonl,
         "source_count": len(source_maps_by_label),
