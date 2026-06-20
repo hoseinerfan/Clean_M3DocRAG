@@ -205,6 +205,38 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
                 ["text_doc_page1"],
             )
 
+    def test_evidence_coverage_policy_selects_pages_with_new_doc_evidence(self) -> None:
+        first = MODULE.PageScore(page_uid="docA_page0", doc_id="docA", page_idx=0)
+        first.score = 12.0
+        first.exact_matches = [
+            {"source": "answer_text", "text": "alpha", "weight": 5.0},
+            {"source": "question_entity", "text": "weak shared", "weight": 1.0},
+        ]
+        second = MODULE.PageScore(page_uid="docA_page1", doc_id="docA", page_idx=1)
+        second.score = 10.0
+        second.exact_matches = [
+            {"source": "text_instance", "text": "beta", "weight": 9.0},
+        ]
+        duplicate = MODULE.PageScore(page_uid="docA_page2", doc_id="docA", page_idx=2)
+        duplicate.score = 9.0
+        duplicate.exact_matches = [
+            {"source": "answer_text", "text": "alpha", "weight": 5.0},
+        ]
+
+        selected = MODULE.select_labels_by_evidence_coverage(
+            [first, second, duplicate],
+            min_score=8.0,
+            top_pages_per_doc=3,
+            top_pages_per_qid=4,
+            coverage_min_match_weight=3.0,
+        )
+
+        self.assertEqual(
+            {item.page_uid for item in selected},
+            {"docA_page0", "docA_page1"},
+        )
+        self.assertNotIn("docA_page2", {item.page_uid for item in selected})
+
 
 if __name__ == "__main__":
     unittest.main()

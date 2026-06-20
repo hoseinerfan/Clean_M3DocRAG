@@ -24,6 +24,8 @@ MIN_SCORE="${MIN_SCORE:-4.0}"
 TOP_PAGES_PER_DOC="${TOP_PAGES_PER_DOC:-2}"
 TOP_PAGES_PER_QID="${TOP_PAGES_PER_QID:-8}"
 MIN_TOKEN_OVERLAP="${MIN_TOKEN_OVERLAP:-0.72}"
+SELECTION_POLICY="${SELECTION_POLICY:-score}"
+COVERAGE_MIN_MATCH_WEIGHT="${COVERAGE_MIN_MATCH_WEIGHT:-3.0}"
 
 mkdir -p "$OUT_DIR"
 
@@ -35,6 +37,8 @@ echo "using_mmqa_images_jsonl=$MMQA_IMAGES_JSONL"
 echo "using_id_url_mapping_jsonl=$ID_URL_MAPPING_JSONL"
 echo "using_out_dir=$OUT_DIR"
 echo "using_label=$LABEL"
+echo "using_selection_policy=$SELECTION_POLICY"
+echo "using_coverage_min_match_weight=$COVERAGE_MIN_MATCH_WEIGHT"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/build_mmqa_pseudo_page_labels.py" \
   --gold "$GOLD" \
@@ -47,6 +51,8 @@ echo "using_label=$LABEL"
   --top-pages-per-doc "$TOP_PAGES_PER_DOC" \
   --top-pages-per-qid "$TOP_PAGES_PER_QID" \
   --min-token-overlap "$MIN_TOKEN_OVERLAP" \
+  --selection-policy "$SELECTION_POLICY" \
+  --coverage-min-match-weight "$COVERAGE_MIN_MATCH_WEIGHT" \
   --output-jsonl "$OUT_DIR/${LABEL}.jsonl" \
   --output-summary-json "$OUT_DIR/${LABEL}.summary.json" \
   --output-augmented-gold-jsonl "$OUT_DIR/${LABEL}.augmented_gold.jsonl"

@@ -31,6 +31,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--top-pages-per-doc", type=int, default=2)
     parser.add_argument("--top-pages-per-qid", type=int, default=8)
     parser.add_argument("--min-token-overlap", type=float, default=0.72)
+    parser.add_argument(
+        "--selection-policy",
+        choices=["score", "evidence_coverage"],
+        default="score",
+        help=(
+            "score keeps the original score-ranked selection. evidence_coverage greedily "
+            "selects pages that cover new evidence signals within each support document."
+        ),
+    )
+    parser.add_argument(
+        "--coverage-min-match-weight",
+        type=float,
+        default=3.0,
+        help=(
+            "Minimum matched evidence weight counted by evidence_coverage selection. "
+            "This prevents weak question/entity overlaps from forcing extra pages."
+        ),
+    )
     parser.add_argument("--output-jsonl", required=True)
     parser.add_argument("--output-summary-json", required=True)
     parser.add_argument(
@@ -521,6 +539,104 @@ def select_labels(
     return selected
 
 
+def evidence_match_key(match: dict[str, Any]) -> str:
+    return "\t".join(
+        [
+            str(match.get("source", "")).strip(),
+            normalize_text(str(match.get("text", ""))),
+        ]
+    )
+
+
+def evidence_match_weight(match: dict[str, Any]) -> float:
+    try:
+        return float(match.get("weight", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def page_evidence_keys(item: PageScore, *, min_match_weight: float = 0.0) -> set[str]:
+    out = set()
+    for match in item.exact_matches + item.fuzzy_matches:
+        if evidence_match_weight(match) < float(min_match_weight):
+            continue
+        key = evidence_match_key(match)
+        if key.strip():
+            out.add(key)
+    return out
+
+
+def page_evidence_weight_by_key(item: PageScore, *, min_match_weight: float = 0.0) -> dict[str, float]:
+    out: dict[str, float] = defaultdict(float)
+    for match in item.exact_matches + item.fuzzy_matches:
+        weight = evidence_match_weight(match)
+        if weight < float(min_match_weight):
+            continue
+        key = evidence_match_key(match)
+        if key.strip():
+            out[key] += weight
+    return dict(out)
+
+
+def select_labels_by_evidence_coverage(
+    scores: list[PageScore],
+    *,
+    min_score: float,
+    top_pages_per_doc: int,
+    top_pages_per_qid: int,
+    coverage_min_match_weight: float = 3.0,
+) -> list[PageScore]:
+    eligible = [item for item in scores if item.score >= float(min_score)]
+    selected: list[PageScore] = []
+    selected_uids: set[str] = set()
+    per_doc_count: Counter[str] = Counter()
+    covered_by_doc: dict[str, set[str]] = defaultdict(set)
+
+    while eligible:
+        if int(top_pages_per_qid) > 0 and len(selected) >= int(top_pages_per_qid):
+            break
+        best: PageScore | None = None
+        best_key: tuple[int, float, float, int, str] | None = None
+        for item in eligible:
+            if item.page_uid in selected_uids:
+                continue
+            if int(top_pages_per_doc) > 0 and per_doc_count[item.doc_id] >= int(top_pages_per_doc):
+                continue
+            evidence_keys = page_evidence_keys(
+                item,
+                min_match_weight=float(coverage_min_match_weight),
+            )
+            new_keys = evidence_keys - covered_by_doc[item.doc_id]
+            if not new_keys:
+                continue
+            weight_by_key = page_evidence_weight_by_key(
+                item,
+                min_match_weight=float(coverage_min_match_weight),
+            )
+            new_weight = sum(weight_by_key.get(key, 0.0) for key in new_keys)
+            candidate_key = (
+                len(new_keys),
+                float(new_weight),
+                float(item.score),
+                -int(item.page_idx),
+                item.page_uid,
+            )
+            if best_key is None or candidate_key > best_key:
+                best = item
+                best_key = candidate_key
+        if best is None:
+            break
+        selected.append(best)
+        selected_uids.add(best.page_uid)
+        per_doc_count[best.doc_id] += 1
+        covered_by_doc[best.doc_id].update(
+            page_evidence_keys(best, min_match_weight=float(coverage_min_match_weight))
+        )
+
+    selected.sort(key=lambda item: (-float(item.score), item.doc_id, int(item.page_idx)))
+    return selected
+
+
 def confidence(score: float) -> str:
     if score >= 14.0:
         return "high"
@@ -553,7 +669,7 @@ def label_status(selected: list[PageScore], missing_docs: list[str], gold_docs: 
     return "no_evidence_match"
 
 
-def augmented_gold_row(row: dict[str, Any], selected: list[PageScore]) -> dict[str, Any]:
+def augmented_gold_row(row: dict[str, Any], selected: list[PageScore], *, selection_policy: str) -> dict[str, Any]:
     out = json.loads(json.dumps(row))
     metadata = out.setdefault("metadata", {})
     if not isinstance(metadata, dict):
@@ -566,6 +682,7 @@ def augmented_gold_row(row: dict[str, Any], selected: list[PageScore]) -> dict[s
     metadata["pseudo_gold_page_label_scores"] = {
         item.page_uid: round(float(item.score), 6) for item in selected
     }
+    metadata["pseudo_gold_page_label_selection_policy"] = selection_policy
     return out
 
 
@@ -643,12 +760,21 @@ def main() -> None:
                     pages_by_doc,
                     min_token_overlap=float(args.min_token_overlap),
                 )
-                selected = select_labels(
-                    scored,
-                    min_score=float(args.min_score),
-                    top_pages_per_doc=int(args.top_pages_per_doc),
-                    top_pages_per_qid=int(args.top_pages_per_qid),
-                )
+                if args.selection_policy == "evidence_coverage":
+                    selected = select_labels_by_evidence_coverage(
+                        scored,
+                        min_score=float(args.min_score),
+                        top_pages_per_doc=int(args.top_pages_per_doc),
+                        top_pages_per_qid=int(args.top_pages_per_qid),
+                        coverage_min_match_weight=float(args.coverage_min_match_weight),
+                    )
+                else:
+                    selected = select_labels(
+                        scored,
+                        min_score=float(args.min_score),
+                        top_pages_per_doc=int(args.top_pages_per_doc),
+                        top_pages_per_qid=int(args.top_pages_per_qid),
+                    )
                 gold_docs = supporting_doc_ids(row)
                 status = label_status(selected, missing_docs, gold_docs)
                 status_counts[status] += 1
@@ -679,7 +805,15 @@ def main() -> None:
                 out_handle.write(json.dumps(output_row, ensure_ascii=False) + "\n")
                 if aug_handle is not None:
                     aug_handle.write(
-                        json.dumps(augmented_gold_row(row, selected), ensure_ascii=False) + "\n"
+                        json.dumps(
+                            augmented_gold_row(
+                                row,
+                                selected,
+                                selection_policy=str(args.selection_policy),
+                            ),
+                            ensure_ascii=False,
+                        )
+                        + "\n"
                     )
         finally:
             if aug_handle is not None:
@@ -713,6 +847,8 @@ def main() -> None:
         "top_pages_per_doc": int(args.top_pages_per_doc),
         "top_pages_per_qid": int(args.top_pages_per_qid),
         "min_token_overlap": float(args.min_token_overlap),
+        "selection_policy": str(args.selection_policy),
+        "coverage_min_match_weight": float(args.coverage_min_match_weight),
         "output_jsonl": str(output_jsonl),
         "output_augmented_gold_jsonl": str(augmented_path) if augmented_path else "",
     }
