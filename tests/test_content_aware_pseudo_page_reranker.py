@@ -88,7 +88,7 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
             respect_pseudo_supervision_tiers=True,
         )
 
-        _X, y, metadata = MODULE.build_matrix(
+        _X, y, row_weights, metadata = MODULE.build_matrix(
             gold=gold,
             base_pred=base_pred,
             page_features={},
@@ -107,6 +107,86 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
         self.assertEqual(metadata["supervision_tier_counts"]["complete_direct"], 1)
         self.assertEqual(metadata["supervision_tier_counts"]["partial_direct_positive_only"], 1)
         self.assertEqual(metadata["supervision_tier_counts"]["exclude_unlabeled"], 1)
+        self.assertTrue((row_weights == 1.0).all())
+
+    def test_build_matrix_can_use_weighted_eu_v4_supervision(self) -> None:
+        gold = {
+            "q_complete": {
+                "qid": "q_complete",
+                "question": "Where is the complete evidence?",
+                "supporting_context": [{"doc_id": "docA", "doc_part": "text"}],
+                "metadata": {
+                    "gold_page_uids": ["docA_page0"],
+                    "pseudo_gold_page_supervision_tiers": {"docA_page0": "direct"},
+                    "pseudo_gold_qid_supervision_tier": "complete_direct",
+                    "pseudo_gold_negative_supervision_scope": "non_support_docs_only",
+                },
+            },
+            "q_partial": {
+                "qid": "q_partial",
+                "question": "Where is the partial image evidence?",
+                "supporting_context": [{"doc_id": "docB", "doc_part": "image"}],
+                "metadata": {
+                    "gold_page_uids": ["docB_page0"],
+                    "pseudo_gold_page_supervision_tiers": {"docB_page0": "visual_proxy"},
+                    "pseudo_gold_qid_supervision_tier": "partial_hybrid_positive_only",
+                    "pseudo_gold_negative_supervision_scope": "non_support_docs_only",
+                },
+            },
+        }
+        base_pred = {
+            "q_complete": {
+                "qid": "q_complete",
+                "page_retrieval_results": [
+                    ["docA", 0, 10.0],
+                    ["docA", 1, 9.5],
+                    ["docA", 3, 9.0],
+                    ["docNoise", 0, 8.0],
+                ],
+            },
+            "q_partial": {
+                "qid": "q_partial",
+                "page_retrieval_results": [
+                    ["docB", 0, 10.0],
+                    ["docB", 3, 9.0],
+                    ["docOther", 0, 8.0],
+                ],
+            },
+        }
+        args = Namespace(
+            candidate_top_k=4,
+            negatives_per_band=3,
+            max_negatives_per_qid=5,
+            seed=13,
+            active_feature_names=MODULE.FEATURE_NAMES,
+            respect_pseudo_supervision_tiers=True,
+            pseudo_supervision_weighting=True,
+            hybrid_positive_weight=0.8,
+            visual_proxy_positive_weight=0.6,
+            partial_positive_weight=0.5,
+            include_safe_support_doc_negatives=True,
+            safe_support_doc_negative_weight=0.25,
+            max_safe_support_doc_negatives_per_qid=2,
+        )
+
+        _X, y, row_weights, metadata = MODULE.build_matrix(
+            gold=gold,
+            base_pred=base_pred,
+            page_features={},
+            source_maps_by_label={},
+            args=args,
+        )
+
+        self.assertEqual(int(y.sum()), 2)
+        self.assertEqual(metadata["positive_count"], 2)
+        self.assertEqual(metadata["negative_count"], 2)
+        self.assertEqual(metadata["safe_support_doc_negative_count"], 1)
+        self.assertEqual(metadata["positive_only_qid_count"], 1)
+        self.assertTrue(metadata["pseudo_supervision_weighting"])
+        self.assertTrue(metadata["include_safe_support_doc_negatives"])
+        self.assertIn(1.0, row_weights.tolist())
+        self.assertIn(0.5, row_weights.tolist())
+        self.assertIn(0.25, row_weights.tolist())
 
     def test_content_reranker_promotes_question_matching_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

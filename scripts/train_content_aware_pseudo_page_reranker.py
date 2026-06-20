@@ -248,6 +248,29 @@ def parse_args() -> argparse.Namespace:
             "negatives, and non_support_docs_only negative scopes avoid support-doc pages."
         ),
     )
+    parser.add_argument(
+        "--pseudo-supervision-weighting",
+        action="store_true",
+        help=(
+            "Use confidence-aware row weights from pseudo-label metadata. Direct complete "
+            "positives keep full weight; visual-proxy, hybrid, and partial positives are "
+            "downweighted; optional safe support-doc negatives are low-weight."
+        ),
+    )
+    parser.add_argument("--hybrid-positive-weight", type=float, default=0.80)
+    parser.add_argument("--visual-proxy-positive-weight", type=float, default=0.60)
+    parser.add_argument("--partial-positive-weight", type=float, default=0.50)
+    parser.add_argument(
+        "--include-safe-support-doc-negatives",
+        action="store_true",
+        help=(
+            "When respecting pseudo supervision tiers, add a small number of low-weight "
+            "support-document negatives that are not pseudo-positive and are not adjacent "
+            "to a pseudo-positive page in the same document."
+        ),
+    )
+    parser.add_argument("--safe-support-doc-negative-weight", type=float, default=0.25)
+    parser.add_argument("--max-safe-support-doc-negatives-per-qid", type=int, default=4)
     parser.add_argument("--epochs", type=int, default=80)
     parser.add_argument("--learning-rate", type=float, default=0.01)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
@@ -863,6 +886,65 @@ def is_positive_only_supervision_tier(tier: str) -> bool:
     return "positive_only" in tier
 
 
+def page_supervision_tiers(row: dict[str, Any]) -> dict[str, str]:
+    metadata = pseudo_supervision_metadata(row)
+    values = metadata.get("pseudo_gold_page_supervision_tiers", {})
+    if not isinstance(values, dict):
+        return {}
+    return {str(uid): str(tier) for uid, tier in values.items()}
+
+
+def positive_row_weight(uid: str, row: dict[str, Any], args: argparse.Namespace) -> float:
+    if not bool(getattr(args, "pseudo_supervision_weighting", False)):
+        return 1.0
+    qid_tier = qid_supervision_tier(row)
+    page_tier = page_supervision_tiers(row).get(uid, "")
+    if "partial" in qid_tier or "support_incomplete" in qid_tier:
+        return float(args.partial_positive_weight)
+    if page_tier == "visual_proxy":
+        return float(args.visual_proxy_positive_weight)
+    if page_tier in {"mixed_direct_proxy", "direct_visual_verified"}:
+        return float(args.hybrid_positive_weight)
+    if "hybrid" in qid_tier:
+        return float(args.hybrid_positive_weight)
+    return 1.0
+
+
+def positive_page_locations(positive_uids: set[str]) -> dict[str, set[int]]:
+    out: dict[str, set[int]] = defaultdict(set)
+    for uid in positive_uids:
+        parsed = parse_page_uid(uid)
+        if parsed:
+            doc_id, page_idx = parsed
+            out[doc_id].add(int(page_idx))
+    return out
+
+
+def safe_support_doc_negative_indices(
+    records: list[dict[str, Any]],
+    positive_uids: set[str],
+    support_docs: set[str],
+    args: argparse.Namespace,
+) -> list[int]:
+    if not bool(getattr(args, "include_safe_support_doc_negatives", False)):
+        return []
+    positive_by_doc = positive_page_locations(positive_uids)
+    selected: list[int] = []
+    for idx, record in enumerate(records):
+        uid = str(record["uid"])
+        doc_id = str(record.get("doc_id", "")).strip()
+        if uid in positive_uids or doc_id not in support_docs:
+            continue
+        page_idx = int(record.get("page_idx", 0))
+        positive_pages = positive_by_doc.get(doc_id, set())
+        if any(abs(page_idx - positive_idx) <= 1 for positive_idx in positive_pages):
+            continue
+        selected.append(idx)
+        if len(selected) >= int(args.max_safe_support_doc_negatives_per_qid):
+            break
+    return selected
+
+
 def split_gold_for_tuning(
     gold: dict[str, dict[str, Any]],
     *,
@@ -929,9 +1011,10 @@ def build_matrix(
     page_features: dict[str, dict[str, Any]],
     source_maps_by_label: dict[str, dict[str, dict[str, float]]],
     args: argparse.Namespace,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
     vectors: list[list[float]] = []
     labels: list[int] = []
+    row_weights: list[float] = []
     qid_count = 0
     qid_with_positive_in_pool = 0
     skipped_no_page_gold = 0
@@ -943,6 +1026,9 @@ def build_matrix(
     qid_without_negative_rows = 0
     positive_count = 0
     negative_count = 0
+    weighted_positive_count = 0.0
+    weighted_negative_count = 0.0
+    safe_support_doc_negative_count = 0
     supervision_tier_counts: Counter[str] = Counter()
     negative_scope_counts: Counter[str] = Counter()
     negative_excluded_support_doc_qids = 0
@@ -975,6 +1061,7 @@ def build_matrix(
         qid_with_positive_in_pool += 1
         positive_only_tier = respect_tiers and is_positive_only_supervision_tier(tier)
         negative_indices: list[int] = []
+        safe_support_negative_indices: list[int] = []
         if positive_only_tier:
             positive_only_qid_count += 1
         else:
@@ -989,6 +1076,19 @@ def build_matrix(
                 args,
                 excluded_doc_ids=excluded_doc_ids,
             )
+            if respect_tiers:
+                safe_support_negative_indices = safe_support_doc_negative_indices(
+                    records,
+                    positive_uids,
+                    support_doc_ids(gold_row),
+                    args,
+                )
+                safe_support_doc_negative_count += len(safe_support_negative_indices)
+                seen_negative_indices = set(negative_indices)
+                for idx in safe_support_negative_indices:
+                    if idx not in seen_negative_indices:
+                        negative_indices.append(idx)
+                        seen_negative_indices.add(idx)
         if negative_indices:
             qid_with_negative_rows += 1
         else:
@@ -1019,6 +1119,9 @@ def build_matrix(
                 )
             )
             labels.append(1)
+            weight = positive_row_weight(records[idx]["uid"], gold_row, args)
+            row_weights.append(float(weight))
+            weighted_positive_count += float(weight)
             positive_count += 1
         for idx in negative_indices:
             vectors.append(
@@ -1037,6 +1140,12 @@ def build_matrix(
                 )
             )
             labels.append(0)
+            if idx in safe_support_negative_indices:
+                weight = float(args.safe_support_doc_negative_weight)
+            else:
+                weight = 1.0
+            row_weights.append(float(weight))
+            weighted_negative_count += float(weight)
             negative_count += 1
 
     if not vectors:
@@ -1053,13 +1162,25 @@ def build_matrix(
         "qid_without_negative_rows": int(qid_without_negative_rows),
         "positive_count": int(positive_count),
         "negative_count": int(negative_count),
+        "weighted_positive_count": float(weighted_positive_count),
+        "weighted_negative_count": float(weighted_negative_count),
+        "safe_support_doc_negative_count": int(safe_support_doc_negative_count),
         "row_count": int(len(vectors)),
         "respect_pseudo_supervision_tiers": bool(respect_tiers),
+        "pseudo_supervision_weighting": bool(getattr(args, "pseudo_supervision_weighting", False)),
+        "include_safe_support_doc_negatives": bool(
+            getattr(args, "include_safe_support_doc_negatives", False)
+        ),
         "negative_excluded_support_doc_qids": int(negative_excluded_support_doc_qids),
         "supervision_tier_counts": dict(sorted(supervision_tier_counts.items())),
         "negative_scope_counts": dict(sorted(negative_scope_counts.items())),
     }
-    return np.asarray(vectors, dtype=np.float32), np.asarray(labels, dtype=np.float32), metadata
+    return (
+        np.asarray(vectors, dtype=np.float32),
+        np.asarray(labels, dtype=np.float32),
+        np.asarray(row_weights, dtype=np.float32),
+        metadata,
+    )
 
 
 def standardize_train(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1078,7 +1199,13 @@ def sigmoid(values: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-values))
 
 
-def train_logistic(X: np.ndarray, y: np.ndarray, args: argparse.Namespace) -> tuple[np.ndarray, float, list[dict[str, float]]]:
+def train_logistic(
+    X: np.ndarray,
+    y: np.ndarray,
+    args: argparse.Namespace,
+    *,
+    row_weights: np.ndarray | None = None,
+) -> tuple[np.ndarray, float, list[dict[str, float]]]:
     rng = np.random.default_rng(int(args.seed))
     w = np.zeros(X.shape[1], dtype=np.float32)
     b = np.float32(0.0)
@@ -1086,10 +1213,17 @@ def train_logistic(X: np.ndarray, y: np.ndarray, args: argparse.Namespace) -> tu
     v_w = np.zeros_like(w)
     m_b = np.float32(0.0)
     v_b = np.float32(0.0)
-    pos = float(y.sum())
-    neg = float(len(y) - y.sum())
+    base_weights = (
+        np.ones_like(y, dtype=np.float32)
+        if row_weights is None
+        else np.asarray(row_weights, dtype=np.float32)
+    )
+    if base_weights.shape != y.shape:
+        raise ValueError(f"row_weights shape {base_weights.shape} does not match y shape {y.shape}")
+    pos = float(base_weights[y > 0.5].sum())
+    neg = float(base_weights[y <= 0.5].sum())
     pos_weight = min(float(args.positive_weight_cap), neg / max(pos, 1.0))
-    weights = np.where(y > 0.5, pos_weight, 1.0).astype(np.float32)
+    weights = (base_weights * np.where(y > 0.5, pos_weight, 1.0)).astype(np.float32)
     history: list[dict[str, float]] = []
     step = 0
     beta1 = 0.9
@@ -3043,7 +3177,7 @@ def main() -> None:
             seed=int(args.seed),
         )
 
-    X, y, train_meta = build_matrix(
+    X, y, row_weights, train_meta = build_matrix(
         gold=fit_gold,
         base_pred=train_base,
         page_features=train_page_features,
@@ -3051,7 +3185,7 @@ def main() -> None:
         args=args,
     )
     X_train, mean, std = standardize_train(X)
-    weights, bias, history = train_logistic(X_train, y, args)
+    weights, bias, history = train_logistic(X_train, y, args, row_weights=row_weights)
 
     tuning_summary: dict[str, Any] | None = None
     if bool(args.auto_tune_blend_alpha):
@@ -3077,7 +3211,7 @@ def main() -> None:
         ):
             args.adaptive_alpha_config = tuning_summary.get("adaptive_alpha_config")
         if not bool(args.skip_retrain_after_tuning):
-            X, y, train_meta = build_matrix(
+            X, y, row_weights, train_meta = build_matrix(
                 gold=train_gold,
                 base_pred=train_base,
                 page_features=train_page_features,
@@ -3085,7 +3219,7 @@ def main() -> None:
                 args=args,
             )
             X_train, mean, std = standardize_train(X)
-            weights, bias, history = train_logistic(X_train, y, args)
+            weights, bias, history = train_logistic(X_train, y, args, row_weights=row_weights)
         train_meta = {
             **train_meta,
             "auto_tune_blend_alpha": True,
@@ -3160,6 +3294,13 @@ def main() -> None:
             "alpha_utility_risk_penalty_grid": str(args.alpha_utility_risk_penalty_grid),
             "feature_set": args.feature_set,
             "respect_pseudo_supervision_tiers": bool(args.respect_pseudo_supervision_tiers),
+            "pseudo_supervision_weighting": bool(args.pseudo_supervision_weighting),
+            "hybrid_positive_weight": float(args.hybrid_positive_weight),
+            "visual_proxy_positive_weight": float(args.visual_proxy_positive_weight),
+            "partial_positive_weight": float(args.partial_positive_weight),
+            "include_safe_support_doc_negatives": bool(args.include_safe_support_doc_negatives),
+            "safe_support_doc_negative_weight": float(args.safe_support_doc_negative_weight),
+            "max_safe_support_doc_negatives_per_qid": int(args.max_safe_support_doc_negatives_per_qid),
         },
     }
     output_model_json = Path(args.output_model_json)

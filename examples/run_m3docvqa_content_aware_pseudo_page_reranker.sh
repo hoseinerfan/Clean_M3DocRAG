@@ -152,6 +152,12 @@ supervision_tier_args=()
 if [[ "${RESPECT_PSEUDO_SUPERVISION_TIERS:-0}" == "1" ]]; then
   supervision_tier_args+=(--respect-pseudo-supervision-tiers)
 fi
+if [[ "${PSEUDO_SUPERVISION_WEIGHTING:-0}" == "1" ]]; then
+  supervision_tier_args+=(--pseudo-supervision-weighting)
+fi
+if [[ "${INCLUDE_SAFE_SUPPORT_DOC_NEGATIVES:-0}" == "1" ]]; then
+  supervision_tier_args+=(--include-safe-support-doc-negatives)
+fi
 
 echo "using_train_gold=$TRAIN_GOLD"
 echo "using_eval_gold=$EVAL_GOLD"
@@ -169,6 +175,8 @@ echo "using_learned_alpha_action=${LEARNED_ALPHA_ACTION:-0}"
 echo "using_learned_alpha_utility_gate=${LEARNED_ALPHA_UTILITY_GATE:-0}"
 echo "using_base_aware_alpha_utility_gate=${BASE_AWARE_ALPHA_UTILITY_GATE:-0}"
 echo "using_respect_pseudo_supervision_tiers=${RESPECT_PSEUDO_SUPERVISION_TIERS:-0}"
+echo "using_pseudo_supervision_weighting=${PSEUDO_SUPERVISION_WEIGHTING:-0}"
+echo "using_include_safe_support_doc_negatives=${INCLUDE_SAFE_SUPPORT_DOC_NEGATIVES:-0}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -193,6 +201,11 @@ echo "using_respect_pseudo_supervision_tiers=${RESPECT_PSEUDO_SUPERVISION_TIERS:
   --blend-alpha "${BLEND_ALPHA:-0.30}" \
   "${auto_tune_args[@]}" \
   "${supervision_tier_args[@]}" \
+  --hybrid-positive-weight "${HYBRID_POSITIVE_WEIGHT:-0.80}" \
+  --visual-proxy-positive-weight "${VISUAL_PROXY_POSITIVE_WEIGHT:-0.60}" \
+  --partial-positive-weight "${PARTIAL_POSITIVE_WEIGHT:-0.50}" \
+  --safe-support-doc-negative-weight "${SAFE_SUPPORT_DOC_NEGATIVE_WEIGHT:-0.25}" \
+  --max-safe-support-doc-negatives-per-qid "${MAX_SAFE_SUPPORT_DOC_NEGATIVES_PER_QID:-4}" \
   --tune-fraction "${TUNE_FRACTION:-0.20}" \
   --tune-blend-alpha-grid "${TUNE_BLEND_ALPHA_GRID:-0.05,0.10,0.15,0.20,0.25,0.30,0.35,0.40,0.45,0.50}" \
   --tune-hit-k "${TUNE_HIT_K:-4}" \
