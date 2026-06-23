@@ -183,6 +183,7 @@ echo "using_respect_pseudo_supervision_tiers=${RESPECT_PSEUDO_SUPERVISION_TIERS:
 echo "using_pseudo_supervision_weighting=${PSEUDO_SUPERVISION_WEIGHTING:-0}"
 echo "using_strict_label_score_weighting=${STRICT_LABEL_SCORE_WEIGHTING:-0}"
 echo "using_include_safe_support_doc_negatives=${INCLUDE_SAFE_SUPPORT_DOC_NEGATIVES:-0}"
+echo "using_negative_sampling_strategy=${NEGATIVE_SAMPLING_STRATEGY:-rank_stratified}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -197,6 +198,7 @@ echo "using_include_safe_support_doc_negatives=${INCLUDE_SAFE_SUPPORT_DOC_NEGATI
   --candidate-top-k "${CANDIDATE_TOP_K:-1000}" \
   --negatives-per-band "${NEGATIVES_PER_BAND:-10}" \
   --max-negatives-per-qid "${MAX_NEGATIVES_PER_QID:-64}" \
+  --negative-sampling-strategy "${NEGATIVE_SAMPLING_STRATEGY:-rank_stratified}" \
   --epochs "${EPOCHS:-80}" \
   --learning-rate "${LEARNING_RATE:-0.01}" \
   --weight-decay "${WEIGHT_DECAY:-1e-4}" \

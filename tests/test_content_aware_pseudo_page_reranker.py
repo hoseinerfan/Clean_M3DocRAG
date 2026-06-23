@@ -21,6 +21,45 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
     def write_jsonl(self, path: Path, rows: list[dict]) -> None:
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
+    def test_negative_sampling_policies_share_budget_but_select_different_pages(self) -> None:
+        records = [
+            {"uid": f"doc{idx}_page0", "doc_id": f"doc{idx}", "base_rank": idx}
+            for idx in range(1, 101)
+        ]
+        positive_uids = {"doc2_page0"}
+        base_args = {
+            "candidate_top_k": 100,
+            "negatives_per_band": 2,
+            "max_negatives_per_qid": 5,
+            "seed": 13,
+        }
+
+        hard = MODULE.pick_negative_indices(
+            records,
+            positive_uids,
+            Namespace(**base_args, negative_sampling_strategy="hard_top"),
+            rng=MODULE.random.Random(13),
+        )
+        uniform = MODULE.pick_negative_indices(
+            records,
+            positive_uids,
+            Namespace(**base_args, negative_sampling_strategy="uniform"),
+            rng=MODULE.random.Random(13),
+        )
+        stratified = MODULE.pick_negative_indices(
+            records,
+            positive_uids,
+            Namespace(**base_args, negative_sampling_strategy="rank_stratified"),
+            rng=MODULE.random.Random(13),
+        )
+
+        self.assertEqual(hard, [0, 2, 3, 4, 5])
+        self.assertEqual(len(uniform), 5)
+        self.assertEqual(len(stratified), 5)
+        self.assertNotEqual(uniform, hard)
+        self.assertNotEqual(stratified, hard)
+        self.assertTrue(all(records[idx]["uid"] not in positive_uids for idx in uniform))
+
     def test_build_matrix_respects_evidence_unit_supervision_tiers(self) -> None:
         gold = {
             "q_complete": {

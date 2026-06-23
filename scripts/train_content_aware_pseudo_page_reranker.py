@@ -240,6 +240,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--negatives-per-band", type=int, default=10)
     parser.add_argument("--max-negatives-per-qid", type=int, default=64)
     parser.add_argument(
+        "--negative-sampling-strategy",
+        choices=["rank_stratified", "uniform", "hard_top"],
+        default="rank_stratified",
+        help=(
+            "Select non-gold training pages with rank-stratified coverage, uniform random "
+            "sampling over the candidate pool, or the highest-ranked hard negatives."
+        ),
+    )
+    parser.add_argument(
         "--respect-pseudo-supervision-tiers",
         action="store_true",
         help=(
@@ -1032,8 +1041,26 @@ def pick_negative_indices(
     args: argparse.Namespace,
     *,
     excluded_doc_ids: set[str] | None = None,
+    rng: random.Random | None = None,
 ) -> list[int]:
     excluded_doc_ids = excluded_doc_ids or set()
+    strategy = str(getattr(args, "negative_sampling_strategy", "rank_stratified"))
+    eligible = [
+        idx
+        for idx, record in enumerate(records)
+        if record["uid"] not in positive_uids
+        and str(record.get("doc_id", "")).strip() not in excluded_doc_ids
+    ]
+    max_negatives = int(args.max_negatives_per_qid)
+    if strategy == "hard_top":
+        return eligible[:max_negatives]
+    if strategy == "uniform":
+        selected = list(eligible)
+        (rng or random.Random(int(getattr(args, "seed", 13)))).shuffle(selected)
+        return selected[:max_negatives]
+    if strategy != "rank_stratified":
+        raise ValueError(f"Unsupported negative sampling strategy: {strategy}")
+
     negative_indices: list[int] = []
     used: set[int] = set()
     bands = [
@@ -1138,6 +1165,7 @@ def build_matrix(
                 positive_uids,
                 args,
                 excluded_doc_ids=excluded_doc_ids,
+                rng=rng,
             )
             if respect_tiers:
                 safe_support_negative_indices = safe_support_doc_negative_indices(
@@ -1229,6 +1257,9 @@ def build_matrix(
         "qid_without_negative_rows": int(qid_without_negative_rows),
         "positive_count": int(positive_count),
         "negative_count": int(negative_count),
+        "negative_sampling_strategy": str(
+            getattr(args, "negative_sampling_strategy", "rank_stratified")
+        ),
         "weighted_positive_count": float(weighted_positive_count),
         "weighted_negative_count": float(weighted_negative_count),
         "safe_support_doc_negative_count": int(safe_support_doc_negative_count),
@@ -3545,6 +3576,9 @@ def main() -> None:
         "adaptive_alpha_config": train_meta.get("adaptive_alpha_config") if isinstance(train_meta, dict) else None,
         "args": {
             "candidate_top_k": int(args.candidate_top_k),
+            "negative_sampling_strategy": str(args.negative_sampling_strategy),
+            "negatives_per_band": int(args.negatives_per_band),
+            "max_negatives_per_qid": int(args.max_negatives_per_qid),
             "model_type": str(args.model_type),
             "mlp_hidden_dim": int(args.mlp_hidden_dim),
             "inference_mode": args.inference_mode,
