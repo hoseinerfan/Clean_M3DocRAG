@@ -7,8 +7,12 @@ import json
 from pathlib import Path
 
 import torch
+from splade_encoder_backend import (
+    SpladeTextEncoder,
+    embedding_rows_to_terms,
+    resolve_encoder_backend,
+)
 from tqdm.auto import tqdm
-from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-name-or-path",
         default="naver/splade-cocondenser-ensembledistil",
+    )
+    parser.add_argument(
+        "--encoder-backend",
+        choices=["auto", "transformers", "sentence-transformers"],
+        default="auto",
     )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=512)
@@ -75,41 +84,6 @@ def resolve_device(raw: str) -> torch.device:
     return torch.device("cpu")
 
 
-def splade_pool(
-    *,
-    logits: torch.Tensor,
-    attention_mask: torch.Tensor,
-    special_token_ids: list[int],
-) -> torch.Tensor:
-    values = torch.log1p(torch.relu(logits))
-    values = values * attention_mask.unsqueeze(-1)
-    pooled = values.max(dim=1).values
-    if special_token_ids:
-        pooled[:, special_token_ids] = 0.0
-    return pooled
-
-
-def prune_sparse_vector(
-    *,
-    weights: torch.Tensor,
-    topk_terms: int,
-    min_weight: float,
-) -> tuple[list[int], list[float]]:
-    nonzero_mask = weights > float(min_weight)
-    if not bool(nonzero_mask.any()):
-        return [], []
-    active_ids = torch.nonzero(nonzero_mask, as_tuple=False).squeeze(-1)
-    active_weights = weights[active_ids]
-    if topk_terms > 0 and active_ids.numel() > topk_terms:
-        top_values, top_indices = torch.topk(active_weights, k=topk_terms)
-        active_ids = active_ids[top_indices]
-        active_weights = top_values
-    order = torch.argsort(active_weights, descending=True)
-    active_ids = active_ids[order]
-    active_weights = active_weights[order]
-    return active_ids.tolist(), [float(value) for value in active_weights.tolist()]
-
-
 def main() -> None:
     args = parse_args()
 
@@ -124,10 +98,13 @@ def main() -> None:
         )
     device = resolve_device(args.device)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    model = AutoModelForMaskedLM.from_pretrained(args.model_name_or_path)
-    model.eval()
-    model.to(device)
+    encoder_backend = resolve_encoder_backend(args.model_name_or_path, args.encoder_backend)
+    encoder = SpladeTextEncoder(
+        model_name_or_path=args.model_name_or_path,
+        backend=encoder_backend,
+        device=device,
+        max_length=int(args.max_length),
+    )
 
     page_uids: list[str] = []
     doc_ids: list[str] = []
@@ -137,32 +114,18 @@ def main() -> None:
     flat_term_weights: list[float] = []
     nnz_counts: list[int] = []
 
-    special_token_ids = list(getattr(tokenizer, "all_special_ids", []) or [])
     with torch.inference_mode():
         for start in tqdm(range(0, len(page_rows), int(args.batch_size)), desc="encode_pages"):
             batch_rows = page_rows[start : start + int(args.batch_size)]
             batch_texts = texts[start : start + int(args.batch_size)]
-            batch = tokenizer(
-                batch_texts,
-                padding=True,
-                truncation=True,
-                max_length=int(args.max_length),
-                return_tensors="pt",
+            pooled = encoder.encode_documents(batch_texts)
+            sparse_rows = embedding_rows_to_terms(
+                pooled,
+                topk_terms=int(args.topk_terms),
+                min_weight=float(args.min_weight),
             )
-            batch = {key: value.to(device) for key, value in batch.items()}
-            outputs = model(**batch)
-            pooled = splade_pool(
-                logits=outputs.logits,
-                attention_mask=batch["attention_mask"],
-                special_token_ids=special_token_ids,
-            ).cpu()
 
-            for row, page_weights in zip(batch_rows, pooled):
-                term_ids, term_weights = prune_sparse_vector(
-                    weights=page_weights,
-                    topk_terms=int(args.topk_terms),
-                    min_weight=float(args.min_weight),
-                )
+            for row, (term_ids, term_weights) in zip(batch_rows, sparse_rows):
                 page_uids.append(str(row["page_uid"]))
                 doc_ids.append(str(row["doc_id"]))
                 page_indices.append(int(row["page_idx"]))
@@ -174,11 +137,12 @@ def main() -> None:
     index_payload = {
         "format": "splade_page_index_v1",
         "model_name_or_path": args.model_name_or_path,
+        "encoder_backend": encoder_backend,
         "page_text_jsonl": args.page_text_jsonl,
         "max_length": int(args.max_length),
         "topk_terms": int(args.topk_terms),
         "min_weight": float(args.min_weight),
-        "vocab_size": int(getattr(tokenizer, "vocab_size", 0) or 0),
+        "vocab_size": encoder.vocab_size,
         "page_uids": page_uids,
         "doc_ids": doc_ids,
         "page_indices": torch.tensor(page_indices, dtype=torch.int32),
@@ -194,6 +158,7 @@ def main() -> None:
     summary = {
         "format": index_payload["format"],
         "model_name_or_path": args.model_name_or_path,
+        "encoder_backend": encoder_backend,
         "page_text_jsonl": args.page_text_jsonl,
         "page_count": len(page_uids),
         "doc_count": len(set(doc_ids)),

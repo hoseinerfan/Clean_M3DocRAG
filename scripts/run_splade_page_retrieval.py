@@ -7,8 +7,12 @@ import json
 from pathlib import Path
 
 import torch
+from splade_encoder_backend import (
+    SpladeTextEncoder,
+    embedding_rows_to_terms,
+    resolve_encoder_backend,
+)
 from tqdm.auto import tqdm
-from transformers import AutoModelForMaskedLM, AutoTokenizer
 
 
 def parse_args() -> argparse.Namespace:
@@ -22,6 +26,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-name-or-path",
         default="naver/splade-cocondenser-ensembledistil",
+    )
+    parser.add_argument(
+        "--encoder-backend",
+        choices=["auto", "transformers", "sentence-transformers"],
+        default="auto",
     )
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-length", type=int, default=64)
@@ -86,41 +95,6 @@ def resolve_device(raw: str) -> torch.device:
     return torch.device("cpu")
 
 
-def splade_pool(
-    *,
-    logits: torch.Tensor,
-    attention_mask: torch.Tensor,
-    special_token_ids: list[int],
-) -> torch.Tensor:
-    values = torch.log1p(torch.relu(logits))
-    values = values * attention_mask.unsqueeze(-1)
-    pooled = values.max(dim=1).values
-    if special_token_ids:
-        pooled[:, special_token_ids] = 0.0
-    return pooled
-
-
-def prune_query_vector(
-    *,
-    weights: torch.Tensor,
-    topk_terms: int,
-    min_weight: float,
-) -> tuple[list[int], list[float]]:
-    mask = weights > float(min_weight)
-    if not bool(mask.any()):
-        return [], []
-    ids = torch.nonzero(mask, as_tuple=False).squeeze(-1)
-    vals = weights[ids]
-    if topk_terms > 0 and ids.numel() > topk_terms:
-        top_vals, top_idx = torch.topk(vals, k=topk_terms)
-        ids = ids[top_idx]
-        vals = top_vals
-    order = torch.argsort(vals, descending=True)
-    ids = ids[order]
-    vals = vals[order]
-    return ids.tolist(), [float(value) for value in vals.tolist()]
-
-
 def first_unique_doc_ranks(retrieval_rows: list[list[object]]) -> dict[str, int]:
     doc2rank: dict[str, int] = {}
     seen: set[str] = set()
@@ -153,6 +127,17 @@ def main() -> None:
     device = resolve_device(args.device)
 
     index_payload = torch.load(Path(args.index_pt), map_location="cpu")
+    encoder_backend = resolve_encoder_backend(args.model_name_or_path, args.encoder_backend)
+    index_model = str(index_payload.get("model_name_or_path", ""))
+    if index_model and index_model != args.model_name_or_path:
+        raise ValueError(
+            f"SPLADE index model mismatch: index={index_model} query={args.model_name_or_path}"
+        )
+    index_backend = str(index_payload.get("encoder_backend", "transformers"))
+    if index_backend != encoder_backend:
+        raise ValueError(
+            f"SPLADE index backend mismatch: index={index_backend} query={encoder_backend}"
+        )
     page_uids: list[str] = list(index_payload["page_uids"])
     doc_ids: list[str] = list(index_payload["doc_ids"])
     page_indices = index_payload["page_indices"].to(torch.int64)
@@ -192,11 +177,12 @@ def main() -> None:
             torch.tensor(posting_weights[term_id], dtype=torch.float32),
         )
 
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
-    model = AutoModelForMaskedLM.from_pretrained(args.model_name_or_path)
-    model.eval()
-    model.to(device)
-    special_token_ids = list(getattr(tokenizer, "all_special_ids", []) or [])
+    encoder = SpladeTextEncoder(
+        model_name_or_path=args.model_name_or_path,
+        backend=encoder_backend,
+        device=device,
+        max_length=int(args.max_length),
+    )
 
     output_jsonl = Path(args.output_jsonl)
     output_jsonl.parent.mkdir(parents=True, exist_ok=True)
@@ -212,27 +198,14 @@ def main() -> None:
         for start in tqdm(range(0, len(qids), int(args.batch_size)), desc="encode_queries"):
             batch_qids = qids[start : start + int(args.batch_size)]
             batch_questions = [str(gold_rows[qid]["question"]) for qid in batch_qids]
-            batch = tokenizer(
-                batch_questions,
-                padding=True,
-                truncation=True,
-                max_length=int(args.max_length),
-                return_tensors="pt",
+            pooled = encoder.encode_queries(batch_questions)
+            sparse_rows = embedding_rows_to_terms(
+                pooled,
+                topk_terms=int(args.query_topk_terms),
+                min_weight=float(args.query_min_weight),
             )
-            batch = {key: value.to(device) for key, value in batch.items()}
-            outputs = model(**batch)
-            pooled = splade_pool(
-                logits=outputs.logits,
-                attention_mask=batch["attention_mask"],
-                special_token_ids=special_token_ids,
-            ).cpu()
 
-            for qid, query_weights in zip(batch_qids, pooled):
-                query_term_ids, query_term_weights = prune_query_vector(
-                    weights=query_weights,
-                    topk_terms=int(args.query_topk_terms),
-                    min_weight=float(args.query_min_weight),
-                )
+            for qid, (query_term_ids, query_term_weights) in zip(batch_qids, sparse_rows):
                 scores = torch.zeros(page_count, dtype=torch.float32)
                 for term_id, query_weight in zip(query_term_ids, query_term_weights):
                     posting = postings.get(int(term_id))
@@ -303,6 +276,7 @@ def main() -> None:
                         "retrieval_method": "splade_page",
                         "index_pt": args.index_pt,
                         "model_name_or_path": args.model_name_or_path,
+                        "encoder_backend": encoder_backend,
                     },
                 }
 
@@ -328,6 +302,7 @@ def main() -> None:
         "qid_count": len(rows),
         "index_pt": args.index_pt,
         "model_name_or_path": args.model_name_or_path,
+        "encoder_backend": encoder_backend,
         "top_pages": int(args.top_pages),
         "query_topk_terms": int(args.query_topk_terms),
         "query_min_weight": float(args.query_min_weight),

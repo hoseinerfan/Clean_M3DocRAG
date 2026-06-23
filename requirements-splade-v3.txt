@@ -1,0 +1,2 @@
+# Optional dependency for the official NAVER SPLADE-v3 SparseEncoder backend.
+sentence-transformers>=5.1,<6
