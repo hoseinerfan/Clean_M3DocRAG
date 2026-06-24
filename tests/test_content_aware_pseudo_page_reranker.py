@@ -1056,6 +1056,34 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
         self.assertEqual(len(tune_a), 2)
         self.assertFalse(set(fit_a) & set(tune_a))
 
+    def test_pairwise_ranknet_learns_question_local_ordering(self) -> None:
+        X = MODULE.np.asarray(
+            [[1.0, 0.0], [-1.0, 0.0], [0.8, 0.2], [-0.8, -0.2]],
+            dtype=MODULE.np.float32,
+        )
+        y = MODULE.np.asarray([1.0, 0.0, 1.0, 0.0], dtype=MODULE.np.float32)
+        query_ids = MODULE.np.asarray(["q1", "q1", "q2", "q2"], dtype=object)
+        args = Namespace(
+            model_type="logistic",
+            training_objective="pairwise_ranknet",
+            seed=7,
+            epochs=80,
+            learning_rate=0.05,
+            weight_decay=0.0,
+            batch_size=4,
+        )
+
+        weights, bias, history = MODULE.train_scorer(
+            X,
+            y,
+            args,
+            query_ids=query_ids,
+        )
+        scores = MODULE.predict_scorer_proba(X, weights, bias)
+        self.assertGreater(scores[0], scores[1])
+        self.assertGreater(scores[2], scores[3])
+        self.assertEqual(history[-1]["pair_count"], 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

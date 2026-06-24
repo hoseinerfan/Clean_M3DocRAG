@@ -184,6 +184,7 @@ echo "using_pseudo_supervision_weighting=${PSEUDO_SUPERVISION_WEIGHTING:-0}"
 echo "using_strict_label_score_weighting=${STRICT_LABEL_SCORE_WEIGHTING:-0}"
 echo "using_include_safe_support_doc_negatives=${INCLUDE_SAFE_SUPPORT_DOC_NEGATIVES:-0}"
 echo "using_negative_sampling_strategy=${NEGATIVE_SAMPLING_STRATEGY:-rank_stratified}"
+echo "using_training_objective=${TRAINING_OBJECTIVE:-weighted_bce}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -204,6 +205,7 @@ echo "using_negative_sampling_strategy=${NEGATIVE_SAMPLING_STRATEGY:-rank_strati
   --weight-decay "${WEIGHT_DECAY:-1e-4}" \
   --batch-size "${BATCH_SIZE:-65536}" \
   --positive-weight-cap "${POSITIVE_WEIGHT_CAP:-20}" \
+  --training-objective "${TRAINING_OBJECTIVE:-weighted_bce}" \
   --model-type "${MODEL_TYPE:-logistic}" \
   --mlp-hidden-dim "${MLP_HIDDEN_DIM:-32}" \
   --seed "${SEED:-13}" \

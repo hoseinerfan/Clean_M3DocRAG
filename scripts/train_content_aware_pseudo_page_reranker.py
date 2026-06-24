@@ -300,6 +300,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=65536)
     parser.add_argument("--positive-weight-cap", type=float, default=20.0)
     parser.add_argument(
+        "--training-objective",
+        choices=["weighted_bce", "pairwise_ranknet"],
+        default="weighted_bce",
+        help=(
+            "Train the evidence scorer with pointwise weighted binary cross-entropy or "
+            "question-local RankNet positive-versus-negative pairs."
+        ),
+    )
+    parser.add_argument(
         "--model-type",
         choices=["logistic", "mlp"],
         default="logistic",
@@ -1100,10 +1109,12 @@ def build_matrix(
     page_features: dict[str, dict[str, Any]],
     source_maps_by_label: dict[str, dict[str, dict[str, float]]],
     args: argparse.Namespace,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
+    return_query_ids: bool = False,
+) -> Any:
     vectors: list[list[float]] = []
     labels: list[int] = []
     row_weights: list[float] = []
+    query_ids: list[str] = []
     qid_count = 0
     qid_with_positive_in_pool = 0
     skipped_no_page_gold = 0
@@ -1214,6 +1225,7 @@ def build_matrix(
                 )
             )
             labels.append(1)
+            query_ids.append(qid)
             weight = positive_row_weight(records[idx]["uid"], gold_row, args)
             row_weights.append(float(weight))
             weighted_positive_count += float(weight)
@@ -1235,6 +1247,7 @@ def build_matrix(
                 )
             )
             labels.append(0)
+            query_ids.append(qid)
             if idx in safe_support_negative_indices:
                 weight = float(args.safe_support_doc_negative_weight)
             else:
@@ -1260,6 +1273,7 @@ def build_matrix(
         "negative_sampling_strategy": str(
             getattr(args, "negative_sampling_strategy", "rank_stratified")
         ),
+        "training_objective": str(getattr(args, "training_objective", "weighted_bce")),
         "weighted_positive_count": float(weighted_positive_count),
         "weighted_negative_count": float(weighted_negative_count),
         "safe_support_doc_negative_count": int(safe_support_doc_negative_count),
@@ -1277,12 +1291,15 @@ def build_matrix(
         "negative_scope_counts": dict(sorted(negative_scope_counts.items())),
         "strict_score_band_counts": dict(sorted(strict_score_band_counts.items())),
     }
-    return (
+    result = (
         np.asarray(vectors, dtype=np.float32),
         np.asarray(labels, dtype=np.float32),
         np.asarray(row_weights, dtype=np.float32),
         metadata,
     )
+    if return_query_ids:
+        return (*result, np.asarray(query_ids, dtype=object))
+    return result
 
 
 def standardize_train(X: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -1369,6 +1386,90 @@ def train_logistic(
         if epoch == 1 or epoch == int(args.epochs) or epoch % max(1, int(args.epochs) // 10) == 0:
             history.append({"epoch": float(epoch), "loss": total_loss / max(total_weight, 1.0)})
     return w.astype(np.float32), float(b), history
+
+
+def ranknet_pair_indices(y: np.ndarray, query_ids: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    grouped: dict[str, dict[str, list[int]]] = {}
+    for idx, (label, qid) in enumerate(zip(y.tolist(), query_ids.tolist())):
+        group = grouped.setdefault(str(qid), {"positive": [], "negative": []})
+        group["positive" if float(label) > 0.5 else "negative"].append(idx)
+    positive_indices: list[int] = []
+    negative_indices: list[int] = []
+    for group in grouped.values():
+        for positive_idx in group["positive"]:
+            for negative_idx in group["negative"]:
+                positive_indices.append(positive_idx)
+                negative_indices.append(negative_idx)
+    if not positive_indices:
+        raise ValueError("Pairwise RankNet training produced no positive-negative pairs")
+    return (
+        np.asarray(positive_indices, dtype=np.int32),
+        np.asarray(negative_indices, dtype=np.int32),
+    )
+
+
+def train_logistic_pairwise(
+    X: np.ndarray,
+    y: np.ndarray,
+    query_ids: np.ndarray,
+    args: argparse.Namespace,
+    *,
+    row_weights: np.ndarray | None = None,
+) -> tuple[np.ndarray, float, list[dict[str, float]]]:
+    positive_indices, negative_indices = ranknet_pair_indices(y, query_ids)
+    base_weights = (
+        np.ones_like(y, dtype=np.float32)
+        if row_weights is None
+        else np.asarray(row_weights, dtype=np.float32)
+    )
+    pair_weights = np.sqrt(
+        base_weights[positive_indices] * base_weights[negative_indices]
+    ).astype(np.float32)
+    rng = np.random.default_rng(int(args.seed))
+    w = np.zeros(X.shape[1], dtype=np.float32)
+    m_w = np.zeros_like(w)
+    v_w = np.zeros_like(w)
+    history: list[dict[str, float]] = []
+    step = 0
+    beta1 = 0.9
+    beta2 = 0.999
+    eps = 1e-8
+    learning_rate = float(args.learning_rate)
+    batch_size = int(args.batch_size)
+
+    for epoch in range(1, int(args.epochs) + 1):
+        order = rng.permutation(len(positive_indices))
+        total_loss = 0.0
+        total_weight = 0.0
+        for start in range(0, len(order), batch_size):
+            pair_idx = order[start : start + batch_size]
+            pos_idx = positive_indices[pair_idx]
+            neg_idx = negative_indices[pair_idx]
+            diff = X[pos_idx] - X[neg_idx]
+            weights_batch = pair_weights[pair_idx]
+            logits = diff @ w
+            probs = sigmoid(logits)
+            error = (probs - 1.0) * weights_batch
+            denom = max(float(weights_batch.sum()), 1.0)
+            grad_w = (diff.T @ error) / denom + float(args.weight_decay) * w
+            step += 1
+            m_w = beta1 * m_w + (1.0 - beta1) * grad_w
+            v_w = beta2 * v_w + (1.0 - beta2) * (grad_w * grad_w)
+            m_w_hat = m_w / (1.0 - beta1**step)
+            v_w_hat = v_w / (1.0 - beta2**step)
+            w -= learning_rate * m_w_hat / (np.sqrt(v_w_hat) + eps)
+            loss = -np.log(np.clip(probs, 1e-6, 1.0))
+            total_loss += float((loss * weights_batch).sum())
+            total_weight += float(weights_batch.sum())
+        if epoch == 1 or epoch == int(args.epochs) or epoch % max(1, int(args.epochs) // 10) == 0:
+            history.append(
+                {
+                    "epoch": float(epoch),
+                    "loss": total_loss / max(total_weight, 1.0),
+                    "pair_count": float(len(positive_indices)),
+                }
+            )
+    return w.astype(np.float32), 0.0, history
 
 
 def weighted_training_weights(
@@ -1507,7 +1608,20 @@ def train_scorer(
     args: argparse.Namespace,
     *,
     row_weights: np.ndarray | None = None,
+    query_ids: np.ndarray | None = None,
 ) -> tuple[Any, float, list[dict[str, float]]]:
+    if str(getattr(args, "training_objective", "weighted_bce")) == "pairwise_ranknet":
+        if str(getattr(args, "model_type", "logistic")) != "logistic":
+            raise ValueError("pairwise_ranknet currently requires --model-type logistic")
+        if query_ids is None:
+            raise ValueError("pairwise_ranknet requires query IDs for question-local pairs")
+        return train_logistic_pairwise(
+            X,
+            y,
+            query_ids,
+            args,
+            row_weights=row_weights,
+        )
     if str(getattr(args, "model_type", "logistic")) == "mlp":
         return train_mlp(X, y, args, row_weights=row_weights)
     return train_logistic(X, y, args, row_weights=row_weights)
@@ -3479,15 +3593,22 @@ def main() -> None:
             seed=int(args.seed),
         )
 
-    X, y, row_weights, train_meta = build_matrix(
+    X, y, row_weights, train_meta, query_ids = build_matrix(
         gold=fit_gold,
         base_pred=train_base,
         page_features=train_page_features,
         source_maps_by_label=train_source_maps,
         args=args,
+        return_query_ids=True,
     )
     X_train, mean, std = standardize_train(X)
-    weights, bias, history = train_scorer(X_train, y, args, row_weights=row_weights)
+    weights, bias, history = train_scorer(
+        X_train,
+        y,
+        args,
+        row_weights=row_weights,
+        query_ids=query_ids,
+    )
 
     tuning_summary: dict[str, Any] | None = None
     if bool(args.auto_tune_blend_alpha):
@@ -3513,15 +3634,22 @@ def main() -> None:
         ):
             args.adaptive_alpha_config = tuning_summary.get("adaptive_alpha_config")
         if not bool(args.skip_retrain_after_tuning):
-            X, y, row_weights, train_meta = build_matrix(
+            X, y, row_weights, train_meta, query_ids = build_matrix(
                 gold=train_gold,
                 base_pred=train_base,
                 page_features=train_page_features,
                 source_maps_by_label=train_source_maps,
                 args=args,
+                return_query_ids=True,
             )
             X_train, mean, std = standardize_train(X)
-            weights, bias, history = train_scorer(X_train, y, args, row_weights=row_weights)
+            weights, bias, history = train_scorer(
+                X_train,
+                y,
+                args,
+                row_weights=row_weights,
+                query_ids=query_ids,
+            )
         train_meta = {
             **train_meta,
             "auto_tune_blend_alpha": True,
@@ -3576,6 +3704,7 @@ def main() -> None:
         "adaptive_alpha_config": train_meta.get("adaptive_alpha_config") if isinstance(train_meta, dict) else None,
         "args": {
             "candidate_top_k": int(args.candidate_top_k),
+            "training_objective": str(args.training_objective),
             "negative_sampling_strategy": str(args.negative_sampling_strategy),
             "negatives_per_band": int(args.negatives_per_band),
             "max_negatives_per_qid": int(args.max_negatives_per_qid),
