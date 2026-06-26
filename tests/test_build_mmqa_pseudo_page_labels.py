@@ -339,6 +339,119 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
             sources = row["evidence_source_counts"]
             self.assertGreater(sources.get("text_instance_context", 0), 0)
 
+    def test_zero_weight_start_byte_context_verifies_text_instance_tie(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            gold = root / "MMQA_dev.jsonl"
+            pages = root / "page_text.jsonl"
+            texts = root / "MMQA_texts.jsonl"
+            out = root / "labels.jsonl"
+            summary = root / "summary.json"
+
+            full_text = (
+                "Header. target answer alpha river mountain canyon contains local evidence."
+            )
+            start_byte = len("Header. ".encode("utf-8"))
+
+            self.write_jsonl(
+                gold,
+                [
+                    {
+                        "qid": "q_context_verify",
+                        "question": "Which page contains the target answer?",
+                        "answers": [
+                            {
+                                "answer": "target answer",
+                                "text_instances": [
+                                    {
+                                        "doc_id": "text_doc",
+                                        "text": "target answer",
+                                        "start_byte": start_byte,
+                                    }
+                                ],
+                                "table_indices": [],
+                                "image_instances": [],
+                            }
+                        ],
+                        "metadata": {"type": "TextQ"},
+                        "supporting_context": [{"doc_id": "text_doc", "doc_part": "text"}],
+                    }
+                ],
+            )
+            self.write_jsonl(
+                pages,
+                [
+                    {"doc_id": "text_doc", "page_idx": 0, "text": "target answer appears in a generic note."},
+                    {
+                        "doc_id": "text_doc",
+                        "page_idx": 1,
+                        "text": "target answer alpha river mountain canyon contains local evidence.",
+                    },
+                ],
+            )
+            self.write_jsonl(
+                texts,
+                [
+                    {
+                        "id": "text_doc",
+                        "title": "Text Document",
+                        "url": "https://en.wikipedia.org/wiki/Text_Document",
+                        "text": full_text,
+                    }
+                ],
+            )
+
+            old_argv = sys.argv
+            try:
+                sys.argv = [
+                    "build_mmqa_pseudo_page_labels.py",
+                    "--gold",
+                    str(gold),
+                    "--doc-pages-jsonl",
+                    str(pages),
+                    "--mmqa-texts-jsonl",
+                    str(texts),
+                    "--min-score",
+                    "8",
+                    "--top-pages-per-doc",
+                    "1",
+                    "--top-pages-per-qid",
+                    "4",
+                    "--evidence-weight-overrides",
+                    (
+                        "answer_text=0,text_instance=10,text_instance_context=0,"
+                        "image_title=10,image_doc_title=0,table_title=0,"
+                        "table_answer_cell=10,table_row_cell=0,table_row_link_text=0,"
+                        "table_row_link_title=0,supporting_doc_title=0,answer_entity=0,"
+                        "question_entity=0,pseudo_question_slot=0"
+                    ),
+                    "--text-instance-context-window-chars",
+                    "80",
+                    "--text-instance-context-verification-bonus",
+                    "5",
+                    "--output-jsonl",
+                    str(out),
+                    "--output-summary-json",
+                    str(summary),
+                ]
+                MODULE.main()
+            finally:
+                sys.argv = old_argv
+
+            row = json.loads(out.read_text(encoding="utf-8").splitlines()[0])
+            self.assertEqual(row["pseudo_gold_page_uids"], ["text_doc_page1"])
+            page = row["pseudo_gold_pages"][0]
+            self.assertEqual(page["score"], 15.0)
+            self.assertEqual(
+                page["verification_matches"][0]["source"],
+                "text_instance_context_verification",
+            )
+            summary_row = json.loads(summary.read_text(encoding="utf-8"))
+            self.assertEqual(
+                summary_row["selected_verification_source_counts"],
+                {"text_instance_context_verification": 1},
+            )
+
     def test_evidence_weight_overrides_update_selected_sources_only(self) -> None:
         weights = MODULE.parse_evidence_weight_overrides(
             "question_entity=0,pseudo_question_slot=0,supporting_doc_title=2.5"

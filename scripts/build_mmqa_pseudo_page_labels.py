@@ -104,6 +104,17 @@ def parse_args() -> argparse.Namespace:
         default=4,
         help="Minimum normalized token length used in text-instance context phrases.",
     )
+    parser.add_argument(
+        "--text-instance-context-verification-bonus",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional non-standalone bonus applied when a page matches both a "
+            "text_instance and start_byte-derived text_instance_context. This lets "
+            "start_byte context verify/disambiguate text evidence without allowing "
+            "context-only matches to create labels."
+        ),
+    )
     parser.add_argument("--output-jsonl", required=True)
     parser.add_argument("--output-summary-json", required=True)
     parser.add_argument(
@@ -168,6 +179,7 @@ class PageScore:
     score: float = 0.0
     exact_matches: list[dict[str, Any]] = field(default_factory=list)
     fuzzy_matches: list[dict[str, Any]] = field(default_factory=list)
+    verification_matches: list[dict[str, Any]] = field(default_factory=list)
 
     def add_exact(self, evidence: Evidence) -> None:
         self.score += float(evidence.weight)
@@ -188,6 +200,16 @@ class PageScore:
                 "text": evidence.text,
                 "overlap": float(overlap),
                 "weight": float(gain),
+            }
+        )
+
+    def add_verification_bonus(self, *, source: str, reason: str, weight: float) -> None:
+        self.score += float(weight)
+        self.verification_matches.append(
+            {
+                "source": source,
+                "reason": reason,
+                "weight": float(weight),
             }
         )
 
@@ -742,6 +764,7 @@ def score_pages(
     pages_by_doc: dict[str, list[dict[str, Any]]],
     *,
     min_token_overlap: float,
+    text_instance_context_verification_bonus: float = 0.0,
 ) -> tuple[list[PageScore], list[str]]:
     gold_docs = supporting_doc_ids(row)
     missing_docs = [doc_id for doc_id in gold_docs if doc_id not in pages_by_doc]
@@ -764,10 +787,35 @@ def score_pages(
                 elif mode == "fuzzy":
                     page_score.add_fuzzy(item, overlap)
             if page_score.score > 0:
+                apply_text_instance_context_verification(
+                    page_score,
+                    bonus=float(text_instance_context_verification_bonus),
+                )
                 scores.append(page_score)
 
     scores.sort(key=lambda item: (-item.score, item.doc_id, item.page_idx))
     return scores, missing_docs
+
+
+def page_matched_sources(item: PageScore) -> set[str]:
+    return {
+        str(match.get("source", ""))
+        for match in item.exact_matches + item.fuzzy_matches
+        if str(match.get("source", "")).strip()
+    }
+
+
+def apply_text_instance_context_verification(item: PageScore, *, bonus: float) -> None:
+    if float(bonus) <= 0.0:
+        return
+    sources = page_matched_sources(item)
+    if "text_instance" not in sources or "text_instance_context" not in sources:
+        return
+    item.add_verification_bonus(
+        source="text_instance_context_verification",
+        reason="page matches text_instance and start_byte-derived local context",
+        weight=float(bonus),
+    )
 
 
 def select_labels(
@@ -908,6 +956,7 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "confidence": confidence(item.score),
         "exact_matches": item.exact_matches[:20],
         "fuzzy_matches": item.fuzzy_matches[:20],
+        "verification_matches": item.verification_matches[:20],
     }
 
 
@@ -986,6 +1035,7 @@ def main() -> None:
     label_counts: list[int] = []
     score_values: list[float] = []
     source_counts: Counter[str] = Counter()
+    verification_source_counts: Counter[str] = Counter()
     missing_doc_count = 0
     matched_qids = 0
 
@@ -1017,6 +1067,9 @@ def main() -> None:
                     evidence,
                     pages_by_doc,
                     min_token_overlap=float(args.min_token_overlap),
+                    text_instance_context_verification_bonus=float(
+                        args.text_instance_context_verification_bonus
+                    ),
                 )
                 if args.selection_policy == "evidence_coverage":
                     selected = select_labels_by_evidence_coverage(
@@ -1042,6 +1095,12 @@ def main() -> None:
                     matched_qtype_counts[question_type] += 1
                 label_counts.append(len(selected))
                 score_values.extend(float(item.score) for item in selected)
+                for item in selected:
+                    verification_source_counts.update(
+                        str(match.get("source", ""))
+                        for match in item.verification_matches
+                        if str(match.get("source", "")).strip()
+                    )
 
                 output_row = {
                     "qid": qid,
@@ -1100,6 +1159,7 @@ def main() -> None:
         "question_type_counts": dict(sorted(qtype_counts.items())),
         "matched_by_question_type": dict(sorted(matched_qtype_counts.items())),
         "evidence_source_counts": dict(sorted(source_counts.items())),
+        "selected_verification_source_counts": dict(sorted(verification_source_counts.items())),
         "missing_page_text_doc_ref_count": int(missing_doc_count),
         "min_score": float(args.min_score),
         "top_pages_per_doc": int(args.top_pages_per_doc),
@@ -1113,6 +1173,9 @@ def main() -> None:
         "text_instance_context_max_phrases": int(args.text_instance_context_max_phrases),
         "text_instance_context_phrase_token_count": int(args.text_instance_context_phrase_token_count),
         "text_instance_context_min_token_len": int(args.text_instance_context_min_token_len),
+        "text_instance_context_verification_bonus": float(
+            args.text_instance_context_verification_bonus
+        ),
         "output_jsonl": str(output_jsonl),
         "output_augmented_gold_jsonl": str(augmented_path) if augmented_path else "",
     }

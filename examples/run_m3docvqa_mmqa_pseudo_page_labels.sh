@@ -31,6 +31,7 @@ TEXT_INSTANCE_CONTEXT_WINDOW_CHARS="${TEXT_INSTANCE_CONTEXT_WINDOW_CHARS:-0}"
 TEXT_INSTANCE_CONTEXT_MAX_PHRASES="${TEXT_INSTANCE_CONTEXT_MAX_PHRASES:-6}"
 TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT="${TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT:-4}"
 TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN="${TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN:-4}"
+TEXT_INSTANCE_CONTEXT_VERIFICATION_BONUS="${TEXT_INSTANCE_CONTEXT_VERIFICATION_BONUS:-0}"
 
 mkdir -p "$OUT_DIR"
 
@@ -49,6 +50,7 @@ echo "using_text_instance_context_window_chars=$TEXT_INSTANCE_CONTEXT_WINDOW_CHA
 echo "using_text_instance_context_max_phrases=$TEXT_INSTANCE_CONTEXT_MAX_PHRASES"
 echo "using_text_instance_context_phrase_token_count=$TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT"
 echo "using_text_instance_context_min_token_len=$TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN"
+echo "using_text_instance_context_verification_bonus=$TEXT_INSTANCE_CONTEXT_VERIFICATION_BONUS"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/build_mmqa_pseudo_page_labels.py" \
   --gold "$GOLD" \
@@ -68,6 +70,7 @@ echo "using_text_instance_context_min_token_len=$TEXT_INSTANCE_CONTEXT_MIN_TOKEN
   --text-instance-context-max-phrases "$TEXT_INSTANCE_CONTEXT_MAX_PHRASES" \
   --text-instance-context-phrase-token-count "$TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT" \
   --text-instance-context-min-token-len "$TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN" \
+  --text-instance-context-verification-bonus "$TEXT_INSTANCE_CONTEXT_VERIFICATION_BONUS" \
   --output-jsonl "$OUT_DIR/${LABEL}.jsonl" \
   --output-summary-json "$OUT_DIR/${LABEL}.summary.json" \
   --output-augmented-gold-jsonl "$OUT_DIR/${LABEL}.augmented_gold.jsonl"
