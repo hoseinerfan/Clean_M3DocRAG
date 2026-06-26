@@ -23,6 +23,7 @@ LABEL="${LABEL:-mmqa_${SPLIT}_pseudo_page_labels}"
 MIN_SCORE="${MIN_SCORE:-4.0}"
 TOP_PAGES_PER_DOC="${TOP_PAGES_PER_DOC:-2}"
 TOP_PAGES_PER_QID="${TOP_PAGES_PER_QID:-8}"
+ADAPTIVE_PAGE_CAPS="${ADAPTIVE_PAGE_CAPS:-0}"
 MIN_TOKEN_OVERLAP="${MIN_TOKEN_OVERLAP:-0.72}"
 SELECTION_POLICY="${SELECTION_POLICY:-score}"
 COVERAGE_MIN_MATCH_WEIGHT="${COVERAGE_MIN_MATCH_WEIGHT:-3.0}"
@@ -45,12 +46,18 @@ echo "using_out_dir=$OUT_DIR"
 echo "using_label=$LABEL"
 echo "using_selection_policy=$SELECTION_POLICY"
 echo "using_coverage_min_match_weight=$COVERAGE_MIN_MATCH_WEIGHT"
+echo "using_adaptive_page_caps=$ADAPTIVE_PAGE_CAPS"
 echo "using_evidence_weight_overrides=$EVIDENCE_WEIGHT_OVERRIDES"
 echo "using_text_instance_context_window_chars=$TEXT_INSTANCE_CONTEXT_WINDOW_CHARS"
 echo "using_text_instance_context_max_phrases=$TEXT_INSTANCE_CONTEXT_MAX_PHRASES"
 echo "using_text_instance_context_phrase_token_count=$TEXT_INSTANCE_CONTEXT_PHRASE_TOKEN_COUNT"
 echo "using_text_instance_context_min_token_len=$TEXT_INSTANCE_CONTEXT_MIN_TOKEN_LEN"
 echo "using_text_instance_context_verification_bonus=$TEXT_INSTANCE_CONTEXT_VERIFICATION_BONUS"
+
+ADAPTIVE_ARGS=()
+if [[ "$ADAPTIVE_PAGE_CAPS" == "1" || "$ADAPTIVE_PAGE_CAPS" == "true" || "$ADAPTIVE_PAGE_CAPS" == "TRUE" ]]; then
+  ADAPTIVE_ARGS+=(--adaptive-page-caps)
+fi
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/build_mmqa_pseudo_page_labels.py" \
   --gold "$GOLD" \
@@ -62,6 +69,7 @@ echo "using_text_instance_context_verification_bonus=$TEXT_INSTANCE_CONTEXT_VERI
   --min-score "$MIN_SCORE" \
   --top-pages-per-doc "$TOP_PAGES_PER_DOC" \
   --top-pages-per-qid "$TOP_PAGES_PER_QID" \
+  "${ADAPTIVE_ARGS[@]}" \
   --min-token-overlap "$MIN_TOKEN_OVERLAP" \
   --selection-policy "$SELECTION_POLICY" \
   --coverage-min-match-weight "$COVERAGE_MIN_MATCH_WEIGHT" \

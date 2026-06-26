@@ -443,14 +443,27 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
             page = row["pseudo_gold_pages"][0]
             self.assertEqual(page["score"], 15.0)
             self.assertEqual(
+                [match["source"] for match in page["positive_exact_matches"]],
+                ["text_instance"],
+            )
+            self.assertIn(
+                "text_instance_context",
+                {match["source"] for match in page["diagnostic_exact_matches"]},
+            )
+            self.assertTrue(
+                all(float(match["weight"]) == 0.0 for match in page["diagnostic_exact_matches"])
+            )
+            self.assertEqual(
                 page["verification_matches"][0]["source"],
                 "text_instance_context_verification",
             )
+            self.assertEqual(row["positive_evidence_source_counts"], {"text_instance": 1})
             summary_row = json.loads(summary.read_text(encoding="utf-8"))
             self.assertEqual(
                 summary_row["selected_verification_source_counts"],
                 {"text_instance_context_verification": 1},
             )
+            self.assertEqual(summary_row["positive_evidence_source_counts"], {"text_instance": 1})
 
     def test_evidence_weight_overrides_update_selected_sources_only(self) -> None:
         weights = MODULE.parse_evidence_weight_overrides(
@@ -468,6 +481,95 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
     def test_evidence_weight_overrides_reject_unknown_source(self) -> None:
         with self.assertRaises(ValueError):
             MODULE.parse_evidence_weight_overrides("unknown_signal=1")
+
+    def test_adaptive_page_caps_follow_direct_evidence_units(self) -> None:
+        row = {
+            "qid": "q_adaptive",
+            "answers": [
+                {
+                    "answer": "unused",
+                    "text_instances": [
+                        {"doc_id": "doc_text", "text": "first evidence"},
+                        {"doc_id": "doc_text", "text": "second evidence"},
+                    ],
+                    "table_indices": [[0, 1]],
+                    "image_instances": [{"doc_id": "doc_image"}],
+                }
+            ],
+            "metadata": {"table_id": "doc_table"},
+        }
+        tables = {
+            "doc_table": {
+                "table": {
+                    "table_rows": [
+                        [
+                            {"text": "row label", "links": []},
+                            {"text": "table answer cell", "links": []},
+                        ]
+                    ]
+                }
+            }
+        }
+        images = {"doc_image": {"title": "Reference Image Title"}}
+
+        raw_counts, meta = MODULE.direct_evidence_cap_counts_for_row(
+            row,
+            tables_by_id=tables,
+            images_by_id=images,
+        )
+        self.assertEqual(raw_counts, {"doc_image": 1, "doc_table": 1, "doc_text": 2})
+        self.assertEqual(meta["adaptive_cap_direct_evidence_unit_count"], 4)
+        self.assertEqual(
+            meta["adaptive_cap_source_counts"],
+            {"image_title": 1, "table_answer_cell": 1, "text_instance": 2},
+        )
+
+        doc_caps, qid_cap = MODULE.bounded_adaptive_caps(
+            raw_counts,
+            max_pages_per_doc=10,
+            max_pages_per_qid=20,
+        )
+        self.assertEqual(doc_caps, {"doc_image": 1, "doc_table": 1, "doc_text": 2})
+        self.assertEqual(qid_cap, 4)
+
+        bounded_doc_caps, bounded_qid_cap = MODULE.bounded_adaptive_caps(
+            raw_counts,
+            max_pages_per_doc=1,
+            max_pages_per_qid=2,
+        )
+        self.assertEqual(bounded_doc_caps, {"doc_image": 1, "doc_table": 1, "doc_text": 1})
+        self.assertEqual(bounded_qid_cap, 2)
+
+    def test_adaptive_doc_caps_allow_multiple_evidence_pages_in_same_doc(self) -> None:
+        first = MODULE.PageScore(page_uid="docA_page0", doc_id="docA", page_idx=0)
+        first.score = 1.0
+        first.exact_matches = [
+            {"source": "text_instance", "text": "alpha evidence", "weight": 1.0},
+        ]
+        second = MODULE.PageScore(page_uid="docA_page1", doc_id="docA", page_idx=1)
+        second.score = 1.0
+        second.exact_matches = [
+            {"source": "text_instance", "text": "beta evidence", "weight": 1.0},
+        ]
+
+        fixed = MODULE.select_labels_by_evidence_coverage(
+            [first, second],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=10,
+            coverage_min_match_weight=1.0,
+        )
+        adaptive = MODULE.select_labels_by_evidence_coverage(
+            [first, second],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=10,
+            coverage_min_match_weight=1.0,
+            doc_caps={"docA": 2},
+        )
+
+        self.assertEqual(len(fixed), 1)
+        self.assertEqual({item.page_uid for item in adaptive}, {"docA_page0", "docA_page1"})
 
 
 if __name__ == "__main__":

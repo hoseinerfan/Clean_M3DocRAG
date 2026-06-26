@@ -29,6 +29,14 @@ DEFAULT_EVIDENCE_WEIGHTS: dict[str, float] = {
     "pseudo_question_slot": 1.0,
 }
 
+DIRECT_EVIDENCE_CAP_SOURCES = frozenset(
+    {
+        "text_instance",
+        "table_answer_cell",
+        "image_title",
+    }
+)
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -48,6 +56,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-score", type=float, default=4.0)
     parser.add_argument("--top-pages-per-doc", type=int, default=2)
     parser.add_argument("--top-pages-per-qid", type=int, default=8)
+    parser.add_argument(
+        "--adaptive-page-caps",
+        action="store_true",
+        help=(
+            "Interpret --top-pages-per-doc and --top-pages-per-qid as maximum caps, "
+            "then set the effective per-document and per-question caps from MMQA "
+            "direct evidence-unit counts. Direct evidence units are text_instance, "
+            "table_answer_cell, and image_title."
+        ),
+    )
     parser.add_argument("--min-token-overlap", type=float, default=0.72)
     parser.add_argument(
         "--selection-policy",
@@ -727,10 +745,102 @@ def evidence_for_row(
         )
 
     source_counts = Counter(item.source for item in evidence)
+    positive_source_counts = Counter(item.source for item in evidence if float(item.weight) > 0.0)
     return evidence, {
         "evidence_count": len(evidence),
         "evidence_source_counts": dict(sorted(source_counts.items())),
+        "positive_evidence_count": int(sum(positive_source_counts.values())),
+        "positive_evidence_source_counts": dict(sorted(positive_source_counts.items())),
     }
+
+
+def direct_evidence_cap_counts_for_row(
+    row: dict[str, Any],
+    *,
+    tables_by_id: dict[str, dict[str, Any]],
+    images_by_id: dict[str, dict[str, Any]],
+) -> tuple[dict[str, int], dict[str, Any]]:
+    """Count MMQA direct evidence units per source document.
+
+    This is intentionally separate from evidence_for_row(). The label score can
+    use weighted phrase evidence, but adaptive caps should reflect how many
+    document-grounded evidence units MMQA says the question needs.
+    """
+
+    metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
+    table_id = str(metadata.get("table_id", "") or "").strip()
+    table = tables_by_id.get(table_id, {}) if table_id else {}
+
+    per_doc: Counter[str] = Counter()
+    per_source: Counter[str] = Counter()
+
+    def add_unit(*, doc_id: Any, source: str, text: Any) -> None:
+        clean_doc_id = str(doc_id or "").strip()
+        if not clean_doc_id:
+            return
+        phrase = clean_phrase(text)
+        if not phrase_is_useful(phrase):
+            return
+        per_doc[clean_doc_id] += 1
+        per_source[source] += 1
+
+    for answer in iter_answer_objects(row):
+        for instance in answer.get("text_instances", []) or []:
+            if not isinstance(instance, dict):
+                continue
+            add_unit(
+                doc_id=instance.get("doc_id", ""),
+                source="text_instance",
+                text=instance.get("text"),
+            )
+
+        for instance in answer.get("image_instances", []) or []:
+            if not isinstance(instance, dict):
+                continue
+            doc_id = str(instance.get("doc_id", "") or "").strip()
+            image_row = images_by_id.get(doc_id, {})
+            add_unit(
+                doc_id=doc_id,
+                source="image_title",
+                text=image_row.get("title"),
+            )
+
+        for row_idx, col_idx in answer.get("table_indices", []) or []:
+            if not table_id or not table:
+                continue
+            cell_text = table_cell_text(table, int(row_idx), int(col_idx))
+            add_unit(
+                doc_id=table_id,
+                source="table_answer_cell",
+                text=cell_text,
+            )
+
+    return dict(per_doc), {
+        "adaptive_cap_direct_evidence_unit_count": int(sum(per_doc.values())),
+        "adaptive_cap_source_counts": dict(sorted(per_source.items())),
+        "adaptive_cap_doc_unit_counts": dict(sorted(per_doc.items())),
+    }
+
+
+def bounded_adaptive_caps(
+    raw_doc_unit_counts: dict[str, int],
+    *,
+    max_pages_per_doc: int,
+    max_pages_per_qid: int,
+) -> tuple[dict[str, int], int]:
+    doc_caps: dict[str, int] = {}
+    for doc_id, count in raw_doc_unit_counts.items():
+        numeric_count = max(0, int(count))
+        if numeric_count <= 0:
+            continue
+        if int(max_pages_per_doc) > 0:
+            numeric_count = min(numeric_count, int(max_pages_per_doc))
+        doc_caps[str(doc_id)] = numeric_count
+
+    qid_cap = int(sum(doc_caps.values()))
+    if int(max_pages_per_qid) > 0:
+        qid_cap = min(qid_cap, int(max_pages_per_qid))
+    return doc_caps, qid_cap
 
 
 def doc_title_from_map(doc_id: str, side_row: dict[str, Any], id_map: dict[str, dict[str, Any]]) -> str:
@@ -824,13 +934,18 @@ def select_labels(
     min_score: float,
     top_pages_per_doc: int,
     top_pages_per_qid: int,
+    doc_caps: dict[str, int] | None = None,
 ) -> list[PageScore]:
     selected: list[PageScore] = []
     per_doc_count: Counter[str] = Counter()
     for item in scores:
         if item.score < float(min_score):
             continue
-        if int(top_pages_per_doc) > 0 and per_doc_count[item.doc_id] >= int(top_pages_per_doc):
+        if doc_caps is not None:
+            doc_limit = int(doc_caps.get(item.doc_id, 0))
+            if doc_limit <= 0 or per_doc_count[item.doc_id] >= doc_limit:
+                continue
+        elif int(top_pages_per_doc) > 0 and per_doc_count[item.doc_id] >= int(top_pages_per_doc):
             continue
         selected.append(item)
         per_doc_count[item.doc_id] += 1
@@ -885,6 +1000,7 @@ def select_labels_by_evidence_coverage(
     top_pages_per_doc: int,
     top_pages_per_qid: int,
     coverage_min_match_weight: float = 3.0,
+    doc_caps: dict[str, int] | None = None,
 ) -> list[PageScore]:
     eligible = [item for item in scores if item.score >= float(min_score)]
     selected: list[PageScore] = []
@@ -900,7 +1016,11 @@ def select_labels_by_evidence_coverage(
         for item in eligible:
             if item.page_uid in selected_uids:
                 continue
-            if int(top_pages_per_doc) > 0 and per_doc_count[item.doc_id] >= int(top_pages_per_doc):
+            if doc_caps is not None:
+                doc_limit = int(doc_caps.get(item.doc_id, 0))
+                if doc_limit <= 0 or per_doc_count[item.doc_id] >= doc_limit:
+                    continue
+            elif int(top_pages_per_doc) > 0 and per_doc_count[item.doc_id] >= int(top_pages_per_doc):
                 continue
             evidence_keys = page_evidence_keys(
                 item,
@@ -947,6 +1067,14 @@ def confidence(score: float) -> str:
     return "none"
 
 
+def positive_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [match for match in matches if evidence_match_weight(match) > 0.0]
+
+
+def diagnostic_matches(matches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [match for match in matches if evidence_match_weight(match) <= 0.0]
+
+
 def page_score_record(item: PageScore) -> dict[str, Any]:
     return {
         "page_uid": item.page_uid,
@@ -956,6 +1084,10 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "confidence": confidence(item.score),
         "exact_matches": item.exact_matches[:20],
         "fuzzy_matches": item.fuzzy_matches[:20],
+        "positive_exact_matches": positive_matches(item.exact_matches)[:20],
+        "positive_fuzzy_matches": positive_matches(item.fuzzy_matches)[:20],
+        "diagnostic_exact_matches": diagnostic_matches(item.exact_matches)[:20],
+        "diagnostic_fuzzy_matches": diagnostic_matches(item.fuzzy_matches)[:20],
         "verification_matches": item.verification_matches[:20],
     }
 
@@ -1035,9 +1167,14 @@ def main() -> None:
     label_counts: list[int] = []
     score_values: list[float] = []
     source_counts: Counter[str] = Counter()
+    positive_source_counts: Counter[str] = Counter()
     verification_source_counts: Counter[str] = Counter()
     missing_doc_count = 0
     matched_qids = 0
+    adaptive_qid_caps: list[int] = []
+    adaptive_direct_unit_counts: list[int] = []
+    adaptive_doc_cap_values: list[int] = []
+    adaptive_doc_unit_values: list[int] = []
 
     with output_jsonl.open("w", encoding="utf-8") as out_handle:
         aug_handle = augmented_path.open("w", encoding="utf-8") if augmented_path else None
@@ -1062,6 +1199,7 @@ def main() -> None:
                     text_instance_context_min_token_len=int(args.text_instance_context_min_token_len),
                 )
                 source_counts.update(evidence_meta["evidence_source_counts"])
+                positive_source_counts.update(evidence_meta["positive_evidence_source_counts"])
                 scored, missing_docs = score_pages(
                     row,
                     evidence,
@@ -1071,20 +1209,48 @@ def main() -> None:
                         args.text_instance_context_verification_bonus
                     ),
                 )
+                adaptive_meta: dict[str, Any] = {}
+                adaptive_doc_caps: dict[str, int] | None = None
+                effective_top_pages_per_qid = int(args.top_pages_per_qid)
+                if bool(args.adaptive_page_caps):
+                    raw_doc_unit_counts, cap_meta = direct_evidence_cap_counts_for_row(
+                        row,
+                        tables_by_id=tables_by_id,
+                        images_by_id=images_by_id,
+                    )
+                    bounded_doc_caps, bounded_qid_cap = bounded_adaptive_caps(
+                        raw_doc_unit_counts,
+                        max_pages_per_doc=int(args.top_pages_per_doc),
+                        max_pages_per_qid=int(args.top_pages_per_qid),
+                    )
+                    adaptive_meta.update(cap_meta)
+                    adaptive_meta["adaptive_doc_caps"] = dict(sorted(bounded_doc_caps.items()))
+                    adaptive_meta["adaptive_qid_cap"] = int(bounded_qid_cap)
+                    adaptive_direct_unit_counts.append(
+                        int(cap_meta["adaptive_cap_direct_evidence_unit_count"])
+                    )
+                    adaptive_doc_unit_values.extend(int(v) for v in raw_doc_unit_counts.values())
+                    adaptive_doc_cap_values.extend(int(v) for v in bounded_doc_caps.values())
+                    adaptive_qid_caps.append(int(bounded_qid_cap))
+                    if bounded_doc_caps and bounded_qid_cap > 0:
+                        adaptive_doc_caps = bounded_doc_caps
+                        effective_top_pages_per_qid = int(bounded_qid_cap)
                 if args.selection_policy == "evidence_coverage":
                     selected = select_labels_by_evidence_coverage(
                         scored,
                         min_score=float(args.min_score),
                         top_pages_per_doc=int(args.top_pages_per_doc),
-                        top_pages_per_qid=int(args.top_pages_per_qid),
+                        top_pages_per_qid=int(effective_top_pages_per_qid),
                         coverage_min_match_weight=float(args.coverage_min_match_weight),
+                        doc_caps=adaptive_doc_caps,
                     )
                 else:
                     selected = select_labels(
                         scored,
                         min_score=float(args.min_score),
                         top_pages_per_doc=int(args.top_pages_per_doc),
-                        top_pages_per_qid=int(args.top_pages_per_qid),
+                        top_pages_per_qid=int(effective_top_pages_per_qid),
+                        doc_caps=adaptive_doc_caps,
                     )
                 gold_docs = supporting_doc_ids(row)
                 status = label_status(selected, missing_docs, gold_docs)
@@ -1117,7 +1283,10 @@ def main() -> None:
                     "candidate_pages_scored": len(scored),
                     "top_scored_pages": [page_score_record(item) for item in scored[:10]],
                     "missing_page_text_doc_ids": missing_docs,
+                    "adaptive_page_caps": bool(args.adaptive_page_caps),
+                    "effective_top_pages_per_qid": int(effective_top_pages_per_qid),
                     **evidence_meta,
+                    **adaptive_meta,
                 }
                 out_handle.write(json.dumps(output_row, ensure_ascii=False) + "\n")
                 if aug_handle is not None:
@@ -1159,11 +1328,34 @@ def main() -> None:
         "question_type_counts": dict(sorted(qtype_counts.items())),
         "matched_by_question_type": dict(sorted(matched_qtype_counts.items())),
         "evidence_source_counts": dict(sorted(source_counts.items())),
+        "positive_evidence_source_counts": dict(sorted(positive_source_counts.items())),
         "selected_verification_source_counts": dict(sorted(verification_source_counts.items())),
         "missing_page_text_doc_ref_count": int(missing_doc_count),
         "min_score": float(args.min_score),
         "top_pages_per_doc": int(args.top_pages_per_doc),
         "top_pages_per_qid": int(args.top_pages_per_qid),
+        "adaptive_page_caps": bool(args.adaptive_page_caps),
+        "adaptive_page_cap_sources": sorted(DIRECT_EVIDENCE_CAP_SOURCES),
+        "mean_adaptive_qid_cap": (
+            round(float(fmean(adaptive_qid_caps)), 6) if adaptive_qid_caps else None
+        ),
+        "adaptive_qid_cap_hist": dict(
+            sorted(Counter(str(value) for value in adaptive_qid_caps).items())
+        ),
+        "mean_adaptive_direct_evidence_units_per_qid": (
+            round(float(fmean(adaptive_direct_unit_counts)), 6)
+            if adaptive_direct_unit_counts
+            else None
+        ),
+        "adaptive_direct_evidence_unit_hist": dict(
+            sorted(Counter(str(value) for value in adaptive_direct_unit_counts).items())
+        ),
+        "adaptive_raw_doc_unit_count_hist": dict(
+            sorted(Counter(str(value) for value in adaptive_doc_unit_values).items())
+        ),
+        "adaptive_doc_cap_hist": dict(
+            sorted(Counter(str(value) for value in adaptive_doc_cap_values).items())
+        ),
         "min_token_overlap": float(args.min_token_overlap),
         "selection_policy": str(args.selection_policy),
         "coverage_min_match_weight": float(args.coverage_min_match_weight),
