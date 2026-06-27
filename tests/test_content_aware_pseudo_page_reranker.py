@@ -21,6 +21,40 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
     def write_jsonl(self, path: Path, rows: list[dict]) -> None:
         path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
+    def test_feature_set_resolver_covers_full_nonempty_group_matrix(self) -> None:
+        expected = {
+            "rank_only",
+            "source_only",
+            "structure_only",
+            "content_only",
+            "rank_source",
+            "rank_structure",
+            "rank_content",
+            "source_structure",
+            "source_content",
+            "structure_content",
+            "rank_source_structure",
+            "no_source",
+            "no_structure",
+            "source_structure_content",
+            "all",
+        }
+        self.assertTrue(expected.issubset(set(MODULE.FEATURE_SET_NAMES)))
+        self.assertEqual(len(expected), 15)
+
+        self.assertEqual(MODULE.resolve_feature_names("rank_only"), MODULE.RANK_FEATURES)
+        self.assertEqual(MODULE.resolve_feature_names("source_only"), MODULE.SOURCE_FEATURES)
+        self.assertEqual(MODULE.resolve_feature_names("structure_only"), MODULE.STRUCTURE_FEATURES)
+        self.assertEqual(MODULE.resolve_feature_names("content_only"), MODULE.CONTENT_FEATURES)
+        self.assertCountEqual(
+            MODULE.resolve_feature_names("rank_source_structure"),
+            MODULE.resolve_feature_names("no_content"),
+        )
+        self.assertCountEqual(
+            MODULE.resolve_feature_names("source_structure_content"),
+            [name for name in MODULE.FEATURE_NAMES if name not in set(MODULE.RANK_FEATURES)],
+        )
+
     def test_negative_sampling_policies_share_budget_but_select_different_pages(self) -> None:
         records = [
             {"uid": f"doc{idx}_page0", "doc_id": f"doc{idx}", "base_rank": idx}

@@ -142,10 +142,17 @@ CONTENT_FEATURES = [
 FEATURE_SET_NAMES = [
     "all",
     "rank_only",
+    "source_only",
+    "structure_only",
+    "rank_content",
     "rank_source",
     "rank_structure",
     "rank_source_structure",
     "content_only",
+    "source_structure",
+    "source_content",
+    "structure_content",
+    "source_structure_content",
     "no_content",
     "no_source",
     "no_structure",
@@ -197,6 +204,12 @@ def resolve_feature_names(feature_set: str) -> list[str]:
         return list(FEATURE_NAMES)
     if key == "rank_only":
         return list(RANK_FEATURES)
+    if key == "source_only":
+        return list(SOURCE_FEATURES)
+    if key == "structure_only":
+        return list(STRUCTURE_FEATURES)
+    if key == "rank_content":
+        return dedupe_feature_names(RANK_FEATURES + CONTENT_FEATURES)
     if key == "rank_source":
         return dedupe_feature_names(RANK_FEATURES + SOURCE_FEATURES)
     if key == "rank_structure":
@@ -205,6 +218,14 @@ def resolve_feature_names(feature_set: str) -> list[str]:
         return dedupe_feature_names(RANK_FEATURES + SOURCE_FEATURES + STRUCTURE_FEATURES)
     if key == "content_only":
         return list(CONTENT_FEATURES)
+    if key == "source_structure":
+        return dedupe_feature_names(SOURCE_FEATURES + STRUCTURE_FEATURES)
+    if key == "source_content":
+        return dedupe_feature_names(SOURCE_FEATURES + CONTENT_FEATURES)
+    if key == "structure_content":
+        return dedupe_feature_names(STRUCTURE_FEATURES + CONTENT_FEATURES)
+    if key == "source_structure_content":
+        return dedupe_feature_names(SOURCE_FEATURES + STRUCTURE_FEATURES + CONTENT_FEATURES)
     if key == "no_content":
         return [name for name in FEATURE_NAMES if name not in set(CONTENT_FEATURES)]
     if key == "no_source":

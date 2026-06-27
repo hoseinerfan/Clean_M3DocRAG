@@ -27,7 +27,7 @@ BASE_LABEL="${BASE_LABEL:-gpp_no_hyperlink}"
 BASE_TRAIN_PRED="${BASE_TRAIN_PRED:-$GPP_TRAIN_OUT_DIR/mmqa_train_gpp_hyperlink_node_no_hyperlink.prediction.json}"
 BASE_EVAL_PRED="${BASE_EVAL_PRED:-$GPP_EVAL_OUT_DIR/mmqa_dev_gpp_hyperlink_node_no_hyperlink.prediction.json}"
 
-FEATURE_SETS="${FEATURE_SETS:-rank_only rank_source rank_structure rank_source_structure content_only no_content no_source no_structure all}"
+FEATURE_SETS="${FEATURE_SETS:-rank_only source_only structure_only content_only rank_source rank_structure rank_content source_structure source_content structure_content rank_source_structure no_source no_structure source_structure_content all}"
 SOURCE_SET="${SOURCE_SET:-all}"
 AUTO_TUNE_BLEND_ALPHA="${AUTO_TUNE_BLEND_ALPHA:-1}"
 TUNE_HIT_K="${TUNE_HIT_K:-5}"
