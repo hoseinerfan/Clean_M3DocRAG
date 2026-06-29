@@ -261,6 +261,62 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
         self.assertIn(0.5, row_weights.tolist())
         self.assertIn(0.25, row_weights.tolist())
 
+    def test_build_matrix_downweights_context_weak_positive_pages(self) -> None:
+        gold = {
+            "q_context": {
+                "qid": "q_context",
+                "question": "Which bridge page should be weakly supervised?",
+                "supporting_context": [
+                    {"doc_id": "docA", "doc_part": "text"},
+                    {"doc_id": "docB", "doc_part": "text"},
+                ],
+                "metadata": {
+                    "gold_page_uids": ["docA_page0", "docB_page2"],
+                    "pseudo_gold_qid_supervision_tier": "direct_plus_context_weak",
+                    "pseudo_gold_page_supervision_tiers": {
+                        "docA_page0": "direct",
+                        "docB_page2": "context_weak",
+                    },
+                },
+            }
+        }
+        base_pred = {
+            "q_context": {
+                "qid": "q_context",
+                "page_retrieval_results": [
+                    ["docA", 0, 10.0],
+                    ["docB", 2, 9.0],
+                    ["docNoise", 0, 8.0],
+                ],
+            }
+        }
+        args = Namespace(
+            candidate_top_k=3,
+            negatives_per_band=2,
+            max_negatives_per_qid=2,
+            seed=13,
+            active_feature_names=MODULE.FEATURE_NAMES,
+            respect_pseudo_supervision_tiers=True,
+            pseudo_supervision_weighting=True,
+            context_weak_positive_weight=0.35,
+            hybrid_positive_weight=0.8,
+            visual_proxy_positive_weight=0.6,
+            partial_positive_weight=0.5,
+        )
+
+        _X, y, row_weights, metadata = MODULE.build_matrix(
+            gold=gold,
+            base_pred=base_pred,
+            page_features={},
+            source_maps_by_label={},
+            args=args,
+        )
+
+        positive_weights = sorted(round(float(value), 3) for value in row_weights[y == 1])
+        self.assertEqual(positive_weights, [0.35, 1.0])
+        self.assertEqual(metadata["positive_count"], 2)
+        self.assertEqual(metadata["negative_count"], 1)
+
     def test_build_matrix_can_downweight_medium_score_strict_labels(self) -> None:
         gold = {
             "q_high": {

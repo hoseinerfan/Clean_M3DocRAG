@@ -185,6 +185,7 @@ echo "using_strict_label_score_weighting=${STRICT_LABEL_SCORE_WEIGHTING:-0}"
 echo "using_include_safe_support_doc_negatives=${INCLUDE_SAFE_SUPPORT_DOC_NEGATIVES:-0}"
 echo "using_negative_sampling_strategy=${NEGATIVE_SAMPLING_STRATEGY:-rank_stratified}"
 echo "using_training_objective=${TRAINING_OBJECTIVE:-weighted_bce}"
+echo "using_context_weak_positive_weight=${CONTEXT_WEAK_POSITIVE_WEIGHT:-0.35}"
 
 "$PYTHON_BIN" "$REPO_ROOT/scripts/train_content_aware_pseudo_page_reranker.py" \
   --train-gold "$TRAIN_GOLD" \
@@ -221,6 +222,7 @@ echo "using_training_objective=${TRAINING_OBJECTIVE:-weighted_bce}"
   --hybrid-positive-weight "${HYBRID_POSITIVE_WEIGHT:-0.80}" \
   --visual-proxy-positive-weight "${VISUAL_PROXY_POSITIVE_WEIGHT:-0.60}" \
   --partial-positive-weight "${PARTIAL_POSITIVE_WEIGHT:-0.50}" \
+  --context-weak-positive-weight "${CONTEXT_WEAK_POSITIVE_WEIGHT:-0.35}" \
   --safe-support-doc-negative-weight "${SAFE_SUPPORT_DOC_NEGATIVE_WEIGHT:-0.25}" \
   --max-safe-support-doc-negatives-per-qid "${MAX_SAFE_SUPPORT_DOC_NEGATIVES_PER_QID:-4}" \
   --tune-fraction "${TUNE_FRACTION:-0.20}" \

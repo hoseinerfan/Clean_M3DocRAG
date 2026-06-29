@@ -304,6 +304,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--hybrid-positive-weight", type=float, default=0.80)
     parser.add_argument("--visual-proxy-positive-weight", type=float, default=0.60)
     parser.add_argument("--partial-positive-weight", type=float, default=0.50)
+    parser.add_argument("--context-weak-positive-weight", type=float, default=0.35)
     parser.add_argument(
         "--include-safe-support-doc-negatives",
         action="store_true",
@@ -1000,6 +1001,8 @@ def positive_row_weight(uid: str, row: dict[str, Any], args: argparse.Namespace)
     if bool(getattr(args, "pseudo_supervision_weighting", False)):
         if "partial" in qid_tier or "support_incomplete" in qid_tier:
             weight *= float(args.partial_positive_weight)
+        elif page_tier == "context_weak":
+            weight *= float(args.context_weak_positive_weight)
         elif page_tier == "visual_proxy":
             weight *= float(args.visual_proxy_positive_weight)
         elif page_tier in {"mixed_direct_proxy", "direct_visual_verified"}:
@@ -3761,6 +3764,7 @@ def main() -> None:
             "hybrid_positive_weight": float(args.hybrid_positive_weight),
             "visual_proxy_positive_weight": float(args.visual_proxy_positive_weight),
             "partial_positive_weight": float(args.partial_positive_weight),
+            "context_weak_positive_weight": float(args.context_weak_positive_weight),
             "include_safe_support_doc_negatives": bool(args.include_safe_support_doc_negatives),
             "safe_support_doc_negative_weight": float(args.safe_support_doc_negative_weight),
             "max_safe_support_doc_negatives_per_qid": int(args.max_safe_support_doc_negatives_per_qid),
