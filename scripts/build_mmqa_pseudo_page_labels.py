@@ -20,6 +20,8 @@ DEFAULT_EVIDENCE_WEIGHTS: dict[str, float] = {
     "image_doc_title": 4.0,
     "table_title": 4.0,
     "table_answer_cell": 10.0,
+    "table_row_header": 0.0,
+    "table_column_header": 0.0,
     "table_row_cell": 2.0,
     "table_row_link_text": 1.5,
     "table_row_link_title": 1.5,
@@ -96,7 +98,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--evidence-coverage-tie-breaker",
-        choices=["page_order", "question_overlap", "indirect_verification", "image_presence"],
+        choices=[
+            "page_order",
+            "question_overlap",
+            "indirect_verification",
+            "image_presence",
+            "table_context",
+        ],
         default="page_order",
         help=(
             "Tie-breaker used only after evidence_coverage, evidence weight, and page "
@@ -105,7 +113,8 @@ def parse_args() -> argparse.Namespace:
             "indirect_verification prefers tied pages with source-specific diagnostic "
             "MMQA context matches, such as table title or same-row cells. image_presence "
             "applies only to image_title evidence and prefers tied pages with stronger "
-            "PDF image-object evidence."
+            "PDF image-object evidence. table_context applies only to table_answer_cell "
+            "evidence and prefers tied pages with exact table title/header/row context."
         ),
     )
     parser.add_argument(
@@ -220,6 +229,7 @@ class PageScore:
     score: float = 0.0
     question_overlap: float = 0.0
     indirect_verification_score: float = 0.0
+    table_context_score: float = 0.0
     visual_image_tie_score: float = 0.0
     visual_image_count: int = 0
     visual_large_image_count: int = 0
@@ -227,6 +237,7 @@ class PageScore:
     visual_has_image: bool = False
     visual_has_large_image: bool = False
     indirect_verification_matches: list[dict[str, Any]] = field(default_factory=list)
+    table_context_matches: list[dict[str, Any]] = field(default_factory=list)
     exact_matches: list[dict[str, Any]] = field(default_factory=list)
     fuzzy_matches: list[dict[str, Any]] = field(default_factory=list)
     verification_matches: list[dict[str, Any]] = field(default_factory=list)
@@ -676,6 +687,30 @@ def table_row_cells(table: dict[str, Any], row_idx: int) -> list[dict[str, Any]]
     return [cell for cell in rows[row_idx] if isinstance(cell, dict)]
 
 
+def table_row_header_text(table: dict[str, Any], row_idx: int, col_idx: int) -> str:
+    if col_idx <= 0:
+        return ""
+    cells = table_row_cells(table, row_idx)
+    if not cells:
+        return ""
+    return clean_phrase(cells[0].get("text", ""))
+
+
+def table_column_header_text(table: dict[str, Any], row_idx: int, col_idx: int) -> str:
+    if row_idx <= 0:
+        return ""
+    rows = table.get("table", {}).get("table_rows", [])
+    if not rows:
+        return ""
+    header_row = rows[0]
+    if col_idx < 0 or col_idx >= len(header_row):
+        return ""
+    cell = header_row[col_idx]
+    if not isinstance(cell, dict):
+        return ""
+    return clean_phrase(cell.get("text", ""))
+
+
 def bracketed_pseudo_question_terms(row: dict[str, Any]) -> list[str]:
     metadata = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
     text = str(metadata.get("pseudo_language_question", "") or "")
@@ -810,6 +845,22 @@ def evidence_for_row(
                 text=cell_text,
                 source="table_answer_cell",
                 weight=evidence_weights["table_answer_cell"],
+                doc_id=table_id,
+            )
+            add_evidence(
+                evidence,
+                seen,
+                text=table_row_header_text(table, int(row_idx), int(col_idx)),
+                source="table_row_header",
+                weight=evidence_weights["table_row_header"],
+                doc_id=table_id,
+            )
+            add_evidence(
+                evidence,
+                seen,
+                text=table_column_header_text(table, int(row_idx), int(col_idx)),
+                source="table_column_header",
+                weight=evidence_weights["table_column_header"],
                 doc_id=table_id,
             )
             for cell in table_row_cells(table, int(row_idx)):
@@ -1044,6 +1095,7 @@ def score_pages(
                     bonus=float(text_instance_context_verification_bonus),
                 )
                 apply_indirect_verification_tie_score(page_score)
+                apply_table_context_tie_score(page_score)
                 scores.append(page_score)
 
     scores.sort(key=lambda item: (-item.score, item.doc_id, item.page_idx))
@@ -1154,6 +1206,100 @@ def apply_indirect_verification_tie_score(item: PageScore) -> None:
     item.indirect_verification_matches = matches
 
 
+def exact_match_texts_by_source(
+    item: PageScore,
+    *,
+    source: str,
+    positive: bool,
+) -> set[str]:
+    out: set[str] = set()
+    for match in item.exact_matches:
+        if str(match.get("source", "")) != source:
+            continue
+        weight = evidence_match_weight(match)
+        if positive and weight <= 0.0:
+            continue
+        if not positive and weight > 0.0:
+            continue
+        norm_text = normalize_text(str(match.get("text", "") or ""))
+        if norm_text:
+            out.add(norm_text)
+    return out
+
+
+def apply_table_context_tie_score(item: PageScore) -> None:
+    answer_texts = exact_match_texts_by_source(
+        item,
+        source="table_answer_cell",
+        positive=True,
+    )
+    if not answer_texts:
+        item.table_context_score = 0.0
+        item.table_context_matches = []
+        return
+
+    score = 0.0
+    matches: list[dict[str, Any]] = []
+
+    def diagnostic_texts(source: str, *, exclude_answer_texts: bool = False) -> set[str]:
+        texts = exact_match_texts_by_source(item, source=source, positive=False)
+        if exclude_answer_texts:
+            texts = {text for text in texts if text not in answer_texts}
+        return texts
+
+    def add(source: str, reason: str, weight: float, texts: set[str]) -> None:
+        nonlocal score
+        if not texts or float(weight) <= 0.0:
+            return
+        gain = float(weight) * float(len(texts))
+        score += gain
+        matches.append(
+            {
+                "source": source,
+                "reason": reason,
+                "weight": float(gain),
+                "count": int(len(texts)),
+                "texts": sorted(texts)[:5],
+            }
+        )
+
+    add(
+        "table_title",
+        "page also matches the MMQA table title",
+        2.0,
+        diagnostic_texts("table_title"),
+    )
+    add(
+        "table_row_header",
+        "page also matches the answer row header",
+        1.5,
+        diagnostic_texts("table_row_header", exclude_answer_texts=True),
+    )
+    add(
+        "table_column_header",
+        "page also matches the answer column header",
+        1.5,
+        diagnostic_texts("table_column_header", exclude_answer_texts=True),
+    )
+    row_context = set(sorted(diagnostic_texts("table_row_cell", exclude_answer_texts=True))[:4])
+    add(
+        "table_row_cell",
+        "page also matches other cells from the answer row",
+        0.75,
+        row_context,
+    )
+    pseudo_context = set(sorted(diagnostic_texts("pseudo_question_slot"))[:2])
+    add(
+        "pseudo_question_slot",
+        "page also matches bracketed pseudo-question context",
+        0.25,
+        pseudo_context,
+    )
+
+    item.table_context_score = score
+    item.table_context_matches = matches
+
+
 def select_labels(
     scores: list[PageScore],
     *,
@@ -1234,10 +1380,12 @@ def select_labels_by_evidence_coverage(
         "question_overlap",
         "indirect_verification",
         "image_presence",
+        "table_context",
     }:
         raise ValueError(
             "evidence_coverage_tie_breaker must be 'page_order', "
-            "'question_overlap', 'indirect_verification', or 'image_presence'"
+            "'question_overlap', 'indirect_verification', 'image_presence', "
+            "or 'table_context'"
         )
     eligible = [item for item in scores if item.score >= float(min_score)]
     selected: list[PageScore] = []
@@ -1278,6 +1426,8 @@ def select_labels_by_evidence_coverage(
                 if evidence_coverage_tie_breaker == "indirect_verification"
                 else image_presence_page_tie_value(item)
                 if evidence_coverage_tie_breaker == "image_presence"
+                else table_context_page_tie_value(item)
+                if evidence_coverage_tie_breaker == "table_context"
                 else 0.0
             )
             candidate_key = (
@@ -1311,6 +1461,13 @@ def image_presence_page_tie_value(item: PageScore) -> float:
     return float(item.visual_image_tie_score)
 
 
+def table_context_page_tie_value(item: PageScore) -> float:
+    sources = page_matched_sources(item)
+    if "table_answer_cell" not in sources:
+        return 0.0
+    return float(item.table_context_score)
+
+
 def confidence(score: float) -> str:
     if score >= 14.0:
         return "high"
@@ -1337,6 +1494,7 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "score": round(float(item.score), 6),
         "question_overlap": round(float(item.question_overlap), 6),
         "indirect_verification_score": round(float(item.indirect_verification_score), 6),
+        "table_context_score": round(float(item.table_context_score), 6),
         "visual_image_tie_score": round(float(item.visual_image_tie_score), 6),
         "visual_has_image": bool(item.visual_has_image),
         "visual_has_large_image": bool(item.visual_has_large_image),
@@ -1352,6 +1510,7 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "diagnostic_fuzzy_matches": diagnostic_matches(item.fuzzy_matches)[:20],
         "verification_matches": item.verification_matches[:20],
         "indirect_verification_matches": item.indirect_verification_matches[:20],
+        "table_context_matches": item.table_context_matches[:20],
     }
 
 

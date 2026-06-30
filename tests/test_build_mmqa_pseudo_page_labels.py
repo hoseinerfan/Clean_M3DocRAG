@@ -653,6 +653,49 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
         self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
         self.assertEqual([item.page_uid for item in indirect_selected], ["docA_page2"])
 
+    def test_table_context_tie_breaker_uses_table_headers_without_answer_duplicate(self) -> None:
+        earlier = MODULE.PageScore(page_uid="docA_page0", doc_id="docA", page_idx=0)
+        earlier.score = 1.0
+        earlier.exact_matches = [
+            {"source": "table_answer_cell", "text": "shared answer", "weight": 1.0},
+            {"source": "table_row_cell", "text": "shared answer", "weight": 0.0},
+        ]
+        later = MODULE.PageScore(page_uid="docA_page2", doc_id="docA", page_idx=2)
+        later.score = 1.0
+        later.exact_matches = [
+            {"source": "table_answer_cell", "text": "shared answer", "weight": 1.0},
+            {"source": "table_row_cell", "text": "shared answer", "weight": 0.0},
+            {"source": "table_title", "text": "relevant table", "weight": 0.0},
+            {"source": "table_row_header", "text": "row label", "weight": 0.0},
+            {"source": "table_column_header", "text": "column label", "weight": 0.0},
+            {"source": "table_row_cell", "text": "neighbor value", "weight": 0.0},
+        ]
+        MODULE.apply_table_context_tie_score(earlier)
+        MODULE.apply_table_context_tie_score(later)
+
+        default_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            doc_caps={"docA": 1},
+        )
+        table_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            evidence_coverage_tie_breaker="table_context",
+            doc_caps={"docA": 1},
+        )
+
+        self.assertEqual(earlier.table_context_score, 0.0)
+        self.assertGreater(later.table_context_score, 0.0)
+        self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
+        self.assertEqual([item.page_uid for item in table_selected], ["docA_page2"])
+
     def test_image_presence_tie_breaker_only_uses_visual_metadata_for_image_evidence(self) -> None:
         earlier = MODULE.PageScore(
             page_uid="docA_page0",

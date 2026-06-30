@@ -34,7 +34,7 @@ TEXT_INSTANCE_CONTEXT_VERIFICATION_BONUS="${TEXT_INSTANCE_CONTEXT_VERIFICATION_B
 # - start_byte-derived text_instance_context has zero standalone weight. It adds only
 #   a verification bonus when the same page also matches text_instance, so context-only
 #   pages cannot become pseudo-gold labels.
-DIRECT_EVIDENCE_WEIGHT_OVERRIDES="${DIRECT_EVIDENCE_WEIGHT_OVERRIDES:-answer_text=0,text_instance=10,text_instance_context=0,image_title=10,image_doc_title=0,table_title=0,table_answer_cell=10,table_row_cell=0,table_row_link_text=0,table_row_link_title=0,supporting_doc_title=0,answer_entity=0,question_entity=0,pseudo_question_slot=0}"
+DIRECT_EVIDENCE_WEIGHT_OVERRIDES="${DIRECT_EVIDENCE_WEIGHT_OVERRIDES:-answer_text=0,text_instance=10,text_instance_context=0,image_title=10,image_doc_title=0,table_title=0,table_answer_cell=10,table_row_header=0,table_column_header=0,table_row_cell=0,table_row_link_text=0,table_row_link_title=0,supporting_doc_title=0,answer_entity=0,question_entity=0,pseudo_question_slot=0}"
 
 for split in $SPLITS; do
   doc_pages_jsonl="${DOC_PAGES_JSONL:-${M3DOCVQA_PAGE_TEXT_DIR:-${LOCAL_OUTPUT_DIR:-$REPO_ROOT/output}/m3docvqa_page_text}/m3docvqa_${split}_page_text.jsonl}"
