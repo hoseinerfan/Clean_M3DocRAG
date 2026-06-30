@@ -614,6 +614,45 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
         self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
         self.assertEqual([item.page_uid for item in overlap_selected], ["docA_page3"])
 
+    def test_indirect_verification_tie_breaker_uses_table_context_diagnostics(self) -> None:
+        earlier = MODULE.PageScore(page_uid="docA_page0", doc_id="docA", page_idx=0)
+        earlier.score = 1.0
+        earlier.exact_matches = [
+            {"source": "table_answer_cell", "text": "shared answer", "weight": 1.0},
+        ]
+        later = MODULE.PageScore(page_uid="docA_page2", doc_id="docA", page_idx=2)
+        later.score = 1.0
+        later.exact_matches = [
+            {"source": "table_answer_cell", "text": "shared answer", "weight": 1.0},
+            {"source": "table_title", "text": "relevant table", "weight": 0.0},
+            {"source": "table_row_cell", "text": "row context", "weight": 0.0},
+        ]
+        MODULE.apply_indirect_verification_tie_score(earlier)
+        MODULE.apply_indirect_verification_tie_score(later)
+
+        default_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            doc_caps={"docA": 1},
+        )
+        indirect_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            evidence_coverage_tie_breaker="indirect_verification",
+            doc_caps={"docA": 1},
+        )
+
+        self.assertEqual(earlier.indirect_verification_score, 0.0)
+        self.assertGreater(later.indirect_verification_score, 0.0)
+        self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
+        self.assertEqual([item.page_uid for item in indirect_selected], ["docA_page2"])
+
 
 if __name__ == "__main__":
     unittest.main()

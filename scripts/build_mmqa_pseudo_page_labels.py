@@ -87,12 +87,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--evidence-coverage-tie-breaker",
-        choices=["page_order", "question_overlap"],
+        choices=["page_order", "question_overlap", "indirect_verification"],
         default="page_order",
         help=(
             "Tie-breaker used only after evidence_coverage, evidence weight, and page "
             "score are tied. page_order preserves the original earliest-page behavior. "
-            "question_overlap prefers the tied page with more question-token overlap."
+            "question_overlap prefers the tied page with more question-token overlap. "
+            "indirect_verification prefers tied pages with source-specific diagnostic "
+            "MMQA context matches, such as table title or same-row cells."
         ),
     )
     parser.add_argument(
@@ -206,6 +208,8 @@ class PageScore:
     page_idx: int
     score: float = 0.0
     question_overlap: float = 0.0
+    indirect_verification_score: float = 0.0
+    indirect_verification_matches: list[dict[str, Any]] = field(default_factory=list)
     exact_matches: list[dict[str, Any]] = field(default_factory=list)
     fuzzy_matches: list[dict[str, Any]] = field(default_factory=list)
     verification_matches: list[dict[str, Any]] = field(default_factory=list)
@@ -951,6 +955,7 @@ def score_pages(
                     page_score,
                     bonus=float(text_instance_context_verification_bonus),
                 )
+                apply_indirect_verification_tie_score(page_score)
                 scores.append(page_score)
 
     scores.sort(key=lambda item: (-item.score, item.doc_id, item.page_idx))
@@ -976,6 +981,89 @@ def apply_text_instance_context_verification(item: PageScore, *, bonus: float) -
         reason="page matches text_instance and start_byte-derived local context",
         weight=float(bonus),
     )
+
+
+def match_source_counts(item: PageScore, *, positive: bool) -> Counter[str]:
+    counts: Counter[str] = Counter()
+    for match in item.exact_matches + item.fuzzy_matches:
+        source = str(match.get("source", "") or "").strip()
+        if not source:
+            continue
+        weight = evidence_match_weight(match)
+        if positive and weight > 0.0:
+            counts[source] += 1
+        elif not positive and weight <= 0.0:
+            counts[source] += 1
+    return counts
+
+
+def apply_indirect_verification_tie_score(item: PageScore) -> None:
+    positive_sources = match_source_counts(item, positive=True)
+    diagnostic_sources = match_source_counts(item, positive=False)
+    score = 0.0
+    matches: list[dict[str, Any]] = []
+
+    def add(source: str, reason: str, weight: float, count: int = 1) -> None:
+        nonlocal score
+        if count <= 0 or float(weight) <= 0.0:
+            return
+        score += float(weight)
+        matches.append(
+            {
+                "source": source,
+                "reason": reason,
+                "weight": float(weight),
+                "count": int(count),
+            }
+        )
+
+    if positive_sources.get("text_instance", 0) > 0:
+        text_context_count = diagnostic_sources.get("text_instance_context", 0)
+        if text_context_count > 0:
+            add(
+                "text_instance_context",
+                "page also matches start_byte-derived local text context",
+                2.0,
+                text_context_count,
+            )
+
+    if positive_sources.get("table_answer_cell", 0) > 0:
+        add(
+            "table_title",
+            "page also matches the MMQA table title",
+            2.0,
+            diagnostic_sources.get("table_title", 0),
+        )
+        row_cell_count = min(diagnostic_sources.get("table_row_cell", 0), 3)
+        add(
+            "table_row_cell",
+            "page also matches other cells from the same answer row",
+            0.5 * row_cell_count,
+            row_cell_count,
+        )
+        add(
+            "pseudo_question_slot",
+            "page also matches bracketed pseudo-question context",
+            0.5,
+            diagnostic_sources.get("pseudo_question_slot", 0),
+        )
+
+    if positive_sources.get("image_title", 0) > 0:
+        add(
+            "image_doc_title",
+            "page also matches the image/document title context",
+            1.0,
+            diagnostic_sources.get("image_doc_title", 0),
+        )
+        add(
+            "pseudo_question_slot",
+            "page also matches bracketed pseudo-question context",
+            0.5,
+            diagnostic_sources.get("pseudo_question_slot", 0),
+        )
+
+    item.indirect_verification_score = score
+    item.indirect_verification_matches = matches
 
 
 def select_labels(
@@ -1053,9 +1141,14 @@ def select_labels_by_evidence_coverage(
     evidence_coverage_tie_breaker: str = "page_order",
     doc_caps: dict[str, int] | None = None,
 ) -> list[PageScore]:
-    if evidence_coverage_tie_breaker not in {"page_order", "question_overlap"}:
+    if evidence_coverage_tie_breaker not in {
+        "page_order",
+        "question_overlap",
+        "indirect_verification",
+    }:
         raise ValueError(
-            "evidence_coverage_tie_breaker must be 'page_order' or 'question_overlap'"
+            "evidence_coverage_tie_breaker must be 'page_order', "
+            "'question_overlap', or 'indirect_verification'"
         )
     eligible = [item for item in scores if item.score >= float(min_score)]
     selected: list[PageScore] = []
@@ -1092,6 +1185,8 @@ def select_labels_by_evidence_coverage(
             tie_break_value = (
                 float(item.question_overlap)
                 if evidence_coverage_tie_breaker == "question_overlap"
+                else float(item.indirect_verification_score)
+                if evidence_coverage_tie_breaker == "indirect_verification"
                 else 0.0
             )
             candidate_key = (
@@ -1143,6 +1238,7 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "page_idx": int(item.page_idx),
         "score": round(float(item.score), 6),
         "question_overlap": round(float(item.question_overlap), 6),
+        "indirect_verification_score": round(float(item.indirect_verification_score), 6),
         "confidence": confidence(item.score),
         "exact_matches": item.exact_matches[:20],
         "fuzzy_matches": item.fuzzy_matches[:20],
@@ -1151,6 +1247,7 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "diagnostic_exact_matches": diagnostic_matches(item.exact_matches)[:20],
         "diagnostic_fuzzy_matches": diagnostic_matches(item.fuzzy_matches)[:20],
         "verification_matches": item.verification_matches[:20],
+        "indirect_verification_matches": item.indirect_verification_matches[:20],
     }
 
 
