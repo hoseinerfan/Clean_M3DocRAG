@@ -96,6 +96,22 @@ FEATURE_NAMES = [
     "longest_question_ngram_match",
     "exact_question_substring",
 ]
+BASE_FEATURE_NAMES = list(FEATURE_NAMES)
+
+VISUAL_FEATURES = [
+    "visual_has_image",
+    "visual_has_large_image",
+    "visual_image_count_log",
+    "visual_large_image_count_log",
+    "visual_image_area_ratio",
+    "visual_largest_image_area_ratio",
+    "question_visual_cue",
+    "visual_has_image_x_question_visual_cue",
+    "visual_has_large_image_x_question_visual_cue",
+    "visual_image_area_x_question_visual_cue",
+]
+
+FEATURE_NAMES = BASE_FEATURE_NAMES + VISUAL_FEATURES
 
 RANK_FEATURES = [
     "base_rank_recip",
@@ -141,9 +157,11 @@ CONTENT_FEATURES = [
 
 FEATURE_SET_NAMES = [
     "all",
+    "all_visual",
     "rank_only",
     "source_only",
     "structure_only",
+    "visual_only",
     "rank_content",
     "rank_source",
     "rank_structure",
@@ -152,11 +170,30 @@ FEATURE_SET_NAMES = [
     "source_structure",
     "source_content",
     "structure_content",
+    "structure_content_visual",
     "source_structure_content",
     "no_content",
     "no_source",
     "no_structure",
 ]
+
+VISUAL_QUERY_TERMS = {
+    "chart",
+    "diagram",
+    "figure",
+    "figures",
+    "graph",
+    "image",
+    "images",
+    "illustration",
+    "map",
+    "photo",
+    "photograph",
+    "picture",
+    "pictured",
+    "shown",
+    "visual",
+}
 
 QUERY_ALPHA_FEATURE_NAMES = [
     "base_confidence",
@@ -201,6 +238,8 @@ def dedupe_feature_names(names: list[str]) -> list[str]:
 def resolve_feature_names(feature_set: str) -> list[str]:
     key = str(feature_set or "all").strip().lower()
     if key == "all":
+        return list(BASE_FEATURE_NAMES)
+    if key == "all_visual":
         return list(FEATURE_NAMES)
     if key == "rank_only":
         return list(RANK_FEATURES)
@@ -208,6 +247,8 @@ def resolve_feature_names(feature_set: str) -> list[str]:
         return list(SOURCE_FEATURES)
     if key == "structure_only":
         return list(STRUCTURE_FEATURES)
+    if key == "visual_only":
+        return list(VISUAL_FEATURES)
     if key == "rank_content":
         return dedupe_feature_names(RANK_FEATURES + CONTENT_FEATURES)
     if key == "rank_source":
@@ -224,14 +265,16 @@ def resolve_feature_names(feature_set: str) -> list[str]:
         return dedupe_feature_names(SOURCE_FEATURES + CONTENT_FEATURES)
     if key == "structure_content":
         return dedupe_feature_names(STRUCTURE_FEATURES + CONTENT_FEATURES)
+    if key == "structure_content_visual":
+        return dedupe_feature_names(STRUCTURE_FEATURES + CONTENT_FEATURES + VISUAL_FEATURES)
     if key == "source_structure_content":
         return dedupe_feature_names(SOURCE_FEATURES + STRUCTURE_FEATURES + CONTENT_FEATURES)
     if key == "no_content":
-        return [name for name in FEATURE_NAMES if name not in set(CONTENT_FEATURES)]
+        return [name for name in BASE_FEATURE_NAMES if name not in set(CONTENT_FEATURES)]
     if key == "no_source":
-        return [name for name in FEATURE_NAMES if name not in set(SOURCE_FEATURES)]
+        return [name for name in BASE_FEATURE_NAMES if name not in set(SOURCE_FEATURES)]
     if key == "no_structure":
-        return [name for name in FEATURE_NAMES if name not in set(STRUCTURE_FEATURES)]
+        return [name for name in BASE_FEATURE_NAMES if name not in set(STRUCTURE_FEATURES)]
     raise ValueError(f"Unknown feature_set {feature_set!r}; expected one of {', '.join(FEATURE_SET_NAMES)}")
 
 
@@ -249,6 +292,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-base-pred", required=True)
     parser.add_argument("--train-page-text-jsonl", required=True)
     parser.add_argument("--eval-page-text-jsonl", required=True)
+    parser.add_argument(
+        "--train-page-visual-metadata-jsonl",
+        default="",
+        help="Optional per-page visual metadata JSONL for visual feature sets.",
+    )
+    parser.add_argument(
+        "--eval-page-visual-metadata-jsonl",
+        default="",
+        help="Optional per-page visual metadata JSONL for visual feature sets.",
+    )
     parser.add_argument("--train-source", action="append", default=[], help="Optional LABEL=prediction.json")
     parser.add_argument("--eval-source", action="append", default=[], help="Optional LABEL=prediction.json")
     parser.add_argument(
@@ -734,12 +787,69 @@ def load_page_features(path: Path) -> dict[str, dict[str, Any]]:
     return out
 
 
+def visual_metadata_defaults() -> dict[str, Any]:
+    return {
+        "image_count": 0,
+        "large_image_count": 0,
+        "image_area_ratio": 0.0,
+        "largest_image_area_ratio": 0.0,
+        "has_image": False,
+        "has_large_image": False,
+    }
+
+
+def load_page_visual_metadata(path: str) -> dict[str, dict[str, Any]]:
+    if not path:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in read_jsonl(Path(path)):
+        uid = str(row.get("page_uid", "")).strip()
+        if not uid:
+            doc_id = str(row.get("doc_id", "")).strip()
+            page_idx = row.get("page_idx")
+            if doc_id and page_idx is not None:
+                uid = page_uid(doc_id, int(page_idx))
+        if not uid:
+            continue
+        values = visual_metadata_defaults()
+        values.update(
+            {
+                "image_count": int(row.get("image_count") or 0),
+                "large_image_count": int(row.get("large_image_count") or 0),
+                "image_area_ratio": float(row.get("image_area_ratio") or 0.0),
+                "largest_image_area_ratio": float(row.get("largest_image_area_ratio") or 0.0),
+                "has_image": bool(row.get("has_image", False)),
+                "has_large_image": bool(row.get("has_large_image", False)),
+            }
+        )
+        out[uid] = values
+    return out
+
+
+def attach_page_visual_metadata(
+    page_features: dict[str, dict[str, Any]],
+    visual_metadata: dict[str, dict[str, Any]],
+) -> None:
+    defaults = visual_metadata_defaults()
+    for uid, page in page_features.items():
+        visual = visual_metadata.get(uid, defaults)
+        page["visual"] = {
+            "image_count": int(visual.get("image_count") or 0),
+            "large_image_count": int(visual.get("large_image_count") or 0),
+            "image_area_ratio": float(visual.get("image_area_ratio") or 0.0),
+            "largest_image_area_ratio": float(visual.get("largest_image_area_ratio") or 0.0),
+            "has_image": bool(visual.get("has_image", False)),
+            "has_large_image": bool(visual.get("has_large_image", False)),
+        }
+
+
 def question_profile(row: dict[str, Any]) -> dict[str, Any]:
     question = str(row.get("question", "") or "")
     tokens = [tok for tok in tokenize(question) if tok not in STOPWORDS]
     token_set = set(tokens)
     anchor_tokens = {tok for tok in token_set if len(tok) >= 4 or re.fullmatch(r"\d{2,4}", tok)}
     number_tokens = {tok for tok in token_set if re.fullmatch(r"\d+(?:\.\d+)?", tok)}
+    visual_cue = bool(token_set & VISUAL_QUERY_TERMS)
     phrases = set()
     for quoted in re.findall(r'"([^"]+)"|\'([^\']+)\'', question):
         phrase = next((part for part in quoted if part), "")
@@ -758,6 +868,7 @@ def question_profile(row: dict[str, Any]) -> dict[str, Any]:
         "phrases": {phrase for phrase in phrases if phrase},
         "bigrams": set(ngrams(tokens, 2)),
         "trigrams": set(ngrams(tokens, 3)),
+        "visual_cue": 1.0 if visual_cue else 0.0,
     }
 
 
@@ -843,6 +954,40 @@ def content_features(profile: dict[str, Any], page: dict[str, Any] | None) -> di
     }
 
 
+def visual_features(profile: dict[str, Any], page: dict[str, Any] | None) -> dict[str, float]:
+    if page is None:
+        has_image = 0.0
+        has_large_image = 0.0
+        image_count = 0.0
+        large_image_count = 0.0
+        image_area_ratio = 0.0
+        largest_image_area_ratio = 0.0
+    else:
+        visual = page.get("visual", {}) if isinstance(page.get("visual"), dict) else {}
+        has_image = 1.0 if bool(visual.get("has_image", False)) else 0.0
+        has_large_image = 1.0 if bool(visual.get("has_large_image", False)) else 0.0
+        image_count = float(visual.get("image_count") or 0.0)
+        large_image_count = float(visual.get("large_image_count") or 0.0)
+        image_area_ratio = min(max(float(visual.get("image_area_ratio") or 0.0), 0.0), 1.0)
+        largest_image_area_ratio = min(
+            max(float(visual.get("largest_image_area_ratio") or 0.0), 0.0),
+            1.0,
+        )
+    query_visual = float(profile.get("visual_cue") or 0.0)
+    return {
+        "visual_has_image": has_image,
+        "visual_has_large_image": has_large_image,
+        "visual_image_count_log": math.log1p(image_count),
+        "visual_large_image_count_log": math.log1p(large_image_count),
+        "visual_image_area_ratio": image_area_ratio,
+        "visual_largest_image_area_ratio": largest_image_area_ratio,
+        "question_visual_cue": query_visual,
+        "visual_has_image_x_question_visual_cue": has_image * query_visual,
+        "visual_has_large_image_x_question_visual_cue": has_large_image * query_visual,
+        "visual_image_area_x_question_visual_cue": image_area_ratio * query_visual,
+    }
+
+
 def feature_vector(
     record: dict[str, Any],
     *,
@@ -888,7 +1033,9 @@ def feature_vector(
         if not source_ranks
         else float(sum(1.0 / rank_value for rank_value in source_ranks)) / float(len(source_ranks)),
     }
-    base.update(content_features(question, page_features.get(uid)))
+    page_feature = page_features.get(uid)
+    base.update(content_features(question, page_feature))
+    base.update(visual_features(question, page_feature))
     selected = feature_names or FEATURE_NAMES
     return [float(base[name]) for name in selected]
 
@@ -3598,6 +3745,10 @@ def main() -> None:
     eval_base = load_prediction(Path(args.eval_base_pred))
     train_page_features = load_page_features(Path(args.train_page_text_jsonl))
     eval_page_features = load_page_features(Path(args.eval_page_text_jsonl))
+    train_visual_metadata = load_page_visual_metadata(args.train_page_visual_metadata_jsonl)
+    eval_visual_metadata = load_page_visual_metadata(args.eval_page_visual_metadata_jsonl)
+    attach_page_visual_metadata(train_page_features, train_visual_metadata)
+    attach_page_visual_metadata(eval_page_features, eval_visual_metadata)
 
     train_source_maps: dict[str, dict[str, dict[str, float]]] = {}
     eval_source_maps: dict[str, dict[str, dict[str, float]]] = {}
@@ -3790,6 +3941,10 @@ def main() -> None:
         "eval_base_pred": args.eval_base_pred,
         "train_page_text_jsonl": args.train_page_text_jsonl,
         "eval_page_text_jsonl": args.eval_page_text_jsonl,
+        "train_page_visual_metadata_jsonl": args.train_page_visual_metadata_jsonl,
+        "eval_page_visual_metadata_jsonl": args.eval_page_visual_metadata_jsonl,
+        "train_page_visual_metadata_count": int(len(train_visual_metadata)),
+        "eval_page_visual_metadata_count": int(len(eval_visual_metadata)),
         "feature_set": args.feature_set,
         "restrict_eval_to_gold_qids": bool(args.restrict_eval_to_gold_qids),
         "eval_base_apply_qid_count": int(len(eval_base_for_apply)),

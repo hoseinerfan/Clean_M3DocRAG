@@ -44,6 +44,8 @@ TRAIN_GOLD="${TRAIN_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmq
 EVAL_GOLD="${EVAL_GOLD:-$REPO_ROOT/output/m3docvqa_mmqa_pseudo_page_labels/mmqa_dev_pseudo_page_labels_strict.augmented_gold.jsonl}"
 TRAIN_PAGE_TEXT_JSONL="${TRAIN_PAGE_TEXT_JSONL:-${M3DOCVQA_TRAIN_PAGE_TEXT_JSONL:-$CUSTOM_ROOT/outputs/m3docvqa_page_text/m3docvqa_train_page_text.jsonl}}"
 EVAL_PAGE_TEXT_JSONL="${EVAL_PAGE_TEXT_JSONL:-${M3DOCVQA_DEV_PAGE_TEXT_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-$CUSTOM_ROOT/outputs/m3docvqa_page_text/m3docvqa_dev_page_text.jsonl}}}"
+TRAIN_PAGE_VISUAL_METADATA_JSONL="${TRAIN_PAGE_VISUAL_METADATA_JSONL:-${M3DOCVQA_TRAIN_PAGE_VISUAL_METADATA_JSONL:-${M3DOCVQA_PAGE_VISUAL_METADATA_DIR:+$M3DOCVQA_PAGE_VISUAL_METADATA_DIR/m3docvqa_train_page_visual_metadata.jsonl}}}"
+EVAL_PAGE_VISUAL_METADATA_JSONL="${EVAL_PAGE_VISUAL_METADATA_JSONL:-${M3DOCVQA_DEV_PAGE_VISUAL_METADATA_JSONL:-${M3DOCVQA_PAGE_VISUAL_METADATA_DIR:+$M3DOCVQA_PAGE_VISUAL_METADATA_DIR/m3docvqa_dev_page_visual_metadata.jsonl}}}"
 
 TRAIN_DENSE_PRED="${TRAIN_DENSE_PRED:-${M3DOCVQA_TRAIN_DENSE_PRED:-$(first_existing_path \
   "$CUSTOM_ROOT/outputs/m3docvqa_baseline_mmqa_train/mmqa_train_baseline_ret1000_ivfflat_nprobe4.prediction.json" \
@@ -81,6 +83,12 @@ require_file train_gold "$TRAIN_GOLD"
 require_file eval_gold "$EVAL_GOLD"
 require_file train_page_text_jsonl "$TRAIN_PAGE_TEXT_JSONL"
 require_file eval_page_text_jsonl "$EVAL_PAGE_TEXT_JSONL"
+if [[ -n "$TRAIN_PAGE_VISUAL_METADATA_JSONL" ]]; then
+  require_file train_page_visual_metadata_jsonl "$TRAIN_PAGE_VISUAL_METADATA_JSONL"
+fi
+if [[ -n "$EVAL_PAGE_VISUAL_METADATA_JSONL" ]]; then
+  require_file eval_page_visual_metadata_jsonl "$EVAL_PAGE_VISUAL_METADATA_JSONL"
+fi
 require_file train_dense_pred "$TRAIN_DENSE_PRED"
 require_file eval_dense_pred "$EVAL_DENSE_PRED"
 
@@ -166,6 +174,8 @@ echo "using_train_gold=$TRAIN_GOLD"
 echo "using_eval_gold=$EVAL_GOLD"
 echo "using_train_page_text_jsonl=$TRAIN_PAGE_TEXT_JSONL"
 echo "using_eval_page_text_jsonl=$EVAL_PAGE_TEXT_JSONL"
+echo "using_train_page_visual_metadata_jsonl=$TRAIN_PAGE_VISUAL_METADATA_JSONL"
+echo "using_eval_page_visual_metadata_jsonl=$EVAL_PAGE_VISUAL_METADATA_JSONL"
 echo "using_train_dense_pred=$TRAIN_DENSE_PRED"
 echo "using_eval_dense_pred=$EVAL_DENSE_PRED"
 echo "using_out_dir=$OUT_DIR"
@@ -194,6 +204,8 @@ echo "using_context_weak_positive_weight=${CONTEXT_WEAK_POSITIVE_WEIGHT:-0.35}"
   --eval-base-pred "$EVAL_DENSE_PRED" \
   --train-page-text-jsonl "$TRAIN_PAGE_TEXT_JSONL" \
   --eval-page-text-jsonl "$EVAL_PAGE_TEXT_JSONL" \
+  --train-page-visual-metadata-jsonl "$TRAIN_PAGE_VISUAL_METADATA_JSONL" \
+  --eval-page-visual-metadata-jsonl "$EVAL_PAGE_VISUAL_METADATA_JSONL" \
   "${train_sources[@]}" \
   "${eval_sources[@]}" \
   --feature-set "$FEATURE_SET" \

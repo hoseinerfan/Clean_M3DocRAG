@@ -26,6 +26,7 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
             "rank_only",
             "source_only",
             "structure_only",
+            "visual_only",
             "content_only",
             "rank_source",
             "rank_structure",
@@ -33,27 +34,54 @@ class ContentAwarePseudoPageRerankerTests(unittest.TestCase):
             "source_structure",
             "source_content",
             "structure_content",
+            "structure_content_visual",
             "rank_source_structure",
             "no_source",
             "no_structure",
             "source_structure_content",
             "all",
+            "all_visual",
         }
         self.assertTrue(expected.issubset(set(MODULE.FEATURE_SET_NAMES)))
-        self.assertEqual(len(expected), 15)
+        self.assertEqual(len(expected), 18)
 
         self.assertEqual(MODULE.resolve_feature_names("rank_only"), MODULE.RANK_FEATURES)
         self.assertEqual(MODULE.resolve_feature_names("source_only"), MODULE.SOURCE_FEATURES)
         self.assertEqual(MODULE.resolve_feature_names("structure_only"), MODULE.STRUCTURE_FEATURES)
+        self.assertEqual(MODULE.resolve_feature_names("visual_only"), MODULE.VISUAL_FEATURES)
         self.assertEqual(MODULE.resolve_feature_names("content_only"), MODULE.CONTENT_FEATURES)
+        self.assertEqual(MODULE.resolve_feature_names("all"), MODULE.BASE_FEATURE_NAMES)
+        self.assertEqual(MODULE.resolve_feature_names("all_visual"), MODULE.FEATURE_NAMES)
         self.assertCountEqual(
             MODULE.resolve_feature_names("rank_source_structure"),
             MODULE.resolve_feature_names("no_content"),
         )
         self.assertCountEqual(
             MODULE.resolve_feature_names("source_structure_content"),
-            [name for name in MODULE.FEATURE_NAMES if name not in set(MODULE.RANK_FEATURES)],
+            [name for name in MODULE.BASE_FEATURE_NAMES if name not in set(MODULE.RANK_FEATURES)],
         )
+
+    def test_visual_features_use_page_sidecar_and_question_text_cues(self) -> None:
+        page = {
+            "visual": {
+                "has_image": True,
+                "has_large_image": True,
+                "image_count": 3,
+                "large_image_count": 2,
+                "image_area_ratio": 0.25,
+                "largest_image_area_ratio": 0.20,
+            }
+        }
+        profile = MODULE.question_profile({"question": "Which image shows the city map?"})
+        values = MODULE.visual_features(profile, page)
+
+        self.assertEqual(values["visual_has_image"], 1.0)
+        self.assertEqual(values["visual_has_large_image"], 1.0)
+        self.assertGreater(values["visual_image_count_log"], 0.0)
+        self.assertEqual(values["visual_image_area_ratio"], 0.25)
+        self.assertEqual(values["visual_largest_image_area_ratio"], 0.20)
+        self.assertEqual(values["question_visual_cue"], 1.0)
+        self.assertEqual(values["visual_has_image_x_question_visual_cue"], 1.0)
 
     def test_negative_sampling_policies_share_budget_but_select_different_pages(self) -> None:
         records = [
