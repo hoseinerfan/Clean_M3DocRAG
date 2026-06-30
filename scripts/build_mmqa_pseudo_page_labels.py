@@ -86,6 +86,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--evidence-coverage-tie-breaker",
+        choices=["page_order", "question_overlap"],
+        default="page_order",
+        help=(
+            "Tie-breaker used only after evidence_coverage, evidence weight, and page "
+            "score are tied. page_order preserves the original earliest-page behavior. "
+            "question_overlap prefers the tied page with more question-token overlap."
+        ),
+    )
+    parser.add_argument(
         "--evidence-weight-overrides",
         default="",
         help=(
@@ -195,6 +205,7 @@ class PageScore:
     doc_id: str
     page_idx: int
     score: float = 0.0
+    question_overlap: float = 0.0
     exact_matches: list[dict[str, Any]] = field(default_factory=list)
     fuzzy_matches: list[dict[str, Any]] = field(default_factory=list)
     verification_matches: list[dict[str, Any]] = field(default_factory=list)
@@ -360,6 +371,43 @@ CONTEXT_STOPWORDS = {
     "with",
     "would",
 }
+
+QUESTION_TIE_BREAK_STOPWORDS = CONTEXT_STOPWORDS | {
+    "and",
+    "are",
+    "did",
+    "does",
+    "for",
+    "how",
+    "many",
+    "much",
+    "name",
+    "the",
+    "was",
+    "were",
+    "what",
+    "when",
+    "who",
+    "whose",
+}
+
+
+def question_tie_break_tokens(row: dict[str, Any]) -> set[str]:
+    tokens = set()
+    for token in tokenize(str(row.get("question", "") or "")):
+        if len(token) < 3 or token in QUESTION_TIE_BREAK_STOPWORDS:
+            continue
+        tokens.add(token)
+    return tokens
+
+
+def question_page_overlap(question_tokens: set[str], page: dict[str, Any]) -> float:
+    if not question_tokens:
+        return 0.0
+    page_tokens = page.get("tokens", set())
+    if not isinstance(page_tokens, set):
+        page_tokens = set(page_tokens or [])
+    return len(question_tokens & page_tokens) / float(len(question_tokens))
 
 
 def text_document_body(row: dict[str, Any]) -> str:
@@ -879,6 +927,7 @@ def score_pages(
     gold_docs = supporting_doc_ids(row)
     missing_docs = [doc_id for doc_id in gold_docs if doc_id not in pages_by_doc]
     scores: list[PageScore] = []
+    question_tokens = question_tie_break_tokens(row)
 
     for doc_id in gold_docs:
         for page in pages_by_doc.get(doc_id, []):
@@ -886,6 +935,7 @@ def score_pages(
                 page_uid=str(page["page_uid"]),
                 doc_id=doc_id,
                 page_idx=int(page["page_idx"]),
+                question_overlap=question_page_overlap(question_tokens, page),
             )
             for item in evidence:
                 if item.doc_id and item.doc_id != doc_id:
@@ -1000,8 +1050,13 @@ def select_labels_by_evidence_coverage(
     top_pages_per_doc: int,
     top_pages_per_qid: int,
     coverage_min_match_weight: float = 3.0,
+    evidence_coverage_tie_breaker: str = "page_order",
     doc_caps: dict[str, int] | None = None,
 ) -> list[PageScore]:
+    if evidence_coverage_tie_breaker not in {"page_order", "question_overlap"}:
+        raise ValueError(
+            "evidence_coverage_tie_breaker must be 'page_order' or 'question_overlap'"
+        )
     eligible = [item for item in scores if item.score >= float(min_score)]
     selected: list[PageScore] = []
     selected_uids: set[str] = set()
@@ -1012,7 +1067,7 @@ def select_labels_by_evidence_coverage(
         if int(top_pages_per_qid) > 0 and len(selected) >= int(top_pages_per_qid):
             break
         best: PageScore | None = None
-        best_key: tuple[int, float, float, int, str] | None = None
+        best_key: tuple[int, float, float, float, int, str] | None = None
         for item in eligible:
             if item.page_uid in selected_uids:
                 continue
@@ -1034,10 +1089,16 @@ def select_labels_by_evidence_coverage(
                 min_match_weight=float(coverage_min_match_weight),
             )
             new_weight = sum(weight_by_key.get(key, 0.0) for key in new_keys)
+            tie_break_value = (
+                float(item.question_overlap)
+                if evidence_coverage_tie_breaker == "question_overlap"
+                else 0.0
+            )
             candidate_key = (
                 len(new_keys),
                 float(new_weight),
                 float(item.score),
+                tie_break_value,
                 -int(item.page_idx),
                 item.page_uid,
             )
@@ -1081,6 +1142,7 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "doc_id": item.doc_id,
         "page_idx": int(item.page_idx),
         "score": round(float(item.score), 6),
+        "question_overlap": round(float(item.question_overlap), 6),
         "confidence": confidence(item.score),
         "exact_matches": item.exact_matches[:20],
         "fuzzy_matches": item.fuzzy_matches[:20],
@@ -1242,6 +1304,7 @@ def main() -> None:
                         top_pages_per_doc=int(args.top_pages_per_doc),
                         top_pages_per_qid=int(effective_top_pages_per_qid),
                         coverage_min_match_weight=float(args.coverage_min_match_weight),
+                        evidence_coverage_tie_breaker=str(args.evidence_coverage_tie_breaker),
                         doc_caps=adaptive_doc_caps,
                     )
                 else:
@@ -1359,6 +1422,7 @@ def main() -> None:
         "min_token_overlap": float(args.min_token_overlap),
         "selection_policy": str(args.selection_policy),
         "coverage_min_match_weight": float(args.coverage_min_match_weight),
+        "evidence_coverage_tie_breaker": str(args.evidence_coverage_tie_breaker),
         "evidence_weight_overrides": str(args.evidence_weight_overrides),
         "evidence_weights": dict(sorted(evidence_weights.items())),
         "text_instance_context_window_chars": int(args.text_instance_context_window_chars),

@@ -27,6 +27,7 @@ ADAPTIVE_PAGE_CAPS="${ADAPTIVE_PAGE_CAPS:-0}"
 MIN_TOKEN_OVERLAP="${MIN_TOKEN_OVERLAP:-0.72}"
 SELECTION_POLICY="${SELECTION_POLICY:-score}"
 COVERAGE_MIN_MATCH_WEIGHT="${COVERAGE_MIN_MATCH_WEIGHT:-3.0}"
+EVIDENCE_COVERAGE_TIE_BREAKER="${EVIDENCE_COVERAGE_TIE_BREAKER:-page_order}"
 EVIDENCE_WEIGHT_OVERRIDES="${EVIDENCE_WEIGHT_OVERRIDES:-}"
 TEXT_INSTANCE_CONTEXT_WINDOW_CHARS="${TEXT_INSTANCE_CONTEXT_WINDOW_CHARS:-0}"
 TEXT_INSTANCE_CONTEXT_MAX_PHRASES="${TEXT_INSTANCE_CONTEXT_MAX_PHRASES:-6}"
@@ -46,6 +47,7 @@ echo "using_out_dir=$OUT_DIR"
 echo "using_label=$LABEL"
 echo "using_selection_policy=$SELECTION_POLICY"
 echo "using_coverage_min_match_weight=$COVERAGE_MIN_MATCH_WEIGHT"
+echo "using_evidence_coverage_tie_breaker=$EVIDENCE_COVERAGE_TIE_BREAKER"
 echo "using_adaptive_page_caps=$ADAPTIVE_PAGE_CAPS"
 echo "using_evidence_weight_overrides=$EVIDENCE_WEIGHT_OVERRIDES"
 echo "using_text_instance_context_window_chars=$TEXT_INSTANCE_CONTEXT_WINDOW_CHARS"
@@ -73,6 +75,7 @@ fi
   --min-token-overlap "$MIN_TOKEN_OVERLAP" \
   --selection-policy "$SELECTION_POLICY" \
   --coverage-min-match-weight "$COVERAGE_MIN_MATCH_WEIGHT" \
+  --evidence-coverage-tie-breaker "$EVIDENCE_COVERAGE_TIE_BREAKER" \
   --evidence-weight-overrides "$EVIDENCE_WEIGHT_OVERRIDES" \
   --text-instance-context-window-chars "$TEXT_INSTANCE_CONTEXT_WINDOW_CHARS" \
   --text-instance-context-max-phrases "$TEXT_INSTANCE_CONTEXT_MAX_PHRASES" \

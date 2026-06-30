@@ -571,6 +571,49 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
         self.assertEqual(len(fixed), 1)
         self.assertEqual({item.page_uid for item in adaptive}, {"docA_page0", "docA_page1"})
 
+    def test_question_overlap_tie_breaker_prefers_more_relevant_same_score_page(self) -> None:
+        earlier = MODULE.PageScore(
+            page_uid="docA_page0",
+            doc_id="docA",
+            page_idx=0,
+            question_overlap=0.1,
+        )
+        earlier.score = 1.0
+        earlier.exact_matches = [
+            {"source": "text_instance", "text": "shared evidence", "weight": 1.0},
+        ]
+        later = MODULE.PageScore(
+            page_uid="docA_page3",
+            doc_id="docA",
+            page_idx=3,
+            question_overlap=0.8,
+        )
+        later.score = 1.0
+        later.exact_matches = [
+            {"source": "text_instance", "text": "shared evidence", "weight": 1.0},
+        ]
+
+        default_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            doc_caps={"docA": 1},
+        )
+        overlap_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            evidence_coverage_tie_breaker="question_overlap",
+            doc_caps={"docA": 1},
+        )
+
+        self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
+        self.assertEqual([item.page_uid for item in overlap_selected], ["docA_page3"])
+
 
 if __name__ == "__main__":
     unittest.main()
