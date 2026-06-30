@@ -653,6 +653,81 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
         self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
         self.assertEqual([item.page_uid for item in indirect_selected], ["docA_page2"])
 
+    def test_image_presence_tie_breaker_only_uses_visual_metadata_for_image_evidence(self) -> None:
+        earlier = MODULE.PageScore(
+            page_uid="docA_page0",
+            doc_id="docA",
+            page_idx=0,
+            visual_image_tie_score=0.0,
+            visual_has_image=False,
+        )
+        earlier.score = 1.0
+        earlier.exact_matches = [
+            {"source": "image_title", "text": "shared caption", "weight": 1.0},
+        ]
+        later = MODULE.PageScore(
+            page_uid="docA_page3",
+            doc_id="docA",
+            page_idx=3,
+            visual_image_tie_score=11.25,
+            visual_image_count=2,
+            visual_large_image_count=1,
+            visual_image_area_ratio=0.15,
+            visual_has_image=True,
+            visual_has_large_image=True,
+        )
+        later.score = 1.0
+        later.exact_matches = [
+            {"source": "image_title", "text": "shared caption", "weight": 1.0},
+        ]
+        text_page = MODULE.PageScore(
+            page_uid="docB_page3",
+            doc_id="docB",
+            page_idx=3,
+            visual_image_tie_score=99.0,
+            visual_has_image=True,
+        )
+        text_page.score = 1.0
+        text_page.exact_matches = [
+            {"source": "text_instance", "text": "shared text", "weight": 1.0},
+        ]
+        text_earlier = MODULE.PageScore(page_uid="docB_page0", doc_id="docB", page_idx=0)
+        text_earlier.score = 1.0
+        text_earlier.exact_matches = [
+            {"source": "text_instance", "text": "shared text", "weight": 1.0},
+        ]
+
+        default_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            doc_caps={"docA": 1},
+        )
+        image_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            evidence_coverage_tie_breaker="image_presence",
+            doc_caps={"docA": 1},
+        )
+        text_selected = MODULE.select_labels_by_evidence_coverage(
+            [text_earlier, text_page],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            evidence_coverage_tie_breaker="image_presence",
+            doc_caps={"docB": 1},
+        )
+
+        self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
+        self.assertEqual([item.page_uid for item in image_selected], ["docA_page3"])
+        self.assertEqual([item.page_uid for item in text_selected], ["docB_page0"])
+
 
 if __name__ == "__main__":
     unittest.main()

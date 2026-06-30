@@ -38,11 +38,16 @@ DIRECT_EVIDENCE_WEIGHT_OVERRIDES="${DIRECT_EVIDENCE_WEIGHT_OVERRIDES:-answer_tex
 
 for split in $SPLITS; do
   doc_pages_jsonl="${DOC_PAGES_JSONL:-${M3DOCVQA_PAGE_TEXT_DIR:-${LOCAL_OUTPUT_DIR:-$REPO_ROOT/output}/m3docvqa_page_text}/m3docvqa_${split}_page_text.jsonl}"
+  page_visual_metadata_jsonl="${PAGE_VISUAL_METADATA_JSONL:-}"
+  if [[ -z "$page_visual_metadata_jsonl" && -n "${M3DOCVQA_PAGE_VISUAL_METADATA_DIR:-}" ]]; then
+    page_visual_metadata_jsonl="$M3DOCVQA_PAGE_VISUAL_METADATA_DIR/m3docvqa_${split}_page_visual_metadata.jsonl"
+  fi
   label="mmqa_${split}_pseudo_page_labels_${LABEL_SUFFIX}"
 
   echo
   echo "== Build direct-evidence strict pseudo-page labels: split=$split =="
   echo "using_doc_pages_jsonl=$doc_pages_jsonl"
+  echo "using_page_visual_metadata_jsonl=$page_visual_metadata_jsonl"
   echo "using_label=$label"
   echo "using_selection_policy=$SELECTION_POLICY"
   echo "using_coverage_min_match_weight=$COVERAGE_MIN_MATCH_WEIGHT"
@@ -54,6 +59,7 @@ for split in $SPLITS; do
 
   SPLIT="$split" \
     DOC_PAGES_JSONL="$doc_pages_jsonl" \
+    PAGE_VISUAL_METADATA_JSONL="$page_visual_metadata_jsonl" \
     OUT_DIR="$OUT_DIR" \
     LABEL="$label" \
     MIN_SCORE="$MIN_SCORE" \

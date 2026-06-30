@@ -13,6 +13,7 @@ SPLIT="${SPLIT:-dev}"
 DATA_ROOT="${M3DOCVQA_DATA_ROOT:-$REPO_ROOT/data/m3-docvqa}"
 GOLD="${GOLD:-$DATA_ROOT/multimodalqa/MMQA_${SPLIT}.jsonl}"
 DOC_PAGES_JSONL="${DOC_PAGES_JSONL:-${M3DOCVQA_PAGE_TEXT_JSONL:-${LOCAL_OUTPUT_DIR:-$REPO_ROOT/output}/m3docvqa_page_text/m3docvqa_${SPLIT}_page_text.jsonl}}"
+PAGE_VISUAL_METADATA_JSONL="${PAGE_VISUAL_METADATA_JSONL:-}"
 MMQA_TEXTS_JSONL="${MMQA_TEXTS_JSONL:-$DATA_ROOT/multimodalqa/MMQA_texts.jsonl}"
 MMQA_TABLES_JSONL="${MMQA_TABLES_JSONL:-$DATA_ROOT/multimodalqa/MMQA_tables.jsonl}"
 MMQA_IMAGES_JSONL="${MMQA_IMAGES_JSONL:-$DATA_ROOT/multimodalqa/MMQA_images.jsonl}"
@@ -39,6 +40,7 @@ mkdir -p "$OUT_DIR"
 
 echo "using_gold=$GOLD"
 echo "using_doc_pages_jsonl=$DOC_PAGES_JSONL"
+echo "using_page_visual_metadata_jsonl=$PAGE_VISUAL_METADATA_JSONL"
 echo "using_mmqa_texts_jsonl=$MMQA_TEXTS_JSONL"
 echo "using_mmqa_tables_jsonl=$MMQA_TABLES_JSONL"
 echo "using_mmqa_images_jsonl=$MMQA_IMAGES_JSONL"
@@ -64,6 +66,7 @@ fi
 "$PYTHON_BIN" "$REPO_ROOT/scripts/build_mmqa_pseudo_page_labels.py" \
   --gold "$GOLD" \
   --doc-pages-jsonl "$DOC_PAGES_JSONL" \
+  --page-visual-metadata-jsonl "$PAGE_VISUAL_METADATA_JSONL" \
   --mmqa-texts-jsonl "$MMQA_TEXTS_JSONL" \
   --mmqa-tables-jsonl "$MMQA_TABLES_JSONL" \
   --mmqa-images-jsonl "$MMQA_IMAGES_JSONL" \

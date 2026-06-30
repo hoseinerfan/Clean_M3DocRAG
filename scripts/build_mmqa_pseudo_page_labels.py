@@ -49,6 +49,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--gold", required=True, help="MMQA_train/dev.jsonl")
     parser.add_argument("--doc-pages-jsonl", required=True, help="Exported page text JSONL")
+    parser.add_argument(
+        "--page-visual-metadata-jsonl",
+        default="",
+        help=(
+            "Optional per-page visual metadata JSONL. When provided, "
+            "--evidence-coverage-tie-breaker=image_presence can prefer image-title "
+            "ties on pages that actually contain image objects."
+        ),
+    )
     parser.add_argument("--mmqa-texts-jsonl", default="", help="Optional MMQA_texts.jsonl")
     parser.add_argument("--mmqa-tables-jsonl", default="", help="Optional MMQA_tables.jsonl")
     parser.add_argument("--mmqa-images-jsonl", default="", help="Optional MMQA_images.jsonl")
@@ -87,14 +96,16 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--evidence-coverage-tie-breaker",
-        choices=["page_order", "question_overlap", "indirect_verification"],
+        choices=["page_order", "question_overlap", "indirect_verification", "image_presence"],
         default="page_order",
         help=(
             "Tie-breaker used only after evidence_coverage, evidence weight, and page "
             "score are tied. page_order preserves the original earliest-page behavior. "
             "question_overlap prefers the tied page with more question-token overlap. "
             "indirect_verification prefers tied pages with source-specific diagnostic "
-            "MMQA context matches, such as table title or same-row cells."
+            "MMQA context matches, such as table title or same-row cells. image_presence "
+            "applies only to image_title evidence and prefers tied pages with stronger "
+            "PDF image-object evidence."
         ),
     )
     parser.add_argument(
@@ -209,6 +220,12 @@ class PageScore:
     score: float = 0.0
     question_overlap: float = 0.0
     indirect_verification_score: float = 0.0
+    visual_image_tie_score: float = 0.0
+    visual_image_count: int = 0
+    visual_large_image_count: int = 0
+    visual_image_area_ratio: float = 0.0
+    visual_has_image: bool = False
+    visual_has_large_image: bool = False
     indirect_verification_matches: list[dict[str, Any]] = field(default_factory=list)
     exact_matches: list[dict[str, Any]] = field(default_factory=list)
     fuzzy_matches: list[dict[str, Any]] = field(default_factory=list)
@@ -280,6 +297,60 @@ def load_by_id(path: str) -> dict[str, dict[str, Any]]:
     return {str(row["id"]): row for row in load_jsonl(Path(path)) if row.get("id")}
 
 
+def load_page_visual_metadata(path: str) -> dict[str, dict[str, Any]]:
+    if not path:
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for row in load_jsonl(Path(path)):
+        uid = str(row.get("page_uid", "")).strip()
+        if not uid:
+            doc_id = str(row.get("doc_id", "")).strip()
+            page_idx = row.get("page_idx")
+            if doc_id and page_idx is not None:
+                uid = page_uid(doc_id, int(page_idx))
+        if not uid:
+            continue
+        image_count = int(row.get("image_count") or 0)
+        large_image_count = int(row.get("large_image_count") or 0)
+        area_ratio = float(row.get("image_area_ratio") or 0.0)
+        has_image = bool(row.get("has_image", image_count > 0))
+        has_large_image = bool(row.get("has_large_image", large_image_count > 0))
+        out[uid] = {
+            "image_count": image_count,
+            "large_image_count": large_image_count,
+            "image_area_ratio": area_ratio,
+            "has_image": has_image,
+            "has_large_image": has_large_image,
+            "visual_image_tie_score": image_presence_tie_score(
+                image_count=image_count,
+                large_image_count=large_image_count,
+                image_area_ratio=area_ratio,
+                has_image=has_image,
+                has_large_image=has_large_image,
+            ),
+        }
+    return out
+
+
+def image_presence_tie_score(
+    *,
+    image_count: int,
+    large_image_count: int,
+    image_area_ratio: float,
+    has_image: bool,
+    has_large_image: bool,
+) -> float:
+    if not bool(has_image):
+        return 0.0
+    score = 1.0
+    if bool(has_large_image):
+        score += 10.0
+    score += min(float(image_area_ratio), 1.0)
+    score += min(float(max(int(large_image_count), 0)), 10.0) * 0.1
+    score += min(float(max(int(image_count), 0)), 20.0) * 0.01
+    return score
+
+
 def normalize_url(url: str) -> str:
     value = str(url or "").strip()
     if not value:
@@ -301,7 +372,11 @@ def parse_page_idx(row: dict[str, Any]) -> int:
     raise ValueError(f"Page row missing page index: {row}")
 
 
-def load_page_texts(path: Path) -> dict[str, list[dict[str, Any]]]:
+def load_page_texts(
+    path: Path,
+    page_visual_by_uid: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    page_visual_by_uid = page_visual_by_uid or {}
     pages_by_doc: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in load_jsonl(path):
         doc_id = str(row.get("doc_id", "")).strip()
@@ -314,6 +389,7 @@ def load_page_texts(path: Path) -> dict[str, list[dict[str, Any]]]:
         page_idx = parse_page_idx(row)
         uid = str(row.get("page_uid") or page_uid(doc_id, page_idx))
         text = page_text(row)
+        visual = page_visual_by_uid.get(uid, {})
         pages_by_doc[doc_id].append(
             {
                 "page_uid": uid,
@@ -322,6 +398,12 @@ def load_page_texts(path: Path) -> dict[str, list[dict[str, Any]]]:
                 "text": text,
                 "norm_text": normalize_text(text),
                 "tokens": set(tokenize(text)),
+                "visual_image_count": int(visual.get("image_count") or 0),
+                "visual_large_image_count": int(visual.get("large_image_count") or 0),
+                "visual_image_area_ratio": float(visual.get("image_area_ratio") or 0.0),
+                "visual_has_image": bool(visual.get("has_image", False)),
+                "visual_has_large_image": bool(visual.get("has_large_image", False)),
+                "visual_image_tie_score": float(visual.get("visual_image_tie_score") or 0.0),
             }
         )
     for rows in pages_by_doc.values():
@@ -940,6 +1022,12 @@ def score_pages(
                 doc_id=doc_id,
                 page_idx=int(page["page_idx"]),
                 question_overlap=question_page_overlap(question_tokens, page),
+                visual_image_tie_score=float(page.get("visual_image_tie_score") or 0.0),
+                visual_image_count=int(page.get("visual_image_count") or 0),
+                visual_large_image_count=int(page.get("visual_large_image_count") or 0),
+                visual_image_area_ratio=float(page.get("visual_image_area_ratio") or 0.0),
+                visual_has_image=bool(page.get("visual_has_image", False)),
+                visual_has_large_image=bool(page.get("visual_has_large_image", False)),
             )
             for item in evidence:
                 if item.doc_id and item.doc_id != doc_id:
@@ -1145,10 +1233,11 @@ def select_labels_by_evidence_coverage(
         "page_order",
         "question_overlap",
         "indirect_verification",
+        "image_presence",
     }:
         raise ValueError(
             "evidence_coverage_tie_breaker must be 'page_order', "
-            "'question_overlap', or 'indirect_verification'"
+            "'question_overlap', 'indirect_verification', or 'image_presence'"
         )
     eligible = [item for item in scores if item.score >= float(min_score)]
     selected: list[PageScore] = []
@@ -1187,6 +1276,8 @@ def select_labels_by_evidence_coverage(
                 if evidence_coverage_tie_breaker == "question_overlap"
                 else float(item.indirect_verification_score)
                 if evidence_coverage_tie_breaker == "indirect_verification"
+                else image_presence_page_tie_value(item)
+                if evidence_coverage_tie_breaker == "image_presence"
                 else 0.0
             )
             candidate_key = (
@@ -1211,6 +1302,13 @@ def select_labels_by_evidence_coverage(
 
     selected.sort(key=lambda item: (-float(item.score), item.doc_id, int(item.page_idx)))
     return selected
+
+
+def image_presence_page_tie_value(item: PageScore) -> float:
+    sources = page_matched_sources(item)
+    if "image_title" not in sources:
+        return 0.0
+    return float(item.visual_image_tie_score)
 
 
 def confidence(score: float) -> str:
@@ -1239,6 +1337,12 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "score": round(float(item.score), 6),
         "question_overlap": round(float(item.question_overlap), 6),
         "indirect_verification_score": round(float(item.indirect_verification_score), 6),
+        "visual_image_tie_score": round(float(item.visual_image_tie_score), 6),
+        "visual_has_image": bool(item.visual_has_image),
+        "visual_has_large_image": bool(item.visual_has_large_image),
+        "visual_image_count": int(item.visual_image_count),
+        "visual_large_image_count": int(item.visual_large_image_count),
+        "visual_image_area_ratio": round(float(item.visual_image_area_ratio), 6),
         "confidence": confidence(item.score),
         "exact_matches": item.exact_matches[:20],
         "fuzzy_matches": item.fuzzy_matches[:20],
@@ -1304,7 +1408,8 @@ def main() -> None:
     args = parse_args()
 
     gold_rows = load_jsonl(Path(args.gold))
-    pages_by_doc = load_page_texts(Path(args.doc_pages_jsonl))
+    page_visual_by_uid = load_page_visual_metadata(args.page_visual_metadata_jsonl)
+    pages_by_doc = load_page_texts(Path(args.doc_pages_jsonl), page_visual_by_uid)
     texts_by_id = load_by_id(args.mmqa_texts_jsonl)
     tables_by_id = load_by_id(args.mmqa_tables_jsonl)
     images_by_id = load_by_id(args.mmqa_images_jsonl)
@@ -1468,6 +1573,8 @@ def main() -> None:
     summary = {
         "gold": str(args.gold),
         "doc_pages_jsonl": str(args.doc_pages_jsonl),
+        "page_visual_metadata_jsonl": str(args.page_visual_metadata_jsonl),
+        "page_visual_metadata_count": int(len(page_visual_by_uid)),
         "mmqa_texts_jsonl": args.mmqa_texts_jsonl,
         "mmqa_tables_jsonl": args.mmqa_tables_jsonl,
         "mmqa_images_jsonl": args.mmqa_images_jsonl,
