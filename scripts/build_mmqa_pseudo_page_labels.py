@@ -101,6 +101,7 @@ def parse_args() -> argparse.Namespace:
         choices=[
             "page_order",
             "question_overlap",
+            "context_verification",
             "indirect_verification",
             "image_presence",
             "table_context",
@@ -110,6 +111,9 @@ def parse_args() -> argparse.Namespace:
             "Tie-breaker used only after evidence_coverage, evidence weight, and page "
             "score are tied. page_order preserves the original earliest-page behavior. "
             "question_overlap prefers the tied page with more question-token overlap. "
+            "context_verification prefers tied pages with exact answer/entity and "
+            "table/image context matches, but never lets those weak signals create "
+            "labels by themselves. "
             "indirect_verification prefers tied pages with source-specific diagnostic "
             "MMQA context matches, such as table title or same-row cells. image_presence "
             "applies only to image_title evidence and prefers tied pages with stronger "
@@ -228,6 +232,7 @@ class PageScore:
     page_idx: int
     score: float = 0.0
     question_overlap: float = 0.0
+    context_verification_score: float = 0.0
     indirect_verification_score: float = 0.0
     table_context_score: float = 0.0
     visual_image_tie_score: float = 0.0
@@ -236,6 +241,7 @@ class PageScore:
     visual_image_area_ratio: float = 0.0
     visual_has_image: bool = False
     visual_has_large_image: bool = False
+    context_verification_matches: list[dict[str, Any]] = field(default_factory=list)
     indirect_verification_matches: list[dict[str, Any]] = field(default_factory=list)
     table_context_matches: list[dict[str, Any]] = field(default_factory=list)
     exact_matches: list[dict[str, Any]] = field(default_factory=list)
@@ -1094,6 +1100,7 @@ def score_pages(
                     page_score,
                     bonus=float(text_instance_context_verification_bonus),
                 )
+                apply_context_verification_tie_score(page_score)
                 apply_indirect_verification_tie_score(page_score)
                 apply_table_context_tie_score(page_score)
                 scores.append(page_score)
@@ -1135,6 +1142,115 @@ def match_source_counts(item: PageScore, *, positive: bool) -> Counter[str]:
         elif not positive and weight <= 0.0:
             counts[source] += 1
     return counts
+
+
+def apply_context_verification_tie_score(item: PageScore) -> None:
+    positive_sources = match_source_counts(item, positive=True)
+    if not any(positive_sources.get(source, 0) > 0 for source in DIRECT_EVIDENCE_CAP_SOURCES):
+        item.context_verification_score = 0.0
+        item.context_verification_matches = []
+        return
+
+    answer_texts = set()
+    for source in DIRECT_EVIDENCE_CAP_SOURCES:
+        answer_texts.update(exact_match_texts_by_source(item, source=source, positive=True))
+
+    score = 0.0
+    matches: list[dict[str, Any]] = []
+
+    def diagnostic_texts(source: str, *, exclude_answer_texts: bool = False) -> set[str]:
+        texts = exact_match_texts_by_source(item, source=source, positive=False)
+        if exclude_answer_texts:
+            texts = {text for text in texts if text not in answer_texts}
+        return texts
+
+    def add(source: str, reason: str, weight: float, texts: set[str], *, max_count: int = 5) -> None:
+        nonlocal score
+        selected_texts = set(sorted(texts)[: int(max_count)])
+        if not selected_texts or float(weight) <= 0.0:
+            return
+        gain = float(weight) * float(len(selected_texts))
+        score += gain
+        matches.append(
+            {
+                "source": source,
+                "reason": reason,
+                "weight": float(gain),
+                "count": int(len(selected_texts)),
+                "texts": sorted(selected_texts)[:5],
+            }
+        )
+
+    add(
+        "answer_text",
+        "page also contains an exact normalized answer string",
+        2.0,
+        diagnostic_texts("answer_text"),
+        max_count=2,
+    )
+    add(
+        "answer_entity",
+        "page also contains an exact normalized answer/entity mention",
+        1.0,
+        diagnostic_texts("answer_entity"),
+        max_count=3,
+    )
+
+    if positive_sources.get("table_answer_cell", 0) > 0:
+        add(
+            "table_title",
+            "page also matches the MMQA table title",
+            1.5,
+            diagnostic_texts("table_title"),
+            max_count=2,
+        )
+        add(
+            "table_row_header",
+            "page also matches the answer row header",
+            1.0,
+            diagnostic_texts("table_row_header", exclude_answer_texts=True),
+            max_count=2,
+        )
+        add(
+            "table_column_header",
+            "page also matches the answer column header",
+            1.0,
+            diagnostic_texts("table_column_header", exclude_answer_texts=True),
+            max_count=2,
+        )
+        add(
+            "table_row_cell",
+            "page also matches other cells from the answer row",
+            0.5,
+            diagnostic_texts("table_row_cell", exclude_answer_texts=True),
+            max_count=4,
+        )
+        add(
+            "table_row_link_text",
+            "page also matches answer-row link text",
+            0.5,
+            diagnostic_texts("table_row_link_text", exclude_answer_texts=True),
+            max_count=2,
+        )
+        add(
+            "table_row_link_title",
+            "page also matches answer-row link title",
+            0.5,
+            diagnostic_texts("table_row_link_title", exclude_answer_texts=True),
+            max_count=2,
+        )
+
+    if positive_sources.get("image_title", 0) > 0:
+        add(
+            "image_doc_title",
+            "page also matches the image/document title context",
+            1.0,
+            diagnostic_texts("image_doc_title"),
+            max_count=2,
+        )
+
+    item.context_verification_score = score
+    item.context_verification_matches = matches
 
 
 def apply_indirect_verification_tie_score(item: PageScore) -> None:
@@ -1378,14 +1494,15 @@ def select_labels_by_evidence_coverage(
     if evidence_coverage_tie_breaker not in {
         "page_order",
         "question_overlap",
+        "context_verification",
         "indirect_verification",
         "image_presence",
         "table_context",
     }:
         raise ValueError(
             "evidence_coverage_tie_breaker must be 'page_order', "
-            "'question_overlap', 'indirect_verification', 'image_presence', "
-            "or 'table_context'"
+            "'question_overlap', 'context_verification', 'indirect_verification', "
+            "'image_presence', or 'table_context'"
         )
     eligible = [item for item in scores if item.score >= float(min_score)]
     selected: list[PageScore] = []
@@ -1422,6 +1539,8 @@ def select_labels_by_evidence_coverage(
             tie_break_value = (
                 float(item.question_overlap)
                 if evidence_coverage_tie_breaker == "question_overlap"
+                else float(item.context_verification_score)
+                if evidence_coverage_tie_breaker == "context_verification"
                 else float(item.indirect_verification_score)
                 if evidence_coverage_tie_breaker == "indirect_verification"
                 else image_presence_page_tie_value(item)
@@ -1493,6 +1612,7 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "page_idx": int(item.page_idx),
         "score": round(float(item.score), 6),
         "question_overlap": round(float(item.question_overlap), 6),
+        "context_verification_score": round(float(item.context_verification_score), 6),
         "indirect_verification_score": round(float(item.indirect_verification_score), 6),
         "table_context_score": round(float(item.table_context_score), 6),
         "visual_image_tie_score": round(float(item.visual_image_tie_score), 6),
@@ -1509,6 +1629,7 @@ def page_score_record(item: PageScore) -> dict[str, Any]:
         "diagnostic_exact_matches": diagnostic_matches(item.exact_matches)[:20],
         "diagnostic_fuzzy_matches": diagnostic_matches(item.fuzzy_matches)[:20],
         "verification_matches": item.verification_matches[:20],
+        "context_verification_matches": item.context_verification_matches[:20],
         "indirect_verification_matches": item.indirect_verification_matches[:20],
         "table_context_matches": item.table_context_matches[:20],
     }

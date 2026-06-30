@@ -614,6 +614,104 @@ class BuildMMQAPseudoPageLabelsTests(unittest.TestCase):
         self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
         self.assertEqual([item.page_uid for item in overlap_selected], ["docA_page3"])
 
+    def test_context_verification_tie_breaker_uses_answer_diagnostic_only_after_direct_tie(self) -> None:
+        earlier = MODULE.PageScore(page_uid="docA_page0", doc_id="docA", page_idx=0)
+        earlier.score = 1.0
+        earlier.exact_matches = [
+            {"source": "text_instance", "text": "shared evidence", "weight": 1.0},
+        ]
+        later = MODULE.PageScore(page_uid="docA_page2", doc_id="docA", page_idx=2)
+        later.score = 1.0
+        later.exact_matches = [
+            {"source": "text_instance", "text": "shared evidence", "weight": 1.0},
+            {"source": "answer_text", "text": "answer phrase", "weight": 0.0},
+            {"source": "answer_entity", "text": "answer entity", "weight": 0.0},
+        ]
+        diagnostic_only = MODULE.PageScore(page_uid="docA_page3", doc_id="docA", page_idx=3)
+        diagnostic_only.score = 0.0
+        diagnostic_only.exact_matches = [
+            {"source": "answer_text", "text": "answer phrase", "weight": 0.0},
+        ]
+        MODULE.apply_context_verification_tie_score(earlier)
+        MODULE.apply_context_verification_tie_score(later)
+        MODULE.apply_context_verification_tie_score(diagnostic_only)
+
+        default_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later, diagnostic_only],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            doc_caps={"docA": 1},
+        )
+        context_selected = MODULE.select_labels_by_evidence_coverage(
+            [earlier, later, diagnostic_only],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            evidence_coverage_tie_breaker="context_verification",
+            doc_caps={"docA": 1},
+        )
+
+        self.assertEqual(earlier.context_verification_score, 0.0)
+        self.assertGreater(later.context_verification_score, 0.0)
+        self.assertEqual(diagnostic_only.context_verification_score, 0.0)
+        self.assertEqual([item.page_uid for item in default_selected], ["docA_page0"])
+        self.assertEqual([item.page_uid for item in context_selected], ["docA_page2"])
+
+    def test_context_verification_tie_breaker_uses_table_and_image_context(self) -> None:
+        table_plain = MODULE.PageScore(page_uid="docT_page0", doc_id="docT", page_idx=0)
+        table_plain.score = 1.0
+        table_plain.exact_matches = [
+            {"source": "table_answer_cell", "text": "shared answer", "weight": 1.0},
+        ]
+        table_context = MODULE.PageScore(page_uid="docT_page4", doc_id="docT", page_idx=4)
+        table_context.score = 1.0
+        table_context.exact_matches = [
+            {"source": "table_answer_cell", "text": "shared answer", "weight": 1.0},
+            {"source": "table_title", "text": "relevant table", "weight": 0.0},
+            {"source": "table_row_header", "text": "row label", "weight": 0.0},
+            {"source": "table_row_cell", "text": "neighbor value", "weight": 0.0},
+        ]
+        image_plain = MODULE.PageScore(page_uid="docI_page0", doc_id="docI", page_idx=0)
+        image_plain.score = 1.0
+        image_plain.exact_matches = [
+            {"source": "image_title", "text": "shared caption", "weight": 1.0},
+        ]
+        image_context = MODULE.PageScore(page_uid="docI_page5", doc_id="docI", page_idx=5)
+        image_context.score = 1.0
+        image_context.exact_matches = [
+            {"source": "image_title", "text": "shared caption", "weight": 1.0},
+            {"source": "image_doc_title", "text": "image article title", "weight": 0.0},
+        ]
+        for item in [table_plain, table_context, image_plain, image_context]:
+            MODULE.apply_context_verification_tie_score(item)
+
+        table_selected = MODULE.select_labels_by_evidence_coverage(
+            [table_plain, table_context],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            evidence_coverage_tie_breaker="context_verification",
+            doc_caps={"docT": 1},
+        )
+        image_selected = MODULE.select_labels_by_evidence_coverage(
+            [image_plain, image_context],
+            min_score=1.0,
+            top_pages_per_doc=1,
+            top_pages_per_qid=1,
+            coverage_min_match_weight=1.0,
+            evidence_coverage_tie_breaker="context_verification",
+            doc_caps={"docI": 1},
+        )
+
+        self.assertGreater(table_context.context_verification_score, 0.0)
+        self.assertGreater(image_context.context_verification_score, 0.0)
+        self.assertEqual([item.page_uid for item in table_selected], ["docT_page4"])
+        self.assertEqual([item.page_uid for item in image_selected], ["docI_page5"])
+
     def test_indirect_verification_tie_breaker_uses_table_context_diagnostics(self) -> None:
         earlier = MODULE.PageScore(page_uid="docA_page0", doc_id="docA", page_idx=0)
         earlier.score = 1.0
