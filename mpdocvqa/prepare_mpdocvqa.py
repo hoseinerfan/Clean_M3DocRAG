@@ -23,6 +23,7 @@ DOC_ID_KEYS = [
     "document_id",
     "documentId",
     "ucsf_document_id",
+    "image_id",
     "doc_name",
     "document",
 ]
@@ -30,6 +31,7 @@ PAGE_LIST_KEYS = [
     "page_list",
     "page_paths",
     "image_paths",
+    "image_name",
     "image_names",
     "images",
     "pages",
@@ -58,6 +60,7 @@ PAGE_TEXT_KEYS = [
     "page_text_list",
     "page_texts",
     "ocr_texts",
+    "ocr_tokens",
     "texts",
     "document_text",
 ]
@@ -311,6 +314,16 @@ def resolve_image_path(raw_path: str, image_root: Path, input_root: Path) -> Pat
     for candidate in candidates:
         if candidate.exists():
             return candidate
+    if not path.suffix:
+        for ext in IMAGE_EXTS:
+            for candidate in [
+                image_root / f"{path}{ext}",
+                input_root / f"{path}{ext}",
+                image_root / f"{path.name}{ext}",
+                input_root / f"{path.name}{ext}",
+            ]:
+                if candidate.exists():
+                    return candidate
     return image_root / path
 
 
@@ -437,7 +450,12 @@ def main() -> None:
         used_qids: set[str] = set()
         for row_index, row in enumerate(rows):
             page_items = row_page_items(row)
+            if not first_value(row, QUESTION_KEYS) and not page_items:
+                source_schema_counts["skipped_non_question_row"] += 1
+                continue
             raw_doc_id = first_value(row, DOC_ID_KEYS)
+            if raw_doc_id is None and isinstance(row.get("extra_info"), dict):
+                raw_doc_id = first_value(row["extra_info"], ["ucsf_doc_id", "single_doc_vqa_id"])
             if raw_doc_id is None and page_items:
                 raw_doc_id = Path(extract_path_from_page_item(page_items[0])).parent.name
             doc_id = safe_doc_id(raw_doc_id or f"doc_{row_index:06d}")
