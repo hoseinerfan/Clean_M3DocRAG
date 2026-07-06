@@ -1262,6 +1262,7 @@ margin/uncertainty subset produces nonzero recoveries and positive net recovery.
 | OpenDocVQA | `opendocvqa/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/OpenDocVQA_M3DocRAG` | `$LOCAL_DATA_DIR/opendocvqa` | `colpali-v1.2_opendocvqa_dev` | `$LOCAL_OUTPUT_DIR/opendocvqa` | gated; 3223 packed docs, 206267 pages, 41017 QAs |
 | MMLongBench DocQA | `mmlongbench/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MMLongBench_M3DocRAG` | `$LOCAL_DATA_DIR/mmlongbench-docqa` | `colpali-v1.2_mmlongbench-docqa_dev` | `$LOCAL_OUTPUT_DIR/mmlongbench-docqa` | DocQA subsets: `longdocurl`, `mmlongdoc`, `slidevqa`; counts written by prepare summary |
 | DUDE | `dude/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/DUDE_M3DocRAG` | `$LOCAL_DATA_DIR/dude` | `colpali-v1.2_dude_dev` | `$LOCAL_OUTPUT_DIR/dude` | multi-page DocQA; exact page labels from answer bbox pages; counts written by prepare summary |
+| MP-DocVQA | `mpdocvqa/env_hpc.sh` | `/mmfs1/scratch/jacks.local/aerfanshekooh/custom/MPDocVQA_M3DocRAG` | `$LOCAL_DATA_DIR/mpdocvqa` | `colpali-v1.2_mpdocvqa_dev` | `$LOCAL_OUTPUT_DIR/mpdocvqa` | multi-page DocVQA; exact answer-page labels; counts written by prepare summary |
 
 Notes:
 
@@ -1270,6 +1271,7 @@ Notes:
 - ViDoRe and OpenDocVQA env files force Hugging Face caches under their scratch work roots to avoid home quota failures.
 - MMLongBench DocQA uses `ans_page_list` as exact zero-based page labels. SlideVQA image filenames are one-based, so the converter maps them back to zero-based `page_idx`.
 - DUDE uses the official Hugging Face loader, renders source PDFs to page images, and defaults to skipping rows without answer page boxes because they have no exact page retrieval target.
+- MP-DocVQA requires you to provide the official annotation/image files locally. See `mpdocvqa/README.md` for the flexible JSON/JSONL/NPY converter and CAPP transfer commands.
 - All embedding sbatch files use `--resume`, so resubmitting after timeout is safe.
 - On compute nodes where plain `python` points to base and misses `torch`/`faiss`, use `"$REPO_ROOT/env/bin/python"` for direct commands. The dataset `run_plain_top224_*.sh` wrappers now default to that interpreter through `PYTHON_BIN`.
 
