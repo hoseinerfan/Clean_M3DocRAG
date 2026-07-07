@@ -162,7 +162,70 @@ Evaluate dense retrieval:
   --recall-k 1 2 4 5 10 20 50 100 1000
 ```
 
-## 7. Plain Top-224 MaxSim Approximation
+## 7. Dense + Exact MaxSim
+
+This is the cleaner dense input for the proposed transfer pipeline. It reranks
+the FAISS candidate pool with full page-local ColPali MaxSim.
+
+```bash
+bash mpdocvqa/run_exact_maxsim_mpdocvqa.sh
+
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$LOCAL_OUTPUT_DIR/mpdocvqa/exact_maxsim_ret1000_prediction.json" \
+  --gold "$LOCAL_DATA_DIR/mpdocvqa/MMQA_dev.jsonl" \
+  --recall-k 1 2 4 5 10 20 50 100 1000
+```
+
+## 8. SPLADE + GPP on the Exact-MaxSim Pool
+
+This builds the full retrieval input used for the transfer version of the
+proposed method: Dense+Exact MaxSim and SPLADE are fused through page-preserving
+graph propagation. MP-DocVQA does not provide the M3DocVQA PDF hyperlink graph,
+so this run uses the same page/document propagation backbone without hyperlink
+edges.
+
+Foreground:
+
+```bash
+bash mpdocvqa/run_exactmaxsim_gpp_mpdocvqa.sh
+```
+
+Slurm:
+
+```bash
+sbatch mpdocvqa/sbatch_exactmaxsim_gpp_mpdocvqa.sh
+```
+
+Evaluate the resulting GPP ranking:
+
+```bash
+"$REPO_ROOT/env/bin/python" mmdocir/evaluate_mmdocir_retrieval.py \
+  --pred "$LOCAL_OUTPUT_DIR/mpdocvqa/graph_ppr_exact_maxsim_splade/mpdocvqa_exactmaxsim_splade_gpp.prediction.json" \
+  --gold "$LOCAL_DATA_DIR/mpdocvqa/MMQA_dev.jsonl" \
+  --recall-k 1 2 4 5 10 20 50 100 1000
+```
+
+## 9. Apply the Trained M3DocVQA CAPP Model to GPP
+
+This applies the M3DocVQA-trained CAPP model on top of the MP-DocVQA GPP pool.
+MP-DocVQA gold pages are used only for evaluation, not training.
+
+```bash
+bash mpdocvqa/run_capp_transfer_gpp_mpdocvqa.sh
+
+cat "$LOCAL_OUTPUT_DIR/mpdocvqa/trained_capp_transfer_exactmaxsim_gpp/mpdocvqa_trained_capp_on_exactmaxsim_gpp_a0p20.table.md"
+```
+
+To test another transfer blend:
+
+```bash
+BLEND_ALPHA=0.40 bash mpdocvqa/run_capp_transfer_gpp_mpdocvqa.sh
+```
+
+## 10. Plain Top-224 MaxSim Approximation
+
+This is only a faster diagnostic baseline. It should not be described as the
+full CAPP-on-GPP transfer pipeline.
 
 ```bash
 bash mpdocvqa/run_plain_top224_mpdocvqa.sh
@@ -173,10 +236,11 @@ bash mpdocvqa/run_plain_top224_mpdocvqa.sh
   --recall-k 1 2 4 5 10 20 50 100 1000
 ```
 
-## 8. Apply the Trained M3DocVQA CAPP Model
+## 11. Apply the Trained M3DocVQA CAPP Model to Plain Top-224
 
-Use this after `plain_top224_ret1000_prediction.json` exists. The model is not
-trained on MP-DocVQA; gold pages are used only for evaluation.
+Use this only after `plain_top224_ret1000_prediction.json` exists. This is a
+diagnostic transfer test on an approximate dense pool, not the full proposed
+pipeline.
 
 ```bash
 MODEL_JSON="$REPO_ROOT/output/m3docvqa_content_aware_exact_maxsim_direct_exactonly_adaptive_norm05/mmqa_train_to_dev_content_aware_fixed_alpha_0p40_base_exact_maxsim_gpp_direct_exactonly_adaptive_norm05.model.json"
