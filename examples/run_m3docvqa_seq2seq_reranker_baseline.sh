@@ -20,6 +20,8 @@ MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-castorini/monot5-base-msmarco-10k}"
 MODEL_TAG="${MODEL_TAG:-monot5_base_msmarco_10k}"
 RERANK_TOP_K="${RERANK_TOP_K:-100}"
 LABEL="${LABEL:-mmqa_dev_${MODEL_TAG}_seq2seq_gpp_top${RERANK_TOP_K}}"
+DEFAULT_PROMPT_TEMPLATE="Query: {question} Document: {document} Relevant:"
+PROMPT_TEMPLATE="${PROMPT_TEMPLATE:-$DEFAULT_PROMPT_TEMPLATE}"
 
 require_file() {
   local name="$1"
@@ -73,7 +75,7 @@ echo "using_label=$LABEL"
   --candidate-top-k "${CANDIDATE_TOP_K:-1000}" \
   --rerank-top-k "$RERANK_TOP_K" \
   --blend-alpha "${BLEND_ALPHA:-1.0}" \
-  --prompt-template "${PROMPT_TEMPLATE:-Query: {question} Document: {document} Relevant:}" \
+  --prompt-template "$PROMPT_TEMPLATE" \
   --positive-token "${POSITIVE_TOKEN:-true}" \
   --negative-token "${NEGATIVE_TOKEN:-false}" \
   --save-every "${SAVE_EVERY:-25}" \
