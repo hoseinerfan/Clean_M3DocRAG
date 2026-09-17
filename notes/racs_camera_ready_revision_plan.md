@@ -1,6 +1,6 @@
 # RACS camera-ready revision worklist
 
-Updated 2026-09-16. Working notes and proposed manual edits only; no manuscript
+Updated 2026-09-17. Working notes and proposed manual edits only; no manuscript
 or Overleaf archive has been modified. The authoritative manuscript is the
 September 15 ZIP, not the older `ACM_Paper` checkout.
 
@@ -9,7 +9,7 @@ September 15 ZIP, not the older `ACM_Paper` checkout.
 | Priority | Review request | Status / next action |
 | --- | --- | --- |
 | 1 | R1: cost of CAPP and sensitivity to reader budget | Reader QA at k=1,2,8 complete; reuse original k=4. Cached-input CPU benchmark validated in job 15908770 (196.2 ms/query). End-to-end latency and incremental memory claims remain unverified. |
-| 2 | R2: labeler/content-feature coupling and gold-page injection | Existing oracle audited: current-label pseudo-gold-only QA is variable-length; older controls use a different label version and different qid counts. Next: matched-qid evaluation, then fixed-budget injection if no matching saved run exists. |
+| 2 | R2: labeler/content-feature coupling and gold-page injection | Matched 2188-qid evaluation complete (GPP/CAPP/oracle). Fixed-four-page injection launcher prepared and locally checked; GPU run still pending. Older controls use another label version and different qid counts. |
 | 3 | R1: stronger reranking baselines | Thesis has LambdaMART/BGE/monoT5 retrieval results. Verify saved configurations, reranking depth, tuning split, evaluation gold and QA availability before importing the table. |
 | 4 | R1/R2: systematic ablation and missing comparison row | Thesis contains all four leave-one-family-out variants and QA for structure + content. Verify saved evaluation artifacts, then add QA columns and these rows manually. |
 | 5 | R1/R2: feature rationale and lightweight-design trade-offs | Draft factual interpretation below; verify cited prior work before manuscript insertion. Do not imply content-only drives the improvement. |
@@ -190,6 +190,67 @@ fixed-four-page injection run was shown in the inspected directories; this
 is not an exhaustive claim about all HPC files. The older positive/negative
 results should not be treated as a matched current-label control without
 restricting to a verified common question set and confirming label provenance.
+
+### Matched-question evaluation completed
+
+The CPU-only audit verified that the existing oracle's 2,188 filtered question
+IDs, pseudo-page label sets and reference answers match the current paper's
+adaptive-exact labels. GPP and CAPP answers were reused from the original
+four-page runs; all three methods cover every question in that cohort.
+
+| Method | Questions | QA EM | QA F1 | Actual reader context |
+| --- | ---: | ---: | ---: | --- |
+| GPP | 2188 | 36.3346 | 42.3368 | four pages for every question |
+| CAPP | 2188 | 38.1627 | 44.5416 | four pages for every question |
+| Pseudo-gold only | 2188 | 47.9890 | 55.8172 | 1332 one-page, 775 two-page, 39 three-page, 42 four-page contexts |
+
+CAPP improves over GPP by 2.20 F1 points on this matched subset. The oracle/CAPP
+gap is 11.28 F1 points, but their page counts still differ; do not attribute
+the whole gap solely to evidence correctness. Do not replace the paper's
+full-2441 GPP/CAPP main results with these subset scores without relabeling.
+
+### Fixed-four-page pseudo-gold injection: prepared, not yet executed
+
+New launcher: `examples/sbatch_racs_gold_injection_top4.sh`.
+It uses the existing input builder with the paper's adaptive-exact gold and
+Exact MaxSim GPP no-hyperlink base. For each of the 2,188 labeled questions,
+it takes up to four pseudo-gold pages in their existing label order, then fills
+vacant slots with the highest-ranked distinct GPP pages. Cases with more than
+four labeled pages are counted explicitly. This is a privileged-label diagnostic
+(pseudo-gold pages can lie outside the original retrieved pool), not a deployable
+retrieval method or a comparison that holds page order constant.
+
+The input builder had an edge case: when its initial list already contained
+four pages, `append_base_fill` could append a fifth page before stopping. The
+reader would then truncate to four. The helper now caps the input and returns
+immediately when the budget is full; tests cover full/overfull budgets, duplicate
+pages, order preservation, and CLI cohorts with one through five pseudo pages.
+Previously audited oracle runs used `fill_from_base=false`; they are unaffected.
+No existing saved prediction or model has been modified.
+
+The launcher requests one GPU, eight CPUs, 64 GB RAM and a six-hour limit. It
+uses Qwen2-VL-7B-Instruct, 16-bit weights and four pages, with the existing reader
+implementation and no new training. It validates the cohort, reference labels,
+pseudo-gold prefix and four-page uniqueness before loading the reader, and
+validates complete output coverage and the exact consumed pages after QA.
+It saves a run manifest with the input and code SHA-256s, explicit reader
+settings, and data/model-directory configuration for later provenance checks.
+It prints GPU information when available; no Git executable is required on the
+compute node. Only new job-specific outputs are written, under
+`output/racs_adaptive_gold_injection_top4_JOBID/`. A pre-existing run directory
+causes an error instead of overwriting or silently resuming it.
+
+After pulling the launcher and builder fix, submit from the repository root:
+
+```bash
+sbatch examples/sbatch_racs_gold_injection_top4.sh
+```
+
+Expected final log marker: `INJECTION_READER_RESULT`. No GPU execution has
+been verified yet. Compare the resulting EM/F1 with the matched rows above,
+not with the all-2441 headline numbers. The control addresses population and
+page-count confounds, but it still uses heuristic labels and does not by itself
+establish independently annotated page truth or eliminate labeler coupling.
 
 The existing oracle builder supports `--fill-from-base`, which places labeled
 pages first and fills remaining slots from the base ranking. Its launcher

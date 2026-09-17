@@ -459,7 +459,10 @@ def append_base_fill(
     base_row: dict[str, Any] | None,
     top_pages: int,
 ) -> list[list[Any]]:
-    filled = list(rows)
+    budget = max(int(top_pages), 0)
+    filled = list(rows[:budget])
+    if len(filled) >= budget:
+        return filled
     seen = {page_uid(str(row[0]), int(row[1])) for row in filled}
     for raw in prediction_rows(base_row):
         parsed = parse_prediction_row(raw)
@@ -471,7 +474,7 @@ def append_base_fill(
             continue
         seen.add(uid)
         filled.append([doc_id, page_idx, float(score) if score is not None else 0.0])
-        if len(filled) >= top_pages:
+        if len(filled) >= budget:
             break
     return filled
 
