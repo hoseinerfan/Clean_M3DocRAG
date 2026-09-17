@@ -2,6 +2,8 @@ import contextlib
 import copy
 import io
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -136,6 +138,34 @@ class BenchmarkCappTests(unittest.TestCase):
         result = benchmark.summarize(list(range(1, 21)))
         self.assertEqual(result["p95_seconds"], 19)
         self.assertEqual(result["total_seconds"], 210)
+
+    def test_launcher_reaches_python_without_working_git(self):
+        launcher = Path(__file__).resolve().parents[1] / "examples" / "sbatch_racs_capp_runtime.sh"
+        for git_available in (False, True):
+            with self.subTest(git_available=git_available), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                (root / "scripts").mkdir()
+                (root / "scripts" / "benchmark_capp_runtime.py").touch()
+                bin_dir = root / "env" / "bin"
+                bin_dir.mkdir(parents=True)
+                python_stub = bin_dir / "python"
+                python_stub.write_text('#!/bin/bash\nprintf "BENCHMARK_INVOKED\\n"\n')
+                python_stub.chmod(0o755)
+                if git_available:
+                    git_stub = bin_dir / "git"
+                    git_stub.write_text("#!/bin/bash\nexit 128\n")
+                    git_stub.chmod(0o755)
+                result = subprocess.run(
+                    ["/bin/bash", str(launcher)], capture_output=True, text=True,
+                    env={**os.environ, "PATH": str(bin_dir), "SLURM_SUBMIT_DIR": str(root),
+                         "SLURM_JOB_ID": "test_no_git"},
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn("benchmark_git_commit=unavailable", result.stdout)
+                self.assertIn("BENCHMARK_INVOKED", result.stdout)
+
+    def test_optional_provenance_command_can_be_missing(self):
+        self.assertIsNone(benchmark.command_output(["/nonexistent/racs_test_git", "rev-parse", "HEAD"]))
 
 
 if __name__ == "__main__":

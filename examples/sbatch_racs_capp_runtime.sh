@@ -21,7 +21,13 @@ RACS_LEGACY=output/m3docvqa_gpp_hyperlink_node_ablation_mmr_target1
 RACS_REPORT_DIR="output/racs_capp_runtime_${SLURM_JOB_ID:?}"
 
 printf 'benchmark_git_commit='
-git rev-parse HEAD
+# Git may exist on the login node but not on compute nodes. Provenance logging
+# must not prevent inference; the Python report also records code SHA-256s.
+if command -v git >/dev/null 2>&1; then
+  git rev-parse HEAD || printf 'unavailable\n'
+else
+  printf 'unavailable (git not on compute-node PATH)\n'
+fi
 
 # No GPU, training, source search, or change to original predictions.
 env/bin/python scripts/benchmark_capp_runtime.py \

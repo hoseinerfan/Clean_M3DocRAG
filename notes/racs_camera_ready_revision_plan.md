@@ -76,6 +76,12 @@ The output location is job-specific and existing reports cannot be overwritten.
 Original models, predictions and source files are read-only. GPU results and
 upstream GPP timings are not synthesized from this CPU benchmark.
 
+Job 15908742 failed before Python started because Git was absent from the
+compute-node PATH. The launcher now treats Git logging as optional (as the
+Python report already did); code SHA-256s are still recorded. No inference ran
+and no runtime report was produced by that failed job. Resubmit after pulling
+the launcher fix; a fresh job ID gives a separate output location.
+
 ## Reader-budget evidence
 
 All eight prediction files passed the 2,441-question count and identical-qid-set
