@@ -4,14 +4,19 @@ Updated 2026-09-17. Working notes and proposed manual edits only; no manuscript
 or Overleaf archive has been modified. The authoritative manuscript is the
 September 15 ZIP, not the older `ACM_Paper` checkout.
 
+Ready-to-paste edits for priorities 1 and 2 are in
+[the manual revision guide](racs_manual_revisions_runtime_budget_control.md).
+It gives exact manuscript anchors, three LaTeX tables, results text, and
+protocol/limitations replacements. Apply manually; no manuscript was edited.
+
 ## Status and priorities
 
 | Priority | Review request | Status / next action |
 | --- | --- | --- |
 | 1 | R1: cost of CAPP and sensitivity to reader budget | Reader QA at k=1,2,8 complete; reuse original k=4. Cached-input CPU benchmark validated in job 15908770 (196.2 ms/query). End-to-end latency and incremental memory claims remain unverified. |
-| 2 | R2: labeler/content-feature coupling and gold-page injection | Matched 2188-qid evaluation complete (GPP/CAPP/oracle). Fixed-four-page injection launcher prepared and locally checked; GPU run still pending. Older controls use another label version and different qid counts. |
-| 3 | R1: stronger reranking baselines | Thesis has LambdaMART/BGE/monoT5 retrieval results. Verify saved configurations, reranking depth, tuning split, evaluation gold and QA availability before importing the table. |
-| 4 | R1/R2: systematic ablation and missing comparison row | Thesis contains all four leave-one-family-out variants and QA for structure + content. Verify saved evaluation artifacts, then add QA columns and these rows manually. |
+| 2 | R2: labeler/content-feature coupling and gold-page injection | Job 15910645 completed: 2188 matched questions, four pages each, EM 44.06 / F1 51.39. GPP/CAPP matched-subset F1: 42.34 / 44.54. Ready for scoped diagnostic write-up; not independent human-gold validation. |
+| 3 | R1: stronger reranking baselines | Saved LambdaMART/BGE/monoT5 reports match the thesis. The reported BGE/monoT5 runs rerank 1000 pages. BGE blend-selection provenance and matched downstream QA remain unresolved. |
+| 4 | R1/R2: systematic ablation and missing comparison row | Six ablation QA runs rescored on identical 2441 qids with four pages each, matching saved scores. Models have the named features, fixed alpha 0.40, matching recorded main input paths, and other saved arguments matching full CAPP. Auxiliary-source paths are not recovered for source-bearing ablations. |
 | 5 | R1/R2: feature rationale and lightweight-design trade-offs | Draft factual interpretation below; verify cited prior work before manuscript insertion. Do not imply content-only drives the improvement. |
 
 ## Verified evaluation configuration
@@ -30,6 +35,19 @@ of the original training command or proof of retraining equivalence.
   This does not remove sparse retrieval from upstream GPP.
 - A blanket statement that the full method uses no hyperlink-derived signals
   is not supported by this recovered configuration.
+
+Subsequent user-pasted HPC summaries confirm that the auxiliary names are not
+merely stale labels: the document-hyperlink run records mode
+`hyperlink_citation`, weight 2.25, and mean 19.1864 directed document edges;
+the page-hyperlink run records weight 0.25, `target_pages`, 2441 hyperlink qids,
+and mean 724.0705 directed PDF-hyperlink edges. The legacy no-hyperlink source
+records zero hyperlink weights/counts. These facts establish hyperlink-enabled
+auxiliary inputs to the matching replay, not the size of their causal benefit.
+
+The saved full model has `auto_tune_blend_alpha=false` and fixed alpha 0.40.
+The author recalls comparing multiple alpha values before choosing 0.40.
+This is consistent with a fixed final run, but does not establish which
+selection split was used or recover an earlier training-only tuning run.
 
 ## CPU benchmark
 
@@ -164,8 +182,9 @@ k=8 CAPP reader time is higher than GPP's; its cause is not established.
 > changed F1 by only +0.04 points and reduced EM from 39.41 to 39.16.
 
 No significance claim is supported yet. Half the maximum page budget does not
-imply half the image tokens, memory or latency. Add runtime prose only after
-the controlled CPU benchmark and remaining comparability checks.
+imply half the image tokens, memory or latency. Use the validated CPU-stage
+measurements with their stated boundaries; historical reader timings do not
+establish a controlled GPU speedup.
 
 ## Pseudo-label control: a concrete gap in the submitted manuscript
 
@@ -185,9 +204,9 @@ The user-provided HPC summary audit confirmed:
 The mean labeled-page count in the current oracle summary is 1.4785, but that
 statistic is computed before truncation and must not be labeled the exact mean
 number of reader images without checking the prediction file. The generic
-`output/m3docvqa_pseudo_gold_reader_oracle` directory was absent. No completed
-fixed-four-page injection run was shown in the inspected directories; this
-is not an exhaustive claim about all HPC files. The older positive/negative
+`output/m3docvqa_pseudo_gold_reader_oracle` directory was absent. At the time
+of that initial audit, no completed fixed-four-page injection was shown; the
+new completed run is documented below. The older positive/negative
 results should not be treated as a matched current-label control without
 restricting to a verified common question set and confirming label provenance.
 
@@ -209,7 +228,27 @@ gap is 11.28 F1 points, but their page counts still differ; do not attribute
 the whole gap solely to evidence correctness. Do not replace the paper's
 full-2441 GPP/CAPP main results with these subset scores without relabeling.
 
-### Fixed-four-page pseudo-gold injection: prepared, not yet executed
+### Fixed-four-page pseudo-gold injection: completed and validated
+
+User-pasted accounting and final output confirm job 15910645 completed with
+exit 0:0 in 02:15:54 on gpu008. The final `INJECTION_READER_RESULT` marker
+confirms 2188 questions and four consumed reader pages each. EM is
+44.05850091407678 and F1 is 51.38756855575869. No model retraining occurred.
+The output directory is
+`output/racs_adaptive_gold_injection_top4_15910645`; the evaluation file is
+`mmqa_dev_pseudo_gold_plus_gpp_fill_qwen2vl_top4.eval.json`.
+
+| Reader input | Matched questions | Pages/question | EM | F1 |
+| --- | ---: | ---: | ---: | ---: |
+| GPP | 2188 | 4 | 36.33 | 42.34 |
+| CAPP | 2188 | 4 | 38.16 | 44.54 |
+| Pseudo-gold injection + GPP fill | 2188 | 4 | 44.06 | 51.39 |
+
+The injection gain is 6.85 F1 points over matched-subset CAPP and 9.05 over
+matched-subset GPP. This controls question population and page count, but not
+page order or candidate-pool membership, and does not eliminate labeler bias.
+Do not compare the new 51.39 directly against all-2441 CAPP 45.69 as if they
+used the same question population.
 
 New launcher: `examples/sbatch_racs_gold_injection_top4.sh`.
 It uses the existing input builder with the paper's adaptive-exact gold and
@@ -240,15 +279,16 @@ compute node. Only new job-specific outputs are written, under
 `output/racs_adaptive_gold_injection_top4_JOBID/`. A pre-existing run directory
 causes an error instead of overwriting or silently resuming it.
 
-After pulling the launcher and builder fix, submit from the repository root:
+The completed experiment used the following launcher. This is a historical
+command, not a request to resubmit the already successful control:
 
 ```bash
 sbatch examples/sbatch_racs_gold_injection_top4.sh
 ```
 
-Expected final log marker: `INJECTION_READER_RESULT`. No GPU execution has
-been verified yet. Compare the resulting EM/F1 with the matched rows above,
-not with the all-2441 headline numbers. The control addresses population and
+The observed final log marker was `INJECTION_READER_RESULT`. Compare its
+EM/F1 with the matched rows above, not the all-2441 headline numbers.
+The control addresses population and
 page-count confounds, but it still uses heuristic labels and does not by itself
 establish independently annotated page truth or eliminate labeler coupling.
 
@@ -259,7 +299,8 @@ Inspect saved summaries and outputs first; do not rerun the launcher with its
 defaults: its default gold is the older 2,285-question label set, not the paper's
 2,188-question adaptive-exact label set.
 
-Required audit before a new run:
+Audit checklist for any future control variant (not outstanding work required
+to repeat the completed injection):
 
 - Confirm label version, exact qid set, actual page counts and reader settings.
 - Re-evaluate GPP and CAPP answers on the identical control qids; the existing
@@ -279,21 +320,29 @@ Required audit before a new run:
 
 Thesis `section5.tex`, table `tab:standard-rerankers`, reports page@4:
 GPP 0.6376; LambdaMART 0.6408; BGE 0.6705; monoT5 0.6609; CAPP 0.7715.
-These values have not been newly reproduced in this revision task.
+User-provided saved reports now confirm these values at the printed precision,
+the expected adaptive-exact evaluation gold and Exact MaxSim GPP no-hyperlink
+base paths, and 2441 prediction qids. Source:
+[HPC report](</Users/hoseinerfan/.codex/attachments/a9f9bb1c-dd8d-47ba-9b5c-ee2281b8c2da/pasted-text.txt>).
+This is verification of saved reports, not new model inference.
 
-Inspect the saved baseline summaries before describing them as matched:
-`gold`/`eval_gold`, `base_pred`/`eval_base_pred`, candidate count, rerank depth,
-text truncation, model identity, blend weight and tuning split. The current BGE
-and monoT5 launchers default to reranking 100 of 1,000 candidates; defaults do
-not prove the historical run used that setting. Disclose actual scoring depth.
-Check saved top-four QA results; a retrieval-only comparison is not a newly
-verified end-to-end QA baseline. Do not copy baseline numbers without checking
-the evaluation cohort and metric definition.
+The retained BGE result uses `bge-reranker-base`, candidate/rerank depth 1000,
+alpha 0.20, max length 512 and max page characters 6000. The retained monoT5
+result uses `monot5-base-msmarco-10k`, depth 1000, alpha 1.0, max length 512
+and max page characters 4000. Both report 744 empty-text encounters, not 744
+missing questions. Separate top-100 trials exist and are not the thesis rows.
+LambdaMART reports selected alpha 0.45 and a tuning record with 4233 evaluated
+labeled tuning questions. BGE's alpha-selection split is not established by
+these reports. Matched baseline reader QA and full source-input comparability
+remain to be established before claiming an end-to-end controlled comparison.
 
 ## Feature ablations: proposed manual expansion of Table 8
 
-The thesis already records the following additional evidence. Verify the saved
-evaluation files on HPC before treating these as revision-validated results.
+The QA columns below have now been independently recomputed from saved answers
+in CPU job 15911329: every variant covers exactly the same 2441 gold qids,
+has four selected reader pages per question, and matches its saved evaluation.
+The ablation page@4 values remain thesis-reported here; they were not recomputed
+by that QA audit. The full-CAPP retrieval value was verified separately.
 
 | Variant | page@4 | QA EM | QA F1 |
 | --- | ---: | ---: | ---: |
@@ -304,6 +353,24 @@ evaluation files on HPC before treating these as revision-validated results.
 | No structure | 0.6508 | 37.65 | 43.46 |
 | No content | 0.7573 | 38.59 | 44.69 |
 | All features | 0.7715 | 39.41 | 45.69 |
+
+The six ablation model files were found in
+`output/m3docvqa_content_aware_exact_maxsim_direct_exactonly_adaptive_norm05_feature_matrix`.
+Their prefix is `mmqa_train_to_dev_content_aware_feature_` and their suffix is
+`_base_exact_maxsim_gpp.model.json`. A subsequent saved-configuration audit
+confirmed that all six named feature sets match their actual feature lists,
+all use alpha 0.40, and all match the full model's recorded training/evaluation
+gold, base-ranking and page-text paths. Other saved arguments differ only in
+`feature_set`. No separate tuning summary is recorded in these final artifacts.
+
+Feature counts are 6 (structure only), 21 (structure + content), 25 (no rank,
+named `source_structure_content`), 26 (no source), 24 (no structure), and 15
+(no content, named `rank_source_structure`). The structure-only,
+structure+content and no-source models have no source features. Source-bearing
+variants retain the four aggregate source features; their literal auxiliary-
+source filenames are not established by this main-input-path comparison.
+The no-source variant is an existing separately trained alternative, not an
+interpretation of the original 30-feature full-CAPP results.
 
 `No content` is the thesis's `Rank + source + struct.` row. Add the GPP reference
 row and QA columns to the manuscript's ablation table. This supplies the missing
