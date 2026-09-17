@@ -8,8 +8,8 @@ September 15 ZIP, not the older `ACM_Paper` checkout.
 
 | Priority | Review request | Status / next action |
 | --- | --- | --- |
-| 1 | R1: cost of CAPP and sensitivity to reader budget | Reader QA at k=1,2,8 complete; reuse original k=4. CPU benchmark implemented and locally tested, not yet run on HPC. End-to-end latency and incremental memory claims remain unverified. |
-| 2 | R2: labeler/content-feature coupling and gold-page injection | Existing pseudo-gold-only result is already in the submitted paper. Inspect saved input summaries, matched qids and fixed-budget injection/negative controls before claiming this request is addressed. |
+| 1 | R1: cost of CAPP and sensitivity to reader budget | Reader QA at k=1,2,8 complete; reuse original k=4. Cached-input CPU benchmark validated in job 15908770 (196.2 ms/query). End-to-end latency and incremental memory claims remain unverified. |
+| 2 | R2: labeler/content-feature coupling and gold-page injection | Existing oracle audited: current-label pseudo-gold-only QA is variable-length; older controls use a different label version and different qid counts. Next: matched-qid evaluation, then fixed-budget injection if no matching saved run exists. |
 | 3 | R1: stronger reranking baselines | Thesis has LambdaMART/BGE/monoT5 retrieval results. Verify saved configurations, reranking depth, tuning split, evaluation gold and QA availability before importing the table. |
 | 4 | R1/R2: systematic ablation and missing comparison row | Thesis contains all four leave-one-family-out variants and QA for structure + content. Verify saved evaluation artifacts, then add QA columns and these rows manually. |
 | 5 | R1/R2: feature rationale and lightweight-design trade-offs | Draft factual interpretation below; verify cited prior work before manuscript insertion. Do not imply content-only drives the improvement. |
@@ -79,8 +79,60 @@ upstream GPP timings are not synthesized from this CPU benchmark.
 Job 15908742 failed before Python started because Git was absent from the
 compute-node PATH. The launcher now treats Git logging as optional (as the
 Python report already did); code SHA-256s are still recorded. No inference ran
-and no runtime report was produced by that failed job. Resubmit after pulling
-the launcher fix; a fresh job ID gives a separate output location.
+and no runtime report was produced by that failed job. The corrected launcher
+was committed as a4d125b; the retry succeeded as described below.
+
+### Validated HPC result: job 15908770
+
+Source: user-pasted report and Slurm accounting. Job completed with exit 0:0
+in 00:33:12 on node031. The job duration includes preparation, validation,
+one warmup and three measured passes; it is not a single-pass inference time.
+The full report remains on HPC at
+`output/racs_capp_runtime_15908770/runtime.json` (not copied locally).
+
+Hardware: one CPU thread on Intel Xeon Gold 6342 @ 2.80 GHz. All 2,441 complete
+rankings matched the saved artifact in each of the three measured passes.
+Candidate pool: 1,000 pages/question; source labels: gpp_no_hyperlink,
+gpp_doc_hyperlink, gpp_page_hyperlink. No model retraining was performed.
+
+| Measurement | Observed value |
+| --- | ---: |
+| Mean cached-input CAPP latency | 196.225 ms/question |
+| Median of per-question mean latency | 184.073 ms |
+| p95 of per-question mean latency | 338.180 ms |
+| Serial throughput | 5.096 questions/s |
+| Mean computation time for a 2,441-question pass | 478.986 s |
+| One observed file-loading/preparation pass | 50.395 s |
+| Process peak RSS through benchmark | 5963.797 MiB (5.824 GiB) |
+
+The median and p95 above describe each question's mean over three measured
+passes, not pooled individual-request latency. Per-pass means were 195.888,
+196.423 and 196.365 ms/question. Averaging the printed stage means:
+
+- Candidate preparation: 1.178 ms/question.
+- Feature extraction: 193.472 ms/question (approximately 98.6% of total).
+- Standardization and logistic scoring: 0.368 ms/question.
+- Blending and sorting: 1.207 ms/question.
+
+Do not report 5.824 GiB as the model size or incremental CAPP-only memory:
+it is the whole benchmark-process high-water mark, including inputs and
+reference validation. Do not interpret 196.225 ms as total retrieval + reader
+latency or compare it directly with historical GPU reader timing as a
+controlled percentage overhead. Upstream source generation is excluded.
+
+Proposed manual runtime paragraph:
+
+> With cached upstream rankings and page-text features loaded, CAPP reranked
+> 1,000 candidate pages per question in an average of 196.2 ms on one CPU thread
+> of an Intel Xeon Gold 6342, corresponding to 5.10 questions/s. Measurements
+> cover 2,441 questions over three passes following one warmup pass; every
+> reranked page list matched the saved evaluation artifact. Query-dependent
+> feature extraction accounted for approximately 98.6% of runtime, while
+> standardization and logistic scoring required 0.37 ms per question. These
+> measurements cover the CAPP stage with cached upstream inputs, not retrieval,
+> auxiliary graph generation, or VLM answer generation.
+
+If reporting memory/preparation in a table, use the explicit scope labels above.
 
 ## Reader-budget evidence
 
@@ -121,6 +173,23 @@ The September 15 manuscript already reports pseudo-gold F1 55.82 on 2,188
 labeled questions alongside CAPP F1 45.69 on all 2,441 questions. This is not a
 matched-population causal comparison, even though the table states the counts.
 Reusing that number alone would not add the control requested by Reviewer 2.
+
+The user-provided HPC summary audit confirmed:
+
+| Existing run | Label coverage | Evaluated qids | Context | EM / F1 |
+| --- | ---: | ---: | --- | --- |
+| adaptive_exactonly pseudo_gold_only | 2188 | 2188 | no base fill; 2146 contexts shorter than four pages | 47.989 / 55.817 |
+| older evidence_countmatch pseudo_gold_only | 2285 | 1515 | no base fill; 1513 contexts shorter than four pages | 47.855 / 56.603 |
+| older support_doc_non_gold_only | 2285 | 1514 | no base fill; 1512 contexts shorter than four pages | 26.486 / 33.120 |
+
+The mean labeled-page count in the current oracle summary is 1.4785, but that
+statistic is computed before truncation and must not be labeled the exact mean
+number of reader images without checking the prediction file. The generic
+`output/m3docvqa_pseudo_gold_reader_oracle` directory was absent. No completed
+fixed-four-page injection run was shown in the inspected directories; this
+is not an exhaustive claim about all HPC files. The older positive/negative
+results should not be treated as a matched current-label control without
+restricting to a verified common question set and confirming label provenance.
 
 The existing oracle builder supports `--fill-from-base`, which places labeled
 pages first and fills remaining slots from the base ranking. Its launcher
