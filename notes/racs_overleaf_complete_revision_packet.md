@@ -14,8 +14,9 @@ insert duplicate fragments from the three earlier guides.
   auxiliary dense inputs.
 - It removes an unsupported certainty about historical alpha selection in the
   proposed advisor draft. The author answered “I am not sure” about the split.
-- It does not complete the full runtime experiment. The 16-question graph replay
-  is prepared; its submission/result has not been supplied here.
+- It does not complete the full runtime experiment. Job 15911730 passed the
+  16-question/four-graph correctness replay. A controlled graph-to-answer job
+  is prepared, but its cached-retrieval scope is not online end-to-end timing.
 - Manual insertion, a compiled PDF, visual/page-limit checking and advisor
   approval still remain. No retraining is required to insert the existing results.
 
@@ -581,10 +582,12 @@ Add this entry once to references.bib. Keep the existing Burges2010LambdaMART, N
 
 ## What still requires action outside this packet
 
-1. Run the prepared graph replay once and share its job ID/results. It is a
-   correctness precheck, not the full timing experiment.
-2. Complete the controlled runtime/memory measurement only after the necessary
-   replay/input checks pass. No pending result is invented in this packet.
+1. The graph replay precheck is complete: job 15911730 matched all four branches
+   on all 16 sampled questions. It is not a full-cohort or timing result.
+2. Run and inspect the prepared controlled graph-to-answer benchmark described
+   in `notes/racs_graph_reader_runtime_protocol.md`. It starts from cached
+   retrieval results; online retrieval/scoring must still be integrated before
+   claiming a complete query-to-answer comparison. No pending result is invented.
 3. Have the advisor review the recovered full-model inputs and the explicit
    tuning limitation. The author has already said the selection split is not
    remembered; repeating the question is not a substitute for evidence.
@@ -602,4 +605,3 @@ experimental results. Source hashes identify the precise draft snapshots.
 - notes/racs_manual_revisions_baselines_ablation.md — SHA-256 6a14b2f9c6abe2ed5e378b4c5e9a2feff3c3906314eb0f589813b027664d6603
 
 - notes/racs_manual_revisions_feature_rationale.md — SHA-256 39d9e438121055a6dc4e872cb6739188144059f8bf5bc43365a328e58ac30f0c
-

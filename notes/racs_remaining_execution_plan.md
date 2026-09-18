@@ -178,7 +178,7 @@ the core scoring identity, not every original invocation/environment setting.
 
 The actual paired end-to-end benchmark launcher is not yet implemented.
 The legacy dense core configuration is now verified from saved metadata.
-The next prepared experiment is `validate_racs_graph_replay.py`, launched by
+The correctness experiment is `validate_racs_graph_replay.py`, launched by
 `examples/sbatch_racs_graph_replay.sh`: 16 qids chosen by a fixed hash order,
 independent of outcomes, shared by the main and all three auxiliary graphs.
 It uses recorded graph settings and cached original dense/sparse predictions;
@@ -196,7 +196,45 @@ match would validate this sample's outputs under them, not prove the original
 command or all-question equivalence. The replay does not regenerate dense or
 sparse retrieval, run CAPP/reader inference, or measure full runtime/memory.
 Seven local tests and a settings-materialization check on all four audited
-configurations passed; no HPC replay success is claimed yet.
+configurations passed. The author subsequently supplied job 15911730's result:
+`COMPLETED|0:0|00:00:31|node011`. Each of the four branches has 16/16 candidate
+set matches, 16/16 complete-order matches and 16/16 score-tolerance matches.
+The report is `output/racs_graph_replay_15911730/replay.json`. This is evidence
+from pasted accounting/stdout; the full report has not been copied locally.
+The 31-second job duration includes preparation and is not a query-time result.
+
+### Prepared controlled graph-to-answer experiment (partial pipeline)
+
+`scripts/benchmark_racs_graph_reader.py` and
+`examples/sbatch_racs_graph_reader_runtime.sh` now implement an actual paired
+timing experiment, rather than another standalone inventory. It starts at
+cached dense/sparse rankings, so **it is not the requested full online
+query-to-answer benchmark**. This scope is explicit in every report. It does
+not close R1.2 or the end-to-end action above by relabeling a partial result.
+
+The experiment selects 128 qids by the same outcome-independent hash rule,
+with four disjoint warm-up qids. On one GPU allocation it runs four repeats
+per condition in eight fresh, sequential workers with balanced GPP/CAPP order.
+GPP recomputes its main graph; CAPP recomputes that graph and all three auxiliary
+graphs, builds per-query source maps, and scores/reranks with the saved model.
+Both use Qwen2-VL-7B-Instruct, 16-bit weights, exactly four pages, the same prompt,
+and explicit CUDA synchronization around the whole query timer. PDF rendering
+is inside that timer, with no document-image cache across questions. OS cache
+state remains uncontrolled. Initial input/model preparation is separate.
+
+All regenerated 1000-page graph orders/scores and full CAPP orders must match
+the saved references, outside the timer. Failed validation prevents a validated
+aggregate. Fresh-worker CPU high-water RSS and GPU allocated/reserved peaks are
+reported separately, not subtracted into a claimed incremental scorer footprint.
+The input bundles contain only sampled upstream rows; these are not production
+full-corpus memory estimates. Repeated answer variation is reported, but no
+paper QA score is replaced by this timing subset's generations.
+
+Dense/SPLADE query encoding/search and both dense scoring routes remain excluded.
+Their faithful online replay/integration is still needed for end-to-end claims.
+Nine new local tests plus 15 existing replay/CAPP benchmark tests pass. The GPU
+worker was tested with stubs only; no live CUDA benchmark result is claimed.
+See `notes/racs_graph_reader_runtime_protocol.md` for exact boundaries and commands.
 
 Local verification: five audit unit tests cover question-ID conflicts, graph
 configuration variation, absent/oversized metadata, output isolation and

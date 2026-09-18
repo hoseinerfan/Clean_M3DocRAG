@@ -73,9 +73,15 @@ The following files remain the supporting evidence and original draft guides.
 
 Integrate the manual prose/ablation and now-complete BGE QA comparison, and
 review the provenance questions with the advisor. The runtime audit JSON is
-now inspected and the legacy dense core settings are confirmed. The prepared
-16-question/four-graph replay is the next check before a faithful pipeline
-benchmark; it is not the benchmark itself.
+now inspected and the legacy dense core settings are confirmed. Job 15911730
+passed the 16-question/four-graph replay: every full order and score comparison
+matched within its declared tolerance. This is not the benchmark itself.
+The next prepared job measures graph-to-answer on 128 fixed questions, including
+CAPP's three auxiliary graph computations and the four-page reader on one GPU.
+It uses cached upstream rankings and explicitly excludes dense/SPLADE retrieval
+and scoring, so it does not close the online end-to-end runtime request.
+See `notes/racs_graph_reader_runtime_protocol.md`; no timing result is claimed
+before that job succeeds and its validation/measurement output is inspected.
 After manual insertion, send the advisor the first compiled revision with
 this concise list of remaining decisions. Further training is not needed for
 these writing changes or to use the completed BGE run. Any new controlled

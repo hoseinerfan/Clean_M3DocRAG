@@ -37,8 +37,13 @@ The transferred full report has now been inspected: all four graphs have 1000
 entries for every question. Matching-input alpha-0.35/0.40/0.45 artifacts exist,
 but their tuning summaries are null. Probe job 15911725 now confirms the
 legacy dense input's approximate MaxSim / 224-token / query-mean / global-topk
-settings in all 2441 rows. A 16-question, four-graph replay is prepared as the
-next validation step; it has not run on HPC and is not a timing experiment.
+settings in all 2441 rows. Graph replay job 15911730 completed (0:0, 31 seconds,
+node011): all four branches matched candidate sets, full orders and scores
+within tolerance on all 16 sampled questions. This is not full-cohort replay
+or a timing result. A controlled, cached-retrieval graph-to-answer benchmark
+is now prepared in `examples/sbatch_racs_graph_reader_runtime.sh`; its explicit
+partial-pipeline scope and remaining online-retrieval work are described in
+`notes/racs_graph_reader_runtime_protocol.md`. No new timing result exists yet.
 
 ## Status and priorities
 
