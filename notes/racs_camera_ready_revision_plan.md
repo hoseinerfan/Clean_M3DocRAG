@@ -11,7 +11,11 @@ protocol/limitations replacements. Apply manually; no manuscript was edited.
 
 The expanded ablation table and BGE reader-job instructions are in
 [the baseline/ablation guide](racs_manual_revisions_baselines_ablation.md).
-The BGE QA numbers remain pending; the prepared launcher is not a completed run.
+The BGE QA numbers remain pending: HPC job 15911612 was submitted and last
+reported pending for priority. Its completion has not been checked locally.
+Feature rationale and consolidated limitations are ready in
+[the feature-rationale guide](racs_manual_revisions_feature_rationale.md), with
+an [advisor/reviewer checklist](racs_reviewer_revision_checklist.md).
 
 ## Status and priorities
 
@@ -19,9 +23,9 @@ The BGE QA numbers remain pending; the prepared launcher is not a completed run.
 | --- | --- | --- |
 | 1 | R1: cost of CAPP and sensitivity to reader budget | Reader QA at k=1,2,8 complete; reuse original k=4. Cached-input CPU benchmark validated in job 15908770 (196.2 ms/query). End-to-end latency and incremental memory claims remain unverified. |
 | 2 | R2: labeler/content-feature coupling and gold-page injection | Job 15910645 completed: 2188 matched questions, four pages each, EM 44.06 / F1 51.39. GPP/CAPP matched-subset F1: 42.34 / 44.54. Ready for scoped diagnostic write-up; not independent human-gold validation. |
-| 3 | R1: stronger reranking baselines | Saved LambdaMART/BGE/monoT5 reports match the thesis. LambdaMART is LightGBM LambdaRank with 40 features. BGE/monoT5 rerank 1000 pages. A BGE four-page reader launcher is prepared, not yet run. BGE blend-selection provenance remains unresolved. |
+| 3 | R1: stronger reranking baselines | Saved LambdaMART/BGE/monoT5 reports match the thesis. LambdaMART is LightGBM LambdaRank with 40 features. BGE/monoT5 rerank 1000 pages. BGE four-page reader job 15911612 is submitted; result pending. BGE blend-selection provenance remains unresolved. |
 | 4 | R1/R2: systematic ablation and missing comparison row | Six ablation QA runs rescored on identical 2441 qids with four pages each; saved retrieval reports now confirm page@4/page@10 too. Manual expanded table is ready. Models use fixed alpha 0.40 and matching recorded main inputs/settings apart from feature subset. Literal auxiliary-source paths remain unaudited for source-bearing ablations. |
-| 5 | R1/R2: feature rationale and lightweight-design trade-offs | Draft factual interpretation below; verify cited prior work before manuscript insertion. Do not imply content-only drives the improvement. |
+| 5 | R1/R2: feature rationale and lightweight-design trade-offs | Manual draft ready: corrected feature descriptions checked against code, conceptual LTR/rank-fusion references checked, explicit source-input and capacity/cost limitations, and content-aware naming clarification. Author review and Overleaf insertion remain. |
 
 ## Verified evaluation configuration
 
@@ -347,7 +351,7 @@ does not rule out differently named artifacts. The new launcher
 alpha-0.20 rankings for one four-page reader run. It checks the exact cohort,
 per-question candidate-set agreement with GPP, metadata, and selected reader
 pages, and writes only an isolated job directory. No retraining is required.
-The job is prepared, not yet submitted or completed. LambdaMART/monoT5 matched
+Job 15911612 has been submitted; its result is pending. LambdaMART/monoT5 matched
 reader QA and full source-input comparability remain separate outstanding items.
 See `notes/racs_manual_revisions_baselines_ablation.md` for the run instructions
 and the ready-to-insert ablation revision.

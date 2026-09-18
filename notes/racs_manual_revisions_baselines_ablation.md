@@ -102,7 +102,7 @@ The retained thesis rows are confirmed by the saved reports:
 | --- | --- | ---: | ---: | --- |
 | GPP reference | 1000 / not applicable | not applicable | 0.6376 | 37.69 EM / 43.47 F1 |
 | LambdaMART | 1000 candidates | 0.45 | 0.6408 | Not yet located by name |
-| BGE reranker base | 1000 / 1000 | 0.20 | 0.6705 | New four-page reader job prepared |
+| BGE reranker base | 1000 / 1000 | 0.20 | 0.6705 | Four-page reader job 15911612 submitted; result pending |
 | monoT5 base MS MARCO 10k | 1000 / 1000 | 1.00 | 0.6609 | Not yet located by name |
 | Full CAPP on GPP | 1000 candidates | 0.40 | 0.7715 | 39.41 EM / 45.69 F1 |
 
@@ -164,4 +164,6 @@ If preflight or page rendering fails, inspect the error before changing inputs.
 Local checks passed: six validator unit/integration tests, Bash syntax, and
 LaTeX brace/environment/replacement-label checks. This guide has not been
 compiled as a manuscript; check layout after manual insertion. The HPC job is
-prepared, not submitted or completed locally.
+submitted as job 15911612 on HPC; its last reported state was pending for
+priority. No completion or QA result has yet been verified. Do not resubmit
+merely to apply the writing-only updates in the other guides.
