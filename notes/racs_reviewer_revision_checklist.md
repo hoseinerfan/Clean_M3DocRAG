@@ -41,8 +41,11 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
   hyperlink-free final system. The no-source ablation is a separate model.
 - **Alpha selection:** fixed 0.40 is verified; held-out-training selection and
   subsequent final retraining are not established by the available final
-  artifacts. Confirm the selection split and chronology before preserving
-  those manuscript claims. BGE's alpha-0.20 selection provenance is also open.
+  artifacts. The thesis explicitly documents a training-only 20% holdout,
+  page@4 selection, and full-training refit (Chapter 4, lines 230–234), as does
+  the paper. A CPU-only inventory is prepared to locate any corresponding
+  earlier tuning record; this distinguishes documented protocol from execution
+  evidence. BGE's alpha-0.20 selection provenance is also open.
 - **Scope of runtime evidence:** the CPU result is validated but is not a full
   pipeline overhead comparison. A statement of remaining scope is necessary;
   it does not by itself fully satisfy R1.2.

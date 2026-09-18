@@ -124,6 +124,75 @@ is checked. The retained top-1000 BGE result is used; the separate top-100 and
 unblended BGE trials must not be substituted for it. The BGE run does not
 complete matched reader QA for LambdaMART or monoT5, nor resolve tuning provenance.
 
+### Retrieval-only insertion while QA is pending
+
+Insert this subsection after the main-results discussion and before the new
+runtime subsection. It adds the already-confirmed retrieval comparison without
+pretending that all baseline QA runs exist. Add the BibTeX entry below to
+`references.bib` manually. The BGE checkpoint is a cross-encoder, as documented
+by its [official model card](https://huggingface.co/BAAI/bge-reranker-base), not
+the BGE-M3 embedding model.
+
+~~~latex
+\subsection{Additional Reranking Baselines}
+\label{subsec:additional-rerankers}
+
+We additionally compare retained LambdaMART, BGE and monoT5 configurations
+using the same recorded top-1000 GPP base-ranking input.
+LambdaMART \cite{Burges2010LambdaMART} uses LightGBM's LambdaRank objective,
+40 features and blend weight 0.45. The neural baselines use
+\texttt{bge-reranker-base} \cite{BAAI2023BGERerankerBase} and
+\texttt{monot5-base-msmarco-10k} \cite{Nogueira2020MonoT5}, reranking all
+1000 candidates with blend weights 0.20 and 1.00, respectively.
+Both use a maximum sequence length of 512; the page-text character caps
+are 6000 for BGE and 4000 for monoT5.
+
+\begin{table}[tbp]
+    \centering
+    \small
+    \caption{Additional retrieval-only comparison on the 2,188
+    pseudo-labeled development questions. These are system comparisons,
+    not identical-feature or matched-total-compute ablations.}
+    \label{tab:additional-rerankers}
+    \begin{tabular}{lc}
+        \toprule
+        Method & page@4 \\
+        \midrule
+        GPP & 0.6376 \\
+        LambdaMART & 0.6408 \\
+        BGE reranker base & 0.6705 \\
+        monoT5 base & 0.6609 \\
+        CAPP on GPP & \best{0.7715} \\
+        \bottomrule
+    \end{tabular}
+\end{table}
+
+Table~\ref{tab:additional-rerankers} reports higher page@4 for CAPP than
+these retained baseline configurations. This does not establish
+superiority over all configurations of these model families.
+LambdaMART and CAPP have different feature sets, and full CAPP uses
+auxiliary ranking-support features. The neural runs use extracted page
+text and report 744 empty-text candidate encounters each, not missing
+questions. The comparison therefore does not isolate model capacity,
+and retrieval-only performance must be distinguished from downstream QA.
+~~~
+
+~~~bibtex
+@misc{BAAI2023BGERerankerBase,
+  author = {{Beijing Academy of Artificial Intelligence}},
+  title = {{BGE Reranker Base}: Model Card},
+  year = {2023},
+  url = {https://huggingface.co/BAAI/bge-reranker-base},
+  note = {Accessed September 17, 2026}
+}
+~~~
+
+Before final submission, resolve or explicitly qualify blend-selection
+provenance as discussed in the execution plan. After job 15911612 validates,
+add the same-question/four-page BGE EM/F1 comparison; the table above alone does
+not finish the reviewer's common-reader-budget request. Do not insert placeholder
+QA values into the paper.
+
 ## 3. One new HPC run: frozen reader on existing BGE rankings
 
 New files:

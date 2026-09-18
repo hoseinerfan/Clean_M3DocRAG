@@ -16,6 +16,9 @@ reported pending for priority. Its completion has not been checked locally.
 Feature rationale and consolidated limitations are ready in
 [the feature-rationale guide](racs_manual_revisions_feature_rationale.md), with
 an [advisor/reviewer checklist](racs_reviewer_revision_checklist.md).
+The [remaining execution plan](racs_remaining_execution_plan.md) records the
+new CPU-only prerequisite audit for a faithful pipeline benchmark and the
+training-only 20% alpha-selection protocol located in the thesis.
 
 ## Status and priorities
 
@@ -56,6 +59,14 @@ The saved full model has `auto_tune_blend_alpha=false` and fixed alpha 0.40.
 The author recalls comparing multiple alpha values before choosing 0.40.
 This is consistent with a fixed final run, but does not establish which
 selection split was used or recover an earlier training-only tuning run.
+
+The written protocol has now been located explicitly in thesis `section3.tex`
+(lines 314–318), `section4.tex` (230–234), and `section5.tex` (833–838): a
+training-only 20% holdout selects alpha by page@4, followed by full-training
+refit. The September 15 paper states the same protocol. This establishes what
+the documents claim; the new prerequisite audit searches relevant saved
+tuning records to check that history without treating current fixed-run
+settings as evidence for or against a separate earlier tuning run.
 
 ## CPU benchmark
 
