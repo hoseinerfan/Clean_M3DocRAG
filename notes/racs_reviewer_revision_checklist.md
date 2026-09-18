@@ -1,16 +1,16 @@
 # RACS reviewer-request checklist for the advisor's first revision
 
-As of 2026-09-17. This is an internal handoff, not a submitted response letter.
+As of 2026-09-18. This is an internal handoff, not a submitted response letter.
 "Draft ready" means separate manual-insertion text exists, not that Overleaf
 was edited. Nothing has been sent to the advisor or conference.
 
-## What can be completed while BGE runs
+## Evidence ready for the first revision
 
 | Reviewer request | Evidence / revision available | Remaining condition |
 | --- | --- | --- |
 | R1.1: feature selection and relation to prior work | Corrected 5/4/6/15 feature-family description; explicit rationale; distinction between established ranking/fusion ideas and the study's selected feature set | Author review and manual insertion; no claim of exhaustive feature search |
 | R1.2: actual cost after GPP | Validated cached-input CPU benchmark: 196.2 ms/query, feature-stage breakdown, throughput and whole-process memory | Only partial coverage: end-to-end GPP-versus-CAPP latency and incremental memory are not measured |
-| R1.3: competitive reranker under common pool and reader budget | Saved top-1000 BGE, monoT5 and LambdaMART retrieval reports confirmed; BGE four-page reader job 15911612 submitted | Await job success and candidate/cohort/selected-page checks, then add QA; alpha-selection provenance and matched total cost remain separate |
+| R1.3: competitive reranker under common pool and reader budget | Saved top-1000 BGE, monoT5 and LambdaMART retrieval reports confirmed; BGE job 15911612 completed with candidate/cohort/selected-page validation, 2441 questions, four pages each, 37.85 EM / 43.89 F1 | Manual table ready; alpha-selection provenance and matched total cost remain separate; no matched LambdaMART/monoT5 QA is reported |
 | R1.4: lightweight architecture trade-offs | Scorer-capacity explanation; distinction between parameter count and feature cost; expanded ablation/QA results | Do not claim a demonstrated speed advantage over neural baselines or causal coefficient interpretation |
 | R1.5: systematic feature ablation | Six variants verified, including removal of each of four families; fixed alpha 0.40; missing structure + content QA row supplied | Literal auxiliary-source filenames for historical source-bearing ablations are not established by matching main input paths |
 | R1.6: sensitivity to reader budget | k=1,2,4,8 QA for GPP/CAPP on the same 2,441 qids; original k=4 reused | Historical GPU timings are descriptive, not controlled cross-hardware speed comparisons |
@@ -27,7 +27,7 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
    and fixed-four-page injection. Keep the main-result and matched-subset
    populations separate.
 2. `notes/racs_manual_revisions_baselines_ablation.md`: expanded ablation table
-   and interpretation; baseline QA awaits BGE job 15911612.
+   and interpretation, plus the validated BGE four-page QA comparison.
 3. `notes/racs_manual_revisions_feature_rationale.md`: corrected feature table,
    conceptual citations, source-input clarification, trade-offs, Discussion,
    and consolidated Limitations. Its full Limitations replacement supersedes
@@ -43,24 +43,28 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
   subsequent final retraining are not established by the available final
   artifacts. The thesis explicitly documents a training-only 20% holdout,
   page@4 selection, and full-training refit (Chapter 4, lines 230–234), as does
-  the paper. A CPU-only inventory is prepared to locate any corresponding
-  earlier tuning record; this distinguishes documented protocol from execution
-  evidence. BGE's alpha-0.20 selection provenance is also open.
+  the paper. CPU-only inventory job 15911623 completed; its full report still
+  needs inspection for any corresponding earlier tuning record. This
+  distinguishes documented protocol from execution evidence. BGE's alpha-0.20
+  selection provenance is also open.
 - **Scope of runtime evidence:** the CPU result is validated but is not a full
   pipeline overhead comparison. A statement of remaining scope is necessary;
   it does not by itself fully satisfy R1.2.
-- **Baseline result:** do not claim the new BGE reader run is successful until
-  accounting shows completion and the job prints `BGE_READER_RESULT` after
-  its output checks. No matched LambdaMART/monoT5 reader scores are reported yet.
+- **Baseline result:** accounting and `BGE_READER_RESULT` confirm the completed
+  BGE reader run and its output checks. This adds one competitive baseline's
+  matched-cohort/four-page QA, not statistical significance or evidence of
+  superiority over every configuration. No matched LambdaMART/monoT5 reader
+  scores are reported yet.
 - **Final artifact:** compile the manually updated Overleaf source, inspect all
   tables/references, and check the applicable page limit. No compiled revised
   manuscript exists from these writing-only changes.
 
 ## Suggested sequence from here
 
-Finish manual prose/ablation integration and review the two author-confirmation
-questions while job 15911612 proceeds. After its validated EM/F1 arrives, finish
-the baseline comparison. Then send the advisor the first compiled revision
-with this concise list of remaining decisions. Further training is not needed
-for these writing changes or the pending frozen-reader run. Any new controlled
-end-to-end benchmark would be a separate experiment, not something already done.
+Integrate the manual prose/ablation and now-complete BGE QA comparison, and
+review the provenance questions with the advisor. Transfer and inspect the
+existing runtime audit JSON before constructing a faithful pipeline benchmark.
+After manual insertion, send the advisor the first compiled revision with
+this concise list of remaining decisions. Further training is not needed for
+these writing changes or to use the completed BGE run. Any new controlled
+end-to-end benchmark is a separate experiment, not something already done.

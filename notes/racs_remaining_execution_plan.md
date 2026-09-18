@@ -5,13 +5,15 @@ This plan does not change Overleaf or launch remote jobs automatically.
 
 ## 1. BGE reader result
 
-Job 15911612 is submitted; the last reported state was running on gpu009.
-Completion and the final scores have not yet been provided.
-The author runs HPC commands and shares results. Check accounting, the end of
-the job's stdout/stderr, and its `BGE_READER_RESULT` marker before inserting
-EM/F1. Do not submit a duplicate. The prepared runtime inventory also reads
-`output/racs_bge_reader_top4_15911612/validated_result.json` if it already exists;
-absence means unavailable at audit time, not failure.
+Job 15911612 is complete. On September 18 the author provided `COMPLETED`,
+exit `0:0`, elapsed `02:26:55`, node `gpu009`, and the postflight result:
+2441 questions, four pages each, EM 37.85333879557559 / F1 43.8947152806227.
+The stdout marker agrees with
+`output/racs_bge_reader_top4_15911612/validated_result.json`.
+The baseline guide now includes 37.85 EM / 43.89 F1 in its manual table.
+Do not submit a duplicate. This is evidence from the completed validated HPC
+run, not a local rescore of its full predictions. Tuning provenance and matched
+end-to-end runtime remain separate; this result does not resolve either.
 
 ## 2. Alpha selection: written protocol located
 
@@ -150,8 +152,10 @@ Use the three manual guides in this order: runtime/budget/control;
 baselines/ablation; feature rationale. The consolidated Limitations body in
 the third guide replaces the earlier piecemeal limitations edits. Preserve
 the original main-table cohort and do not paste matched-subset QA into it.
-The baseline guide now includes a retrieval-only LaTeX table and BGE model-card
-entry; downstream BGE numbers remain pending.
+The baseline guide now includes a combined retrieval/QA LaTeX table and BGE
+model-card entry. BGE's validated four-page QA is 37.85 EM / 43.89 F1; QA for
+LambdaMART and monoT5 remains unreported. Replace the earlier retrieval-only
+draft rather than inserting both versions of the same subsection/table.
 
 Original Overleaf source/ZIP remains unchanged. The author requested manual
 integration; no rewritten or compiled revised manuscript is claimed. After
@@ -173,6 +177,7 @@ scp -o 'User=aerfanshekooh@jacks.local' \
 
 This transfers only the audit JSON, not the large predictions. The destination
 was absent at the local check on September 18. Once available, inspect the
-remaining configuration/tuning records directly. Also request BGE job 15911612's
-current state and completion marker separately. Writing-only notes updates
-do not require canceling or restarting that job.
+remaining configuration/tuning records directly. BGE job 15911612's completion
+and validation result are now recorded separately above; do not rerun the
+audit just to refresh its optional BGE snapshot. Writing-only notes updates
+do not require any GPU job to be rerun.

@@ -1,6 +1,7 @@
 # RACS manual revisions: stronger baselines and feature ablations
 
-Prepared 2026-09-17. This is a manual-edit guide; the September 15 Overleaf ZIP
+Prepared 2026-09-17; updated 2026-09-18 with validated BGE QA. This is a
+manual-edit guide; the September 15 Overleaf ZIP
 has not been changed. These additions follow the runtime, reader-budget and
 injection-control guide in `notes/racs_manual_revisions_runtime_budget_control.md`.
 
@@ -94,7 +95,7 @@ claim statistically significant differences between the close variants.
   in the earlier manual alpha trials. That selection claim needs author/advisor
   confirmation independently of this ablation table.
 
-## 2. Stronger baselines: confirmed retrieval, pending reader result
+## 2. Stronger baselines: confirmed retrieval and BGE reader result
 
 The retained thesis rows are confirmed by the saved reports:
 
@@ -102,7 +103,7 @@ The retained thesis rows are confirmed by the saved reports:
 | --- | --- | ---: | ---: | --- |
 | GPP reference | 1000 / not applicable | not applicable | 0.6376 | 37.69 EM / 43.47 F1 |
 | LambdaMART | 1000 candidates | 0.45 | 0.6408 | Not yet located by name |
-| BGE reranker base | 1000 / 1000 | 0.20 | 0.6705 | Four-page reader job 15911612 submitted; result pending |
+| BGE reranker base | 1000 / 1000 | 0.20 | 0.6705 | 37.85 EM / 43.89 F1; job 15911612 validated |
 | monoT5 base MS MARCO 10k | 1000 / 1000 | 1.00 | 0.6609 | Not yet located by name |
 | Full CAPP on GPP | 1000 candidates | 0.40 | 0.7715 | 39.41 EM / 45.69 F1 |
 
@@ -115,20 +116,22 @@ record 744 empty-text encounters, not 744 missing questions.
 These are different reranking systems, not an identical-feature classifier
 ablation or a matched total-compute comparison. Full CAPP also consumes its
 auxiliary ranking inputs. BGE's alpha-selection split is not established by
-the saved report. The filename search found no name-matched QA reports, but
-that is not proof that no differently named result exists.
+the saved report. The earlier filename search found no name-matched baseline QA
+reports; BGE now has a new validated run. No matched LambdaMART/monoT5 reader
+scores are established here.
 
 Do not insert invented EM/F1 or support-document metrics for these baselines.
-Finalize the baseline manuscript paragraph/table after the new BGE QA result
-is checked. The retained top-1000 BGE result is used; the separate top-100 and
+The BGE QA result has passed the job's input/output checks. The retained
+top-1000 BGE result is used; the separate top-100 and
 unblended BGE trials must not be substituted for it. The BGE run does not
 complete matched reader QA for LambdaMART or monoT5, nor resolve tuning provenance.
 
-### Retrieval-only insertion while QA is pending
+### Retrieval and common-reader-budget insertion
 
 Insert this subsection after the main-results discussion and before the new
-runtime subsection. It adds the already-confirmed retrieval comparison without
-pretending that all baseline QA runs exist. Add the BibTeX entry below to
+runtime subsection. This replaces the earlier retrieval-only draft of the same
+subsection/table; do not insert both. It adds the confirmed retrieval comparison
+and BGE QA without implying that all baseline QA runs exist. Add the BibTeX entry below to
 `references.bib` manually. The BGE checkpoint is a cross-encoder, as documented
 by its [official model card](https://huggingface.co/BAAI/bge-reranker-base), not
 the BGE-M3 embedding model.
@@ -146,35 +149,43 @@ LambdaMART \cite{Burges2010LambdaMART} uses LightGBM's LambdaRank objective,
 1000 candidates with blend weights 0.20 and 1.00, respectively.
 Both use a maximum sequence length of 512; the page-text character caps
 are 6000 for BGE and 4000 for monoT5.
+For downstream QA, the retained BGE ranking is passed to the same frozen
+16-bit Qwen2-VL-7B-Instruct reader with four pages per question. The run
+covers the same 2,441 development questions and verifies that BGE reranks
+the same 1000 distinct candidate pages as GPP for every question.
 
 \begin{table}[tbp]
     \centering
     \small
-    \caption{Additional retrieval-only comparison on the 2,188
-    pseudo-labeled development questions. These are system comparisons,
-    not identical-feature or matched-total-compute ablations.}
+    \caption{Additional reranking comparison. Retrieval uses 2,188
+    pseudo-labeled development questions; QA uses all 2,441 development
+    questions with four pages each. Dashes denote QA not reported here.
+    These are system comparisons, not matched-total-compute ablations.}
     \label{tab:additional-rerankers}
-    \begin{tabular}{lc}
+    \begin{tabular}{@{}lrrr@{}}
         \toprule
-        Method & page@4 \\
+        Method & page@4 & EM & F1 \\
         \midrule
-        GPP & 0.6376 \\
-        LambdaMART & 0.6408 \\
-        BGE reranker base & 0.6705 \\
-        monoT5 base & 0.6609 \\
-        CAPP on GPP & \best{0.7715} \\
+        GPP & 0.6376 & 37.69 & 43.47 \\
+        LambdaMART & 0.6408 & -- & -- \\
+        BGE reranker base & 0.6705 & 37.85 & 43.89 \\
+        monoT5 base & 0.6609 & -- & -- \\
+        CAPP on GPP & \best{0.7715} & \best{39.41} & \best{45.69} \\
         \bottomrule
     \end{tabular}
 \end{table}
 
 Table~\ref{tab:additional-rerankers} reports higher page@4 for CAPP than
-these retained baseline configurations. This does not establish
-superiority over all configurations of these model families.
+these retained baseline configurations. With the common four-page reader
+budget, BGE achieves 37.85 EM and 43.89 F1, compared with 39.41 EM and
+45.69 F1 for CAPP. These are descriptive comparisons, not statistical
+significance claims or evidence of superiority over all configurations
+of these model families.
 LambdaMART and CAPP have different feature sets, and full CAPP uses
 auxiliary ranking-support features. The neural runs use extracted page
 text and report 744 empty-text candidate encounters each, not missing
 questions. The comparison therefore does not isolate model capacity,
-and retrieval-only performance must be distinguished from downstream QA.
+and downstream QA for LambdaMART and monoT5 is not reported here.
 ~~~
 
 ~~~bibtex
@@ -188,12 +199,35 @@ and retrieval-only performance must be distinguished from downstream QA.
 ~~~
 
 Before final submission, resolve or explicitly qualify blend-selection
-provenance as discussed in the execution plan. After job 15911612 validates,
-add the same-question/four-page BGE EM/F1 comparison; the table above alone does
-not finish the reviewer's common-reader-budget request. Do not insert placeholder
-QA values into the paper.
+provenance as discussed in the execution plan. The BGE common-pool/four-page
+comparison now has validated QA; this does not complete end-to-end runtime
+measurement or establish QA for the other two baselines.
 
-## 3. One new HPC run: frozen reader on existing BGE rankings
+## 3. Completed HPC run: frozen reader on existing BGE rankings
+
+On September 18, the author provided accounting, stdout/stderr and the final
+validation JSON for job **15911612**: `COMPLETED`, exit `0:0`, elapsed
+`02:26:55`, node `gpu009`. The postflight marker and
+`output/racs_bge_reader_top4_15911612/validated_result.json` agree:
+
+~~~json
+{"questions": 2441, "reader_pages_each": 4, "overall": {"list_em": 37.85333879557559, "list_f1": 43.8947152806227}}
+~~~
+
+This is author-provided evidence from the completed HPC job; the full QA
+prediction file has not been transferred or independently rescored locally
+in this update. The launcher runs preflight, QA evaluation and postflight in
+sequence with failure propagation. Postflight checks exact question coverage,
+the four intended selected pages, answer/timing fields, and unchanged pinned
+gold/reader input/reader code hashes. Its success does not establish statistical
+significance, tuning provenance, or matched hardware/runtime across methods.
+The job's elapsed time includes setup and other work; it is not a per-query
+end-to-end latency measurement. The logged model/processor warnings did not
+abort the completed run.
+
+Using the manuscript's rounded GPP/CAPP scores, CAPP exceeds BGE by approximately
+1.56 EM and 1.80 F1 points. BGE is slightly above GPP (about 0.16 EM and 0.42 F1
+points). Do not interpret these differences as statistically significant.
 
 New files:
 
@@ -209,7 +243,8 @@ weights. It verifies that all four intended pages were selected for every qid.
 It never trains or reranks BGE/CAPP, changes gold labels, silently filters
 questions, or overwrites historical results. No Git command runs on the GPU node.
 
-From the HPC repository root, after the changes are pushed:
+Historical submission recipe (retained for reproducibility; **do not resubmit
+job 15911612 or run this again just to update notes**):
 
 ~~~bash
 cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
@@ -232,7 +267,6 @@ If preflight or page rendering fails, inspect the error before changing inputs.
 
 Local checks passed: six validator unit/integration tests, Bash syntax, and
 LaTeX brace/environment/replacement-label checks. This guide has not been
-compiled as a manuscript; check layout after manual insertion. The HPC job is
-submitted as job 15911612 on HPC; its last reported state was pending for
-priority. No completion or QA result has yet been verified. Do not resubmit
-merely to apply the writing-only updates in the other guides.
+compiled as a manuscript; check layout after manual insertion. Job 15911612 is
+now complete and validated as recorded above. No new model inference or
+retraining is needed to use this result in the manual revision.
