@@ -1,9 +1,8 @@
 # RACS manual revisions: feature rationale, trade-offs, and limitations
 
-Prepared 2026-09-17 while BGE reader job 15911612 is pending/running on HPC.
-Its last user-reported state was pending for priority; no live HPC status is
-available locally. This guide contains proposed manual edits, not changes to
-Overleaf, the manuscript ZIP, predictions, or the running job.
+Prepared 2026-09-17; updated 2026-09-18. BGE reader job 15911612 has completed
+and its result is validated. This guide contains proposed manual edits, not
+changes to Overleaf, the manuscript ZIP, predictions, or HPC jobs.
 
 ## Scope and insertion order
 
@@ -97,7 +96,7 @@ copied from either paper or that unreported alternatives were tested.
 
 ### Full-model auxiliary inputs: necessary protocol clarification
 
-Add the following to Experimental Design, immediately after the Baselines
+Add the following to Experimental Design, immediately after the Compared methods
 paragraph and before Training. It describes the verified full-model evaluation
 configuration, not a recovered original training command:
 
@@ -179,9 +178,9 @@ to make this qualification; that choice remains with the authors.
 ## 5. Consolidated Limitations body
 
 Keep `\section{Limitations}` and `\label{sec:limitations}`. Replace only the
-section body with the following. This version makes no claim that the pending
-BGE QA job has completed and remains accurate if only the established results
-are inserted. Finalize the baseline comparison separately after job validation.
+section body with the following. BGE's validated result belongs in the updated
+baseline table. The complete revision packet additionally includes an explicit
+alpha-selection provenance caveat, since the author cannot confirm the split.
 
 ~~~latex
 Pseudo-page labels are constructed from evidence metadata rather than

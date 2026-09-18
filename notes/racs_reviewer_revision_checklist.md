@@ -23,6 +23,11 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
 
 ## Manual integration files
 
+Start with `notes/racs_overleaf_complete_revision_packet.md`: it contains the
+full ordered insertion/replacement packet, with alpha provenance explicitly
+unverified. Do not paste both that packet and the duplicate fragments below.
+The following files remain the supporting evidence and original draft guides.
+
 1. `notes/racs_manual_revisions_runtime_budget_control.md`: runtime, budget,
    and fixed-four-page injection. Keep the main-result and matched-subset
    populations separate.
@@ -50,6 +55,8 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
   inspected. Matching-input fixed-alpha 0.35/0.40/0.45 runs exist, but their
   tuning summaries are null. This supports the existence of trials, not the
   selection split/criterion. BGE's alpha-0.20 selection provenance is also open.
+  The author answered "I am not sure" on September 18; the packet therefore
+  does not present training-only tuning as established fact.
 - **Scope of runtime evidence:** the CPU result is validated but is not a full
   pipeline overhead comparison. A statement of remaining scope is necessary;
   it does not by itself fully satisfy R1.2.

@@ -4,6 +4,14 @@ Updated 2026-09-18. Working notes and proposed manual edits only; no manuscript
 or Overleaf archive has been modified. The authoritative manuscript is the
 September 15 ZIP, not the older `ACM_Paper` checkout.
 
+For manual integration, start with the self-contained
+[complete revision packet](racs_overleaf_complete_revision_packet.md): 15
+ordered edits with all LaTeX fragments in one file. It supersedes using the
+three guides as separate insertion checklists. The author cannot confirm
+the historical alpha-selection split, so the proposed advisor draft explicitly
+qualifies it; it does not repeat training-only selection as established fact.
+This is a prepared edit packet, not an edited/compiled camera-ready manuscript.
+
 Ready-to-paste edits for priorities 1 and 2 are in
 [the manual revision guide](racs_manual_revisions_runtime_budget_control.md).
 It gives exact manuscript anchors, three LaTeX tables, results text, and

@@ -43,6 +43,14 @@ used to select 0.40; other candidates with different inputs cannot establish
 that history. Ask the author/advisor to confirm the written protocol or
 explicitly qualify it. A fresh tuning run would not prove the original history.
 
+Author response on September 18: **"I am not sure"** which selection split
+was used. Do not ask the author to guess or treat the existing prose as
+execution evidence. The consolidated revision packet provides advisor-draft
+wording that reports the fixed alpha and explicitly states that its historical
+selection split is unverified. Advisor review or a genuine historical record
+is needed before strengthening that claim; a new tuning run cannot repair
+the historical record retroactively.
+
 ## 3. Full-model source description
 
 The manual feature-rationale guide includes the corrected evaluation protocol:
@@ -195,6 +203,12 @@ configuration variation, absent/oversized metadata, output isolation and
 tuning-record filtering. The Slurm launcher passes Bash syntax checking.
 
 ## 5. Manual manuscript integration
+
+The single self-contained handoff is now
+`notes/racs_overleaf_complete_revision_packet.md`. It consolidates the verified
+LaTeX fragments in manuscript order and adds the configuration/tuning edits.
+Use that packet rather than inserting it in addition to the older guides.
+The three original guides below remain the detailed evidence/context sources.
 
 Use the three manual guides in this order: runtime/budget/control;
 baselines/ablation; feature rationale. The consolidated Limitations body in
