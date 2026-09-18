@@ -9,14 +9,18 @@ Ready-to-paste edits for priorities 1 and 2 are in
 It gives exact manuscript anchors, three LaTeX tables, results text, and
 protocol/limitations replacements. Apply manually; no manuscript was edited.
 
+The expanded ablation table and BGE reader-job instructions are in
+[the baseline/ablation guide](racs_manual_revisions_baselines_ablation.md).
+The BGE QA numbers remain pending; the prepared launcher is not a completed run.
+
 ## Status and priorities
 
 | Priority | Review request | Status / next action |
 | --- | --- | --- |
 | 1 | R1: cost of CAPP and sensitivity to reader budget | Reader QA at k=1,2,8 complete; reuse original k=4. Cached-input CPU benchmark validated in job 15908770 (196.2 ms/query). End-to-end latency and incremental memory claims remain unverified. |
 | 2 | R2: labeler/content-feature coupling and gold-page injection | Job 15910645 completed: 2188 matched questions, four pages each, EM 44.06 / F1 51.39. GPP/CAPP matched-subset F1: 42.34 / 44.54. Ready for scoped diagnostic write-up; not independent human-gold validation. |
-| 3 | R1: stronger reranking baselines | Saved LambdaMART/BGE/monoT5 reports match the thesis. The reported BGE/monoT5 runs rerank 1000 pages. BGE blend-selection provenance and matched downstream QA remain unresolved. |
-| 4 | R1/R2: systematic ablation and missing comparison row | Six ablation QA runs rescored on identical 2441 qids with four pages each, matching saved scores. Models have the named features, fixed alpha 0.40, matching recorded main input paths, and other saved arguments matching full CAPP. Auxiliary-source paths are not recovered for source-bearing ablations. |
+| 3 | R1: stronger reranking baselines | Saved LambdaMART/BGE/monoT5 reports match the thesis. LambdaMART is LightGBM LambdaRank with 40 features. BGE/monoT5 rerank 1000 pages. A BGE four-page reader launcher is prepared, not yet run. BGE blend-selection provenance remains unresolved. |
+| 4 | R1/R2: systematic ablation and missing comparison row | Six ablation QA runs rescored on identical 2441 qids with four pages each; saved retrieval reports now confirm page@4/page@10 too. Manual expanded table is ready. Models use fixed alpha 0.40 and matching recorded main inputs/settings apart from feature subset. Literal auxiliary-source paths remain unaudited for source-bearing ablations. |
 | 5 | R1/R2: feature rationale and lightweight-design trade-offs | Draft factual interpretation below; verify cited prior work before manuscript insertion. Do not imply content-only drives the improvement. |
 
 ## Verified evaluation configuration
@@ -332,27 +336,42 @@ result uses `monot5-base-msmarco-10k`, depth 1000, alpha 1.0, max length 512
 and max page characters 4000. Both report 744 empty-text encounters, not 744
 missing questions. Separate top-100 trials exist and are not the thesis rows.
 LambdaMART reports selected alpha 0.45 and a tuning record with 4233 evaluated
-labeled tuning questions. BGE's alpha-selection split is not established by
-these reports. Matched baseline reader QA and full source-input comparability
-remain to be established before claiming an end-to-end controlled comparison.
+labeled tuning questions. The subsequent model audit confirms candidate depth
+1000, LightGBM backend, LambdaRank objective, automatic alpha tuning, and 40
+features. This is not an identical-feature comparison with 30-feature CAPP.
+BGE's alpha-selection split is not established by these reports.
+
+The latest filename search found zero name-matched baseline QA reports; this
+does not rule out differently named artifacts. The new launcher
+`examples/sbatch_racs_bge_reader_top4.sh` reuses the retained BGE top-1000,
+alpha-0.20 rankings for one four-page reader run. It checks the exact cohort,
+per-question candidate-set agreement with GPP, metadata, and selected reader
+pages, and writes only an isolated job directory. No retraining is required.
+The job is prepared, not yet submitted or completed. LambdaMART/monoT5 matched
+reader QA and full source-input comparability remain separate outstanding items.
+See `notes/racs_manual_revisions_baselines_ablation.md` for the run instructions
+and the ready-to-insert ablation revision.
 
 ## Feature ablations: proposed manual expansion of Table 8
 
 The QA columns below have now been independently recomputed from saved answers
 in CPU job 15911329: every variant covers exactly the same 2441 gold qids,
 has four selected reader pages per question, and matches its saved evaluation.
-The ablation page@4 values remain thesis-reported here; they were not recomputed
-by that QA audit. The full-CAPP retrieval value was verified separately.
+The subsequent user-provided retrieval reports confirm page@4 and page@10 for
+the six ablations on 2188 labeled questions, with 2441 prediction qids. This is
+saved-report verification, not new retrieval inference. Full CAPP was verified
+separately. The newly included no-rank variant is highest on page@10; the old
+boldface on structure + content's page@10 must therefore be removed.
 
-| Variant | page@4 | QA EM | QA F1 |
-| --- | ---: | ---: | ---: |
-| Structure only | 0.7573 | 38.71 | 44.75 |
-| Structure + content | 0.7779 | 39.04 | 45.14 |
-| No rank | 0.7692 | 38.92 | 45.04 |
-| No source | 0.7719 | 39.12 | 45.22 |
-| No structure | 0.6508 | 37.65 | 43.46 |
-| No content | 0.7573 | 38.59 | 44.69 |
-| All features | 0.7715 | 39.41 | 45.69 |
+| Variant | page@4 | page@10 | QA EM | QA F1 |
+| --- | ---: | ---: | ---: | ---: |
+| Structure only | 0.7573 | 0.8844 | 38.71 | 44.75 |
+| Structure + content | 0.7779 | 0.8935 | 39.04 | 45.14 |
+| No rank | 0.7692 | 0.8958 | 38.92 | 45.04 |
+| No source | 0.7719 | 0.8729 | 39.12 | 45.22 |
+| No structure | 0.6508 | 0.8140 | 37.65 | 43.46 |
+| No content | 0.7573 | 0.8702 | 38.59 | 44.69 |
+| All features | 0.7715 | 0.8825 | 39.41 | 45.69 |
 
 The six ablation model files were found in
 `output/m3docvqa_content_aware_exact_maxsim_direct_exactonly_adaptive_norm05_feature_matrix`.
