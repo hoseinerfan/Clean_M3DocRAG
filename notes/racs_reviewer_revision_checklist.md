@@ -43,10 +43,10 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
   subsequent final retraining are not established by the available final
   artifacts. The thesis explicitly documents a training-only 20% holdout,
   page@4 selection, and full-training refit (Chapter 4, lines 230–234), as does
-  the paper. CPU-only inventory job 15911623 completed; its full report still
-  needs inspection for any corresponding earlier tuning record. This
-  distinguishes documented protocol from execution evidence. BGE's alpha-0.20
-  selection provenance is also open.
+  the paper. CPU-only inventory job 15911623 completed and its full report was
+  inspected. Matching-input fixed-alpha 0.35/0.40/0.45 runs exist, but their
+  tuning summaries are null. This supports the existence of trials, not the
+  selection split/criterion. BGE's alpha-0.20 selection provenance is also open.
 - **Scope of runtime evidence:** the CPU result is validated but is not a full
   pipeline overhead comparison. A statement of remaining scope is necessary;
   it does not by itself fully satisfy R1.2.
@@ -62,8 +62,9 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
 ## Suggested sequence from here
 
 Integrate the manual prose/ablation and now-complete BGE QA comparison, and
-review the provenance questions with the advisor. Transfer and inspect the
-existing runtime audit JSON before constructing a faithful pipeline benchmark.
+review the provenance questions with the advisor. The runtime audit JSON is
+now inspected; check the legacy dense prediction's embedded metadata and
+verify a small replay before constructing a faithful pipeline benchmark.
 After manual insertion, send the advisor the first compiled revision with
 this concise list of remaining decisions. Further training is not needed for
 these writing changes or to use the completed BGE run. Any new controlled

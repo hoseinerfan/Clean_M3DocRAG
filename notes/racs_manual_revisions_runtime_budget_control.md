@@ -102,6 +102,58 @@ not a new CAPP retrieval method.
 
 ## 2. Results addition: runtime
 
+### How the existing runtime is measured and what is trustworthy
+
+Source: `scripts/benchmark_capp_runtime.py`, especially `timed_query`,
+`summarize`, and the repeated-pass loop. The observed HPC values come from
+job 15908770, as supplied by the author. The implementation and eight local
+tests were rechecked on September 18; the full HPC runtime JSON has not been
+independently transferred in this update.
+
+For query q in measured pass r, `t(q,r) = perf_counter(end) - perf_counter(start)`.
+The timer includes candidate preparation, query-dependent feature extraction,
+standardization/logistic scoring, and blending/sorting. All 2441 questions
+are processed on one CPU thread, with 1000 candidates each. One full warmup
+pass is excluded; three measured passes follow. The reported mean is
+`sum(t(q,r)) / (2441 * 3)`. Serial stage throughput is its reciprocal, not
+concurrent serving throughput or whole-job throughput.
+
+The three observed pass means were approximately 195.888, 196.423 and
+196.365 ms/query, averaging 196.225 ms/query. Every complete ranking matched
+the saved full CAPP artifact on each pass. This supports repeatability and
+output equivalence for this implementation, workload and machine; it is not
+an across-machine uncertainty estimate or proof of an optimized implementation.
+
+The reported median (184.073 ms) and p95 (338.180 ms) are over **per-question
+means across three passes**. Do not describe that p95 as a single-request
+service-tail measurement. Input loading, page-text tokenization and auxiliary
+source-map preparation are outside this query timer, separately measured as
+50.395 seconds in one uncontrolled filesystem-cache state. Auxiliary ranking
+generation, dense/sparse retrieval, reader processing and serialization are
+excluded. Matching-rank validation is also outside the query timer.
+
+The reader script's historical `time_qa` instead brackets selected-image
+loading/cache access, prompt preparation and answer generation. It excludes
+retrieval/model loading and has no explicit CUDA synchronization immediately
+around that timer. Returning decoded text may synchronize internally; the
+absence of explicit synchronization does not prove that every saved time is
+underestimated. Nonetheless, cache state and GPU hardware were not controlled
+across historical jobs, so those times should remain descriptive, not evidence
+that CAPP is faster/slower than GPP. The Slurm job duration is another boundary
+again and must not replace per-query inference timing.
+
+A controlled paired run must use the same hardware, workload and declared
+cache policy; synchronize GPU work at wall-timer boundaries, warm up, repeat
+with balanced method order, and include every method-specific upstream branch.
+Record one-time initialization separately and compare memory in fresh worker
+processes. The existing peak RSS includes input caches and validation work;
+it is not incremental CAPP memory. These constraints follow the measurement
+boundaries in our code and the official guidance for
+[Python's performance counter](https://docs.python.org/3/library/time.html#time.perf_counter)
+and [asynchronous CUDA timing](https://docs.pytorch.org/docs/2.14/notes/cuda.html#asynchronous-execution).
+
+### Manual insertion
+
 Insert immediately before the existing Pseudo-Label Quality subsection.
 This table reports the full benchmark-process memory scope explicitly;
 do not shorten that label to “CAPP memory overhead.”

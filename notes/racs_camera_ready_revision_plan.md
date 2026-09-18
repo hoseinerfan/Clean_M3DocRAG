@@ -25,7 +25,10 @@ and their direct recorded paths exist. Its saved configurations distinguish
 the Exact MaxSim/score-selection base from legacy dense/MMR auxiliary rankings;
 the shared SPLADE summary names `naver/splade-cocondenser-ensembledistil`, not
 v3. The legacy dense prediction exists but its same-stem summary is missing.
-Full-report inspection and graph replay remain pending before pipeline timing.
+The transferred full report has now been inspected: all four graphs have 1000
+entries for every question. Matching-input alpha-0.35/0.40/0.45 artifacts exist,
+but their tuning summaries are null. Embedded legacy-dense metadata and a
+small faithful replay remain to be checked before pipeline timing.
 
 ## Status and priorities
 

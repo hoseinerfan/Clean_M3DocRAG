@@ -33,13 +33,15 @@ The provenance note also records a historical recommendation for separate fixed
 alpha trials; a recommended command is not evidence of how the final choice
 was made. These distinctions should not be collapsed in either direction.
 
-Next: inventory relevant small model/summary files for prior training-only
-tuning records. A candidate must match the label version, training/base inputs,
-feature set and selected alpha; a different model's 0.40 choice is not proof.
-Matching fit/tune counts alone is also insufficient. If no record is recovered,
-ask the author/advisor to confirm the written protocol or qualify it. Do not
-silently invent a development-tuned or train-tuned history. No retraining is
-authorized by this inventory, and a new tuning run cannot establish history.
+The transferred inventory was inspected on September 18. Among 98 candidate
+records, four match all four recorded main train/eval gold/base paths: the
+30-feature fixed-alpha 0.35, 0.40 and 0.45 models, plus the feature-matrix
+`all` model at 0.40. All four record automatic tuning disabled and null tuning
+summaries. No candidate read errors were reported. This supports the author's
+memory of multiple alpha trials, but does not identify the data or criterion
+used to select 0.40; other candidates with different inputs cannot establish
+that history. Ask the author/advisor to confirm the written protocol or
+explicitly qualify it. A fresh tuning run would not prove the original history.
 
 ## 3. Full-model source description
 
@@ -96,10 +98,22 @@ Important configuration distinctions from that output:
 These checks establish available artifacts and recorded configuration, not
 recomputed graph equivalence, transitive model/index availability, or a runtime
 result. The full report on HPC is
-`output/racs_runtime_audit_15911623/prerequisites.json`. Transfer that report
-for local inspection of complete graph settings, varying metadata keys and
-tuning records; no duplicate audit is needed. The pasted filtered output
-contains no BGE completion marker or alpha-tuning records.
+`output/racs_runtime_audit_15911623/prerequisites.json`. It has now been copied
+to `outputs/racs_runtime_prerequisites_15911623.json` and inspected locally.
+Every graph has 1000 candidate entries for all 2441 questions. Only its
+per-question `graph` metadata varies; other recorded metadata is constant
+within each artifact. This does not establish candidate uniqueness or graph
+replay equivalence. Alpha findings are above; the optional BGE snapshot in this
+earlier report is superseded by the completed-job result in section 1.
+
+The next targeted check is `scripts/probe_racs_legacy_dense.py`: it reads the
+exact legacy prediction path recorded in the audit, verifies its question-set
+digest, and groups embedded configuration across all rows. If a same-stem
+detail JSONL exists, it reports only the first nonblank row's configuration,
+explicitly without asserting that file is from the same run. No training,
+retrieval, prediction modification, or report-file writing occurs. Four local
+tests cover read-only behavior, cohort mismatch, configuration variation and
+the limited companion-file scope.
 
 ### Benchmark design after prerequisite verification
 
@@ -137,10 +151,11 @@ contains no BGE completion marker or alpha-tuning records.
    any reader answer variation; do not replace the paper's established QA
    results merely because a timing run generates new answers.
 
-The actual paired benchmark launcher is not yet implemented: reconstructing
-the upstream branches requires inspecting the complete audit report and
-resolving the legacy dense configuration. This is a concrete outstanding
-step, not evidence that the runtime reviewer request is complete.
+The actual paired benchmark launcher is not yet implemented. The complete
+audit report is inspected, but the legacy dense configuration still needs its
+embedded metadata checked and a small replay validated. Current wrapper
+defaults suggest a compact-MaxSim route; they are not proof of what produced
+the saved file. This remains an outstanding step, not a completed benchmark.
 
 Local verification: five audit unit tests cover question-ID conflicts, graph
 configuration variation, absent/oversized metadata, output isolation and
@@ -164,20 +179,43 @@ float placement, and page limit, then share the first draft with the advisor.
 If the author wants direct work on a separate manuscript copy, that needs an
 explicit change to the earlier manual-only instruction.
 
-## Next handoff: transfer the completed audit report
+### Configuration wording before the advisor draft
 
-No second audit submission is needed. In a new local Mac terminal (not inside
-the HPC SSH session), copy the existing report:
+- Apply the feature-rationale guide's separation of the no-hyperlink main GPP
+  base from the three legacy auxiliary sources. Do not relabel the full model
+  as the no-source ablation or call the entire pipeline hyperlink-free.
+- The sparse input's summary records `naver/splade-cocondenser-ensembledistil`.
+  In the paper's Compared Methods paragraph, the generic SPLADE description
+  can be made explicit with that checkpoint, attributed to saved metadata.
+  The September 15 text does not claim SPLADE v3; do not introduce that claim
+  from recollection. Checkpoint bytes have not been independently inspected.
+- The original Method and Training paragraphs claim held-out-training alpha
+  selection and final refit. Keep this as an explicit advisor-confirmation
+  item; the new metadata does not independently prove it. A draft can state
+  the verified fixed alpha, but deleting selection details alone does not
+  resolve the final paper's selection-protocol obligation.
+- Keep new experimental tables separate from the original main-result rows.
+  The guides contain draft insertions, not a finished compiled camera-ready.
+
+## Next handoff: inspect embedded legacy-dense metadata
+
+After the new probe and notes are pushed, run in the HPC terminal:
 
 ~~~bash
-scp -o 'User=aerfanshekooh@jacks.local' \
-  innovator.sdstate.edu:/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/racs_runtime_audit_15911623/prerequisites.json \
-  /Users/hoseinerfan/Desktop/Clean_M3DocRAG/outputs/racs_runtime_prerequisites_15911623.json
+cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
+if [ "$(git branch --show-current)" = "codex/mmdocir-hpc-workflow" ]; then
+  git pull --ff-only origin codex/mmdocir-hpc-workflow &&
+  srun --partition=compute --nodes=1 --ntasks=1 \
+    --cpus-per-task=1 --mem=16G --time=00:10:00 \
+    env/bin/python -B scripts/probe_racs_legacy_dense.py \
+      --audit-json output/racs_runtime_audit_15911623/prerequisites.json
+else
+  echo "Stop: unexpected branch."
+  git branch --show-current
+fi
 ~~~
 
-This transfers only the audit JSON, not the large predictions. The destination
-was absent at the local check on September 18. Once available, inspect the
-remaining configuration/tuning records directly. BGE job 15911612's completion
-and validation result are now recorded separately above; do not rerun the
-audit just to refresh its optional BGE snapshot. Writing-only notes updates
-do not require any GPU job to be rerun.
+Paste the compact printed JSON. No GPU is needed. Do not repeat the previous
+audit or any accuracy run. This metadata probe is not itself a runtime
+benchmark; only after it and replay verification can timing be interpreted
+as measuring the intended historical system.
