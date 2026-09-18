@@ -203,7 +203,7 @@ The report is `output/racs_graph_replay_15911730/replay.json`. This is evidence
 from pasted accounting/stdout; the full report has not been copied locally.
 The 31-second job duration includes preparation and is not a query-time result.
 
-### Prepared controlled graph-to-answer experiment (partial pipeline)
+### Completed controlled graph-to-answer experiment (partial pipeline)
 
 `scripts/benchmark_racs_graph_reader.py` and
 `examples/sbatch_racs_graph_reader_runtime.sh` now implement an actual paired
@@ -232,9 +232,23 @@ paper QA score is replaced by this timing subset's generations.
 
 Dense/SPLADE query encoding/search and both dense scoring routes remain excluded.
 Their faithful online replay/integration is still needed for end-to-end claims.
-Nine new local tests plus 15 existing replay/CAPP benchmark tests pass. The GPU
-worker was tested with stubs only; no live CUDA benchmark result is claimed.
+Nine new local tests plus 15 existing replay/CAPP benchmark tests pass. Live
+execution is now complete: job 15911732, exit 0:0, 01:23:12, gpu009, NVIDIA A100
+80GB PCIe. The author supplied the validated report status and summary fields
+in `/Users/hoseinerfan/.codex/attachments/7b8bc269-b11b-4862-baac-93a20ac3524d/pasted-text.txt`.
+On 128 questions with four repeats, mean graph-to-answer time is 3.9422036205 s
+for GPP and 4.7029153292 s for CAPP: +0.7607117088 s (+19.2966%). Median/p95 are
+3.5649435821/5.9405987030 s and 4.2865021792/7.9158358886 s, respectively.
+GPU peak allocated/reserved memory is 19.3656/24.7188 GiB in every worker.
+CPU whole-worker peak RSS ranges are GPP 4.9857–5.4267 GiB and CAPP
+6.4532–6.8022 GiB; initialization already reached each worker's high-water mark.
+No within-method answer variation was reported across repeats. Do not interpret
+these as identical answers across methods, isolated scorer memory, or full online
+latency. The success status reports the ranking/cohort/hardware gates passed;
+raw per-query report files have not been independently recomputed locally.
 See `notes/racs_graph_reader_runtime_protocol.md` for exact boundaries and commands.
+Step 9 of the consolidated Overleaf packet now includes a manual LaTeX insertion
+for this completed experiment. Do not launch another copy for the same summary.
 
 Local verification: five audit unit tests cover question-ID conflicts, graph
 configuration variation, absent/oversized metadata, output isolation and
@@ -282,26 +296,14 @@ explicit change to the earlier manual-only instruction.
 - Keep new experimental tables separate from the original main-result rows.
   The guides contain draft insertions, not a finished compiled camera-ready.
 
-## Next handoff: small graph replay
+## Next handoff after the completed graph-to-answer run
 
-The metadata probe is complete; do not repeat it. After the new replay files
-and notes are pushed, run in the HPC terminal:
+Do not repeat the metadata probe, graph precheck, or completed partial benchmark.
+Preserve `output/racs_graph_reader_runtime_15911732/` (manifest, runtime summary,
+input bundles and eight worker reports). Use the updated manual packet for the
+advisor's first draft; the original manuscript remains untouched.
 
-~~~bash
-cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
-if [ "$(git branch --show-current)" = "codex/mmdocir-hpc-workflow" ]; then
-  git pull --ff-only origin codex/mmdocir-hpc-workflow &&
-  mkdir -p output &&
-  sbatch examples/sbatch_racs_graph_replay.sh
-else
-  echo "Stop: unexpected branch."
-  git branch --show-current
-fi
-~~~
-
-Share the returned job ID. After completion, check accounting and
-`output/racs_graph_replay_JOBID.out` / `.err`; the full report will be
-`output/racs_graph_replay_JOBID/replay.json`. We expect four `GRAPH_REPLAY`
-lines, each with 16 complete-order and score matches. No GPU or retraining is
-needed. A passing result is a step toward the pipeline benchmark, not that
-benchmark's completion.
+The unresolved experiment is online retrieval/scoring integration, not graph or
+reader timing. Historical alpha-selection provenance remains unverified, and
+manual Overleaf insertion, compilation/layout checking and advisor review remain.
+No new HPC submission is prepared by this result-recording update.

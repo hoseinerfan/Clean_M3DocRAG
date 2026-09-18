@@ -9,14 +9,14 @@ insert duplicate fragments from the three earlier guides.
 ## What this packet completes—and what it does not
 
 - It consolidates the completed reader-budget, injection, BGE QA, ablation,
-  feature-rationale and scoped CPU-runtime revisions.
+  feature-rationale, scoped CPU-runtime and matched graph-to-answer revisions.
 - It gives explicit configuration wording, including the different main and
   auxiliary dense inputs.
 - It removes an unsupported certainty about historical alpha selection in the
   proposed advisor draft. The author answered “I am not sure” about the split.
 - It does not complete the full runtime experiment. Job 15911730 passed the
-  16-question/four-graph correctness replay. A controlled graph-to-answer job
-  is prepared, but its cached-retrieval scope is not online end-to-end timing.
+  16-question/four-graph correctness replay. Job 15911732 completed controlled
+  graph-to-answer timing, but its cached-retrieval scope is not online end-to-end.
 - Manual insertion, a compiled PDF, visual/page-limit checking and advisor
   approval still remain. No retraining is required to insert the existing results.
 
@@ -33,6 +33,7 @@ insert duplicate fragments from the three earlier guides.
 | Evaluation populations | 2441 questions for main/budget/BGE QA; 2188 labeled questions for page retrieval and matched injection |
 | Alpha history | Matching-input 0.35/0.40/0.45 artifacts exist; selection split not verified |
 | Existing runtime | Cached-input CAPP only, 196.2 ms/query on one Xeon Gold 6342 CPU thread—not end-to-end |
+| Matched graph-to-answer runtime | 128 qids, four repeats, A100 80GB PCIe; GPP 3.942 s vs CAPP 4.703 s; cached upstream retrieval, not full online timing |
 
 The saved-model replay reproduces full CAPP evaluation; it does not recover the
 literal original training command. Auxiliary settings are not interchangeable
@@ -276,7 +277,7 @@ and downstream QA for LambdaMART and monoT5 is not reported here.
 
 ## 9. Add the scoped runtime analysis
 
-Immediately after step 8, insert this subsection. This is the completed cached-input benchmark, not a placeholder for the future end-to-end experiment. Keep all scope qualifications and the whole-process memory label. Median/p95 describe per-question means over three repeats, not a serving-system tail-latency guarantee.
+Immediately after step 8, insert this subsection. It now includes two completed experiments: full-cohort cached-input CAPP-stage timing and the 128-question matched graph-to-answer comparison. Neither is full online query-to-answer timing. Keep their different cohorts, hardware, boundaries and memory labels. Median/p95 describe per-question means over three repeats for the first experiment and four for the second, not a serving-system tail-latency guarantee.
 
 ~~~latex
 \subsection{Computational Cost}
@@ -324,6 +325,65 @@ The per-question timings exclude page-text extraction, dense/sparse
 retrieval, base and auxiliary graph generation, training, answer
 generation, and prediction serialization. They therefore characterize
 the cached-input CAPP stage, not end-to-end pipeline latency.
+
+We additionally compared graph-to-answer execution on 128 development
+questions selected by a fixed, outcome-independent hash order, using
+one NVIDIA A100 80GB PCIe GPU and one CPU math thread. Each method used
+the same questions, four reader pages, and the frozen 16-bit
+Qwen2-VL-7B-Instruct reader. Four disjoint questions provided warmup
+in each fresh worker process; four measured repetitions per method
+alternated execution order. CUDA synchronization bounded each query
+timer. Both methods recomputed their main GPP graph; CAPP additionally
+recomputed all three auxiliary graphs and its source features and
+reranking. PDF rendering, image selection, and reader processing and
+generation were timed. There was no rendered-document cache across
+questions; filesystem cache state was uncontrolled. Complete graph
+orders and scores, and complete CAPP orders, matched the saved
+references under the validation checks. Validation and initialization
+were outside the query timer.
+
+\begin{table}[tbp]
+    \centering
+    \small
+    \caption{Matched graph-to-answer cost with cached upstream
+    retrieval on 128 questions. Latency statistics use each question's
+    mean over four repetitions. CPU RSS ranges span fresh-worker
+    high-water marks, including initialization, inputs and validation
+    references; they are not incremental scorer memory.}
+    \label{tab:graph-to-answer-cost}
+    \begin{tabularx}{\linewidth}{@{}Yrr@{}}
+        \toprule
+        Measurement & GPP & CAPP \\
+        \midrule
+        Mean latency (s) & 3.942 & 4.703 \\
+        Median latency (s) & 3.565 & 4.287 \\
+        95th-percentile latency (s) & 5.941 & 7.916 \\
+        Serial throughput (questions/s) & 0.254 & 0.213 \\
+        CPU peak RSS range (GiB) & 4.99--5.43 & 6.45--6.80 \\
+        GPU peak allocated (GiB) & 19.37 & 19.37 \\
+        GPU peak reserved (GiB) & 24.72 & 24.72 \\
+        \bottomrule
+    \end{tabularx}
+\end{table}
+
+CAPP added 0.761\,s per question, or 19.3\%, within this measured
+boundary. Ranking averaged 0.098\,s for GPP and 0.605\,s for CAPP;
+image preparation averaged 1.451\,s and 1.717\,s, respectively.
+Reader processing and generation averaged 2.393\,s and 2.381\,s.
+The additional time therefore is not attributable only to the
+logistic scorer. No answer varied across repetitions within either
+method. The GPU peak values were equal in this workload, while CPU
+high-water marks were higher for CAPP. These observations are not
+full-corpus serving-memory requirements or evidence that the methods
+have equal GPU requirements under other workloads.
+
+This comparison starts from cached dense and sparse rankings. It
+excludes query encoding/search, Exact MaxSim and legacy approximate
+MaxSim scoring, and offline indexing. Thus, the measured difference
+includes auxiliary graph generation but not the upstream retrieval
+needed to supply those graphs; it is not full online query-to-answer
+overhead. The timing subset does not replace the full-development-set
+QA evaluation.
 ~~~
 
 ## 10. Add reader-budget sensitivity
@@ -521,12 +581,17 @@ content-only or entirely hyperlink-free system. The feature ablations
 characterize the selected families, not an exhaustive search over
 possible representations.
 
-The CPU benchmark measures CAPP with cached upstream inputs. It does not
-measure end-to-end latency, auxiliary-ranking construction, or incremental
-memory relative to GPP alone. The whole-process memory observation must
-not be interpreted as the scorer's additional memory requirement.
-Broader accuracy--cost comparisons require matched hardware and timing
-boundaries across systems. Our reader-budget analysis varies $k$ while
+The CPU-only benchmark measures CAPP with cached upstream inputs. The
+additional matched graph-to-answer experiment includes auxiliary graph
+construction and reader execution, but still excludes dense and sparse
+query encoding/search and both dense scoring routes. Neither experiment
+establishes full online query-to-answer latency. Fresh-worker CPU RSS
+and GPU allocated/reserved peaks characterize the declared benchmark,
+not isolated scorer memory or full-corpus deployment requirements.
+The timing subset, image-cache policy and uncontrolled filesystem cache
+also limit generalization. Broader accuracy--cost comparisons require
+matched hardware and timing boundaries across systems.
+Our reader-budget analysis varies $k$ while
 holding the trained scorer, blend weight, and rankings fixed; it does
 not test budget-specific optimization or establish the same behavior
 for other readers.
@@ -584,10 +649,10 @@ Add this entry once to references.bib. Keep the existing Burges2010LambdaMART, N
 
 1. The graph replay precheck is complete: job 15911730 matched all four branches
    on all 16 sampled questions. It is not a full-cohort or timing result.
-2. Run and inspect the prepared controlled graph-to-answer benchmark described
-   in `notes/racs_graph_reader_runtime_protocol.md`. It starts from cached
-   retrieval results; online retrieval/scoring must still be integrated before
-   claiming a complete query-to-answer comparison. No pending result is invented.
+2. The graph-to-answer benchmark completed in job 15911732 and its supplied
+   summaries are incorporated in step 9. Preserve the raw reports. Online
+   retrieval/scoring must still be integrated before claiming a complete
+   query-to-answer comparison; this partial result does not close that gap.
 3. Have the advisor review the recovered full-model inputs and the explicit
    tuning limitation. The author has already said the selection split is not
    remembered; repeating the question is not a substitute for evidence.
@@ -596,8 +661,13 @@ Add this entry once to references.bib. Keep the existing Burges2010LambdaMART, N
 
 ## Source snapshots
 
-This packet reuses the checked fragments below; it is not a new set of
-experimental results. Source hashes identify the precise draft snapshots.
+The original fragments came from the snapshots below. Step 9 and the runtime
+limitations now additionally incorporate job 15911732, documented in
+`notes/racs_graph_reader_runtime_protocol.md`, from the author's pasted output
+`/Users/hoseinerfan/.codex/attachments/7b8bc269-b11b-4862-baac-93a20ac3524d/pasted-text.txt`.
+The older guides do not contain this newly completed experiment; use this
+consolidated packet for the current runtime insertion. Source hashes identify
+the original draft snapshots, not the later packet amendments.
 
 
 - notes/racs_manual_revisions_runtime_budget_control.md — SHA-256 e5c54767fafe918b7c67bb73fd2afa75a968c51e06de0ebf97467069739d331c

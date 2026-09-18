@@ -9,7 +9,7 @@ was edited. Nothing has been sent to the advisor or conference.
 | Reviewer request | Evidence / revision available | Remaining condition |
 | --- | --- | --- |
 | R1.1: feature selection and relation to prior work | Corrected 5/4/6/15 feature-family description; explicit rationale; distinction between established ranking/fusion ideas and the study's selected feature set | Author review and manual insertion; no claim of exhaustive feature search |
-| R1.2: actual cost after GPP | Validated cached-input CPU benchmark: 196.2 ms/query, feature-stage breakdown, throughput and whole-process memory | Only partial coverage: end-to-end GPP-versus-CAPP latency and incremental memory are not measured |
+| R1.2: actual cost after GPP | Cached-input CPU CAPP: 196.2 ms/query. Matched graph-to-answer job 15911732: GPP 3.942 s / CAPP 4.703 s, 128 qids, four repeats, A100 80GB; auxiliary graphs timed, fresh-worker CPU/GPU peaks reported | Partial pipeline only: dense/SPLADE retrieval and scoring are excluded. Whole-worker RSS is not isolated incremental scorer memory. Manual insertion is ready |
 | R1.3: competitive reranker under common pool and reader budget | Saved top-1000 BGE, monoT5 and LambdaMART retrieval reports confirmed; BGE job 15911612 completed with candidate/cohort/selected-page validation, 2441 questions, four pages each, 37.85 EM / 43.89 F1 | Manual table ready; alpha-selection provenance and matched total cost remain separate; no matched LambdaMART/monoT5 QA is reported |
 | R1.4: lightweight architecture trade-offs | Scorer-capacity explanation; distinction between parameter count and feature cost; expanded ablation/QA results | Do not claim a demonstrated speed advantage over neural baselines or causal coefficient interpretation |
 | R1.5: systematic feature ablation | Six variants verified, including removal of each of four families; fixed alpha 0.40; missing structure + content QA row supplied | Literal auxiliary-source filenames for historical source-bearing ablations are not established by matching main input paths |
@@ -57,9 +57,12 @@ The following files remain the supporting evidence and original draft guides.
   selection split/criterion. BGE's alpha-0.20 selection provenance is also open.
   The author answered "I am not sure" on September 18; the packet therefore
   does not present training-only tuning as established fact.
-- **Scope of runtime evidence:** the CPU result is validated but is not a full
-  pipeline overhead comparison. A statement of remaining scope is necessary;
-  it does not by itself fully satisfy R1.2.
+- **Scope of runtime evidence:** the CPU-stage result and now-completed matched
+  graph-to-answer comparison are validated within their declared boundaries.
+  The latter reports +0.761 s (+19.3%) for CAPP, but starts at cached dense/sparse
+  rankings, including the distinct legacy auxiliary input. Neither establishes
+  full online pipeline overhead or isolated scorer memory; R1.2 is not fully
+  closed by relabeling these partial measurements.
 - **Baseline result:** accounting and `BGE_READER_RESULT` confirm the completed
   BGE reader run and its output checks. This adds one competitive baseline's
   matched-cohort/four-page QA, not statistical significance or evidence of
@@ -76,12 +79,13 @@ review the provenance questions with the advisor. The runtime audit JSON is
 now inspected and the legacy dense core settings are confirmed. Job 15911730
 passed the 16-question/four-graph replay: every full order and score comparison
 matched within its declared tolerance. This is not the benchmark itself.
-The next prepared job measures graph-to-answer on 128 fixed questions, including
-CAPP's three auxiliary graph computations and the four-page reader on one GPU.
-It uses cached upstream rankings and explicitly excludes dense/SPLADE retrieval
-and scoring, so it does not close the online end-to-end runtime request.
-See `notes/racs_graph_reader_runtime_protocol.md`; no timing result is claimed
-before that job succeeds and its validation/measurement output is inspected.
+Job 15911732 subsequently completed graph-to-answer timing on 128 fixed questions,
+including CAPP's three auxiliary graphs and the four-page reader on one A100.
+Its supplied summaries reconcile and its reported status confirms validation.
+The new result is ready for scoped advisor-draft use; do not repeat that job.
+It explicitly excludes dense/SPLADE retrieval and scoring, so it does not close
+the online end-to-end runtime request. See
+`notes/racs_graph_reader_runtime_protocol.md` for results and evidence boundaries.
 After manual insertion, send the advisor the first compiled revision with
 this concise list of remaining decisions. Further training is not needed for
 these writing changes or to use the completed BGE run. Any new controlled

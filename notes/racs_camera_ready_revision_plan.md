@@ -40,16 +40,20 @@ legacy dense input's approximate MaxSim / 224-token / query-mean / global-topk
 settings in all 2441 rows. Graph replay job 15911730 completed (0:0, 31 seconds,
 node011): all four branches matched candidate sets, full orders and scores
 within tolerance on all 16 sampled questions. This is not full-cohort replay
-or a timing result. A controlled, cached-retrieval graph-to-answer benchmark
-is now prepared in `examples/sbatch_racs_graph_reader_runtime.sh`; its explicit
-partial-pipeline scope and remaining online-retrieval work are described in
-`notes/racs_graph_reader_runtime_protocol.md`. No new timing result exists yet.
+or a timing result. The subsequent controlled graph-to-answer benchmark is now
+complete: job 15911732, exit 0:0, gpu009, A100 80GB PCIe. On 128 fixed questions
+and four repeats, GPP averages 3.942 s and CAPP 4.703 s (+0.761 s, +19.3%).
+The validated status and memory/latency summaries were supplied by the author;
+the raw per-query JSON has not been recomputed locally. Step 9 of the manual
+packet now includes these results. Its explicit cached-retrieval scope and
+remaining online-retrieval work are recorded in
+`notes/racs_graph_reader_runtime_protocol.md`; this is not full online timing.
 
 ## Status and priorities
 
 | Priority | Review request | Status / next action |
 | --- | --- | --- |
-| 1 | R1: cost of CAPP and sensitivity to reader budget | Reader QA at k=1,2,8 complete; reuse original k=4. Cached-input CPU benchmark validated in job 15908770 (196.2 ms/query). End-to-end latency and incremental memory claims remain unverified. |
+| 1 | R1: cost of CAPP and sensitivity to reader budget | Reader QA at k=1,2,8 complete; reuse original k=4. Cached-input CPU stage: 196.2 ms/query. Matched graph-to-answer job 15911732 completed: GPP 3.942 s / CAPP 4.703 s on 128 qids, four repeats, A100 80GB; fresh-worker CPU/GPU peaks recorded. Online retrieval/scoring remains excluded; isolated incremental scorer memory is not established. |
 | 2 | R2: labeler/content-feature coupling and gold-page injection | Job 15910645 completed: 2188 matched questions, four pages each, EM 44.06 / F1 51.39. GPP/CAPP matched-subset F1: 42.34 / 44.54. Ready for scoped diagnostic write-up; not independent human-gold validation. |
 | 3 | R1: stronger reranking baselines | Saved LambdaMART/BGE/monoT5 reports match the thesis. LambdaMART is LightGBM LambdaRank with 40 features. BGE/monoT5 rerank 1000 pages. BGE job 15911612 completed and validated: 2441 questions, four pages each, EM 37.85 / F1 43.89. Manual comparison ready; BGE blend-selection provenance and matched total cost remain unresolved. |
 | 4 | R1/R2: systematic ablation and missing comparison row | Six ablation QA runs rescored on identical 2441 qids with four pages each; saved retrieval reports now confirm page@4/page@10 too. Manual expanded table is ready. Models use fixed alpha 0.40 and matching recorded main inputs/settings apart from feature subset. Literal auxiliary-source paths remain unaudited for source-bearing ablations. |
