@@ -1,11 +1,12 @@
 # RACS: closing the remaining revision items
 
-Updated 2026-09-17 after the author requested all remaining items.
+Updated 2026-09-18 after the author requested all remaining items.
 This plan does not change Overleaf or launch remote jobs automatically.
 
 ## 1. BGE reader result
 
-Job 15911612 is submitted; the last reported state was pending for priority.
+Job 15911612 is submitted; the last reported state was running on gpu009.
+Completion and the final scores have not yet been provided.
 The author runs HPC commands and shares results. Check accounting, the end of
 the job's stdout/stderr, and its `BGE_READER_RESULT` marker before inserting
 EM/F1. Do not submit a duplicate. The prepared runtime inventory also reads
@@ -53,7 +54,7 @@ The existing 196.2 ms/query result is a valid cached-input CAPP measurement,
 not a full query-to-answer benchmark. Do not sum historical timers recorded
 on different nodes into a purported end-to-end comparison.
 
-### Immediate prerequisite audit (prepared; not yet run)
+### Prerequisite audit (job 15911623 completed)
 
 `examples/sbatch_racs_runtime_prerequisites.sh` requests one CPU and 64 GB on
 `compute`, with a 30-minute cap. It loads the four graph artifacts one at a
@@ -67,6 +68,36 @@ timing fields remain labeled as unverified in scope. Missing recorded paths
 may be optional/unused and must be interpreted with the saved graph mode.
 Large metadata files skipped by the size limit are reported as unread, not
 absent. The current graph wrapper defaults are not treated as historical truth.
+
+User-provided audit output now confirms job 15911623 completed with exit 0:0
+in 20 seconds on node011. All four graph artifacts exist and their qid sets
+match the 2,441-question gold file; no missing direct recorded dependency paths
+were reported. Evidence:
+`/Users/hoseinerfan/.codex/attachments/edc16373-5d03-4af8-b94c-e65a5b8f14c6/pasted-text.txt`.
+
+Important configuration distinctions from that output:
+
+- The main base uses `mmqa_dev_exact_maxsim_nprobe4_ret1000.prediction.json`
+  and final selection `score`.
+- All three auxiliary rankings instead use
+  `mmqa_dev_plain_top224_nprobe4_effdiag_all.prediction.json` and final
+  selection `mmr_doc_diverse`. Their graph input/output limits are still
+  1,000 pages; the filename alone does not establish a different graph limit.
+- The shared sparse artifact's saved summary identifies
+  `naver/splade-cocondenser-ensembledistil`, top 1,000 pages and 32 query terms.
+  This is not the earlier recollection of SPLADE v3. Preserve the recorded
+  checkpoint identity unless more direct evidence establishes stale metadata;
+  do not silently substitute a v3 artifact in a reproduction or benchmark.
+- The legacy dense prediction file exists, but its expected same-stem summary
+  is absent. This is a provenance gap, not a missing ranking file.
+
+These checks establish available artifacts and recorded configuration, not
+recomputed graph equivalence, transitive model/index availability, or a runtime
+result. The full report on HPC is
+`output/racs_runtime_audit_15911623/prerequisites.json`. Transfer that report
+for local inspection of complete graph settings, varying metadata keys and
+tuning records; no duplicate audit is needed. The pasted filtered output
+contains no BGE completion marker or alpha-tuning records.
 
 ### Benchmark design after prerequisite verification
 
@@ -105,7 +136,8 @@ absent. The current graph wrapper defaults are not treated as historical truth.
    results merely because a timing run generates new answers.
 
 The actual paired benchmark launcher is not yet implemented: reconstructing
-the upstream branches depends on the audit. This is a concrete outstanding
+the upstream branches requires inspecting the complete audit report and
+resolving the legacy dense configuration. This is a concrete outstanding
 step, not evidence that the runtime reviewer request is complete.
 
 Local verification: five audit unit tests cover question-ID conflicts, graph
@@ -128,21 +160,19 @@ float placement, and page limit, then share the first draft with the advisor.
 If the author wants direct work on a separate manuscript copy, that needs an
 explicit change to the earlier manual-only instruction.
 
-## HPC handoff after pushing
+## Next handoff: transfer the completed audit report
+
+No second audit submission is needed. In a new local Mac terminal (not inside
+the HPC SSH session), copy the existing report:
 
 ~~~bash
-cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
-if [ "$(git branch --show-current)" = "codex/mmdocir-hpc-workflow" ]; then
-  git pull --ff-only origin codex/mmdocir-hpc-workflow &&
-  mkdir -p output &&
-  sbatch examples/sbatch_racs_runtime_prerequisites.sh
-else
-  echo "Stop: unexpected branch."
-  git branch --show-current
-fi
+scp -o 'User=aerfanshekooh@jacks.local' \
+  innovator.sdstate.edu:/mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG/output/racs_runtime_audit_15911623/prerequisites.json \
+  /Users/hoseinerfan/Desktop/Clean_M3DocRAG/outputs/racs_runtime_prerequisites_15911623.json
 ~~~
 
-The new commit changes none of the files used by the active BGE reader job;
-pulling it does not require canceling or restarting that job. Return the new
-audit job ID, then its stdout/stderr after completion. Keep the full JSON on
-HPC for targeted follow-up instead of pasting large prediction files.
+This transfers only the audit JSON, not the large predictions. The destination
+was absent at the local check on September 18. Once available, inspect the
+remaining configuration/tuning records directly. Also request BGE job 15911612's
+current state and completion marker separately. Writing-only notes updates
+do not require canceling or restarting that job.

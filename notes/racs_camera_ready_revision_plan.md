@@ -1,6 +1,6 @@
 # RACS camera-ready revision worklist
 
-Updated 2026-09-17. Working notes and proposed manual edits only; no manuscript
+Updated 2026-09-18. Working notes and proposed manual edits only; no manuscript
 or Overleaf archive has been modified. The authoritative manuscript is the
 September 15 ZIP, not the older `ACM_Paper` checkout.
 
@@ -11,14 +11,20 @@ protocol/limitations replacements. Apply manually; no manuscript was edited.
 
 The expanded ablation table and BGE reader-job instructions are in
 [the baseline/ablation guide](racs_manual_revisions_baselines_ablation.md).
-The BGE QA numbers remain pending: HPC job 15911612 was submitted and last
-reported pending for priority. Its completion has not been checked locally.
+The BGE QA numbers remain pending: HPC job 15911612 was last reported running
+on gpu009. Its completion has not been checked locally.
 Feature rationale and consolidated limitations are ready in
 [the feature-rationale guide](racs_manual_revisions_feature_rationale.md), with
 an [advisor/reviewer checklist](racs_reviewer_revision_checklist.md).
 The [remaining execution plan](racs_remaining_execution_plan.md) records the
-new CPU-only prerequisite audit for a faithful pipeline benchmark and the
+CPU-only prerequisite audit for a faithful pipeline benchmark and the
 training-only 20% alpha-selection protocol located in the thesis.
+Audit job 15911623 completed (0:0): all four graph artifacts match the gold qids
+and their direct recorded paths exist. Its saved configurations distinguish
+the Exact MaxSim/score-selection base from legacy dense/MMR auxiliary rankings;
+the shared SPLADE summary names `naver/splade-cocondenser-ensembledistil`, not
+v3. The legacy dense prediction exists but its same-stem summary is missing.
+Full-report inspection and graph replay remain pending before pipeline timing.
 
 ## Status and priorities
 
