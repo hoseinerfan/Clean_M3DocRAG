@@ -39,6 +39,9 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
   GPP as its base and three auxiliary GPP rankings, two with active hyperlink
   edges. This is distinct from the author's recollection of an entirely
   hyperlink-free final system. The no-source ablation is a separate model.
+  Probe 15911725 also confirms an approximate MaxSim dense input with a
+  224-token page budget for the legacy auxiliaries; the main base uses Exact
+  MaxSim. The manual protocol now makes this distinction explicit.
 - **Alpha selection:** fixed 0.40 is verified; held-out-training selection and
   subsequent final retraining are not established by the available final
   artifacts. The thesis explicitly documents a training-only 20% holdout,
@@ -63,8 +66,9 @@ R1 has six numbered requests; R2 adds label-coupling and naming/comparison issue
 
 Integrate the manual prose/ablation and now-complete BGE QA comparison, and
 review the provenance questions with the advisor. The runtime audit JSON is
-now inspected; check the legacy dense prediction's embedded metadata and
-verify a small replay before constructing a faithful pipeline benchmark.
+now inspected and the legacy dense core settings are confirmed. The prepared
+16-question/four-graph replay is the next check before a faithful pipeline
+benchmark; it is not the benchmark itself.
 After manual insertion, send the advisor the first compiled revision with
 this concise list of remaining decisions. Further training is not needed for
 these writing changes or to use the completed BGE run. Any new controlled

@@ -27,8 +27,10 @@ the shared SPLADE summary names `naver/splade-cocondenser-ensembledistil`, not
 v3. The legacy dense prediction exists but its same-stem summary is missing.
 The transferred full report has now been inspected: all four graphs have 1000
 entries for every question. Matching-input alpha-0.35/0.40/0.45 artifacts exist,
-but their tuning summaries are null. Embedded legacy-dense metadata and a
-small faithful replay remain to be checked before pipeline timing.
+but their tuning summaries are null. Probe job 15911725 now confirms the
+legacy dense input's approximate MaxSim / 224-token / query-mean / global-topk
+settings in all 2441 rows. A 16-question, four-graph replay is prepared as the
+next validation step; it has not run on HPC and is not a timing experiment.
 
 ## Status and priorities
 

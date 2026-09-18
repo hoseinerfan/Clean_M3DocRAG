@@ -106,7 +106,12 @@ configuration, not a recovered original training command:
 For full CAPP on GPP, the base candidate ranking is the Exact MaxSim GPP
 variant without hyperlink edges. The source features additionally
 summarize three auxiliary GPP rankings: a no-hyperlink variant, a
-document-hyperlink variant, and a page-hyperlink variant. Thus the
+document-hyperlink variant, and a page-hyperlink variant. These auxiliary
+rankings use a legacy approximate MaxSim dense input with a 224-token
+page budget (\texttt{query\_mean} token scoring and
+\texttt{global\_topk} selection), followed by document-diverse MMR
+selection; the main base instead uses Exact MaxSim and score-based
+selection. Thus the
 no-hyperlink setting describes the base ranking, not the absence of
 hyperlink-derived information throughout full CAPP. These auxiliary
 rankings supply aggregate support features; they do not enlarge the
@@ -119,6 +124,12 @@ all 2,441 saved rankings, and the auxiliary summaries confirm active hyperlink
 edges. This does not recover the literal historical training-source command
 or measure how much the hyperlink-derived information helps. The manuscript
 must not silently describe the original full model as the no-source variant.
+The dense-input distinction was verified in probe job 15911725: every one of
+the 2441 legacy rows records the same approximate-MaxSim settings, with no
+missing core fields. The earlier runtime audit records the different graph
+selection modes. These are evaluation-input findings, not recovery of the
+historical training command. Do not describe the 224-token page budget as a
+224-page candidate limit; the graph input/output depths remain 1000 pages.
 
 ## 3. State the computational and modeling trade-off precisely
 

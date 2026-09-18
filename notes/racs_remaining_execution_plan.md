@@ -106,7 +106,7 @@ within each artifact. This does not establish candidate uniqueness or graph
 replay equivalence. Alpha findings are above; the optional BGE snapshot in this
 earlier report is superseded by the completed-job result in section 1.
 
-The next targeted check is `scripts/probe_racs_legacy_dense.py`: it reads the
+The targeted check `scripts/probe_racs_legacy_dense.py` reads the
 exact legacy prediction path recorded in the audit, verifies its question-set
 digest, and groups embedded configuration across all rows. If a same-stem
 detail JSONL exists, it reports only the first nonblank row's configuration,
@@ -114,6 +114,23 @@ explicitly without asserting that file is from the same run. No training,
 retrieval, prediction modification, or report-file writing occurs. Four local
 tests cover read-only behavior, cohort mismatch, configuration variation and
 the limited companion-file scope.
+
+The author ran this probe as srun job 15911725 and supplied its output:
+`/Users/hoseinerfan/.codex/attachments/b7838225-42ce-47cf-a38f-d7f8603042be/pasted-text.txt`.
+All 2441 legacy prediction rows match the gold cohort and have the same four
+recorded core settings: `base_score_source=approx_page_maxsim_topk`,
+`approx_base_page_token_topk=224`, scorer `query_mean`, selector `global_topk`.
+No core field is missing. This is now direct saved-metadata evidence, not an
+inference from the filename. The same-stem detail JSONL exists; its first row
+additionally records adaptive-k disabled, fp32 coarse scoring, batch size 0
+and diagnostics enabled. That first-row-only check does not prove the detail
+file's whole-cohort identity with the prediction artifact.
+
+Consequently the main base uses Exact MaxSim, while the reproducing CAPP
+auxiliary inputs originate from the legacy approximate 224-page-token-budget
+route. Do not silently substitute Exact MaxSim for that route when timing the
+historical full system, or relabel the main base as approximate. This resolves
+the core scoring identity, not every original invocation/environment setting.
 
 ### Benchmark design after prerequisite verification
 
@@ -151,11 +168,27 @@ the limited companion-file scope.
    any reader answer variation; do not replace the paper's established QA
    results merely because a timing run generates new answers.
 
-The actual paired benchmark launcher is not yet implemented. The complete
-audit report is inspected, but the legacy dense configuration still needs its
-embedded metadata checked and a small replay validated. Current wrapper
-defaults suggest a compact-MaxSim route; they are not proof of what produced
-the saved file. This remains an outstanding step, not a completed benchmark.
+The actual paired end-to-end benchmark launcher is not yet implemented.
+The legacy dense core configuration is now verified from saved metadata.
+The next prepared experiment is `validate_racs_graph_replay.py`, launched by
+`examples/sbatch_racs_graph_replay.sh`: 16 qids chosen by a fixed hash order,
+independent of outcomes, shared by the main and all three auxiliary graphs.
+It uses recorded graph settings and cached original dense/sparse predictions;
+compares all 1000 ordered page IDs and scores for each query/branch; and
+writes only a new diagnostic report. Score tolerance is rtol=1e-6, atol=1e-8,
+with exact candidate order required. Any mismatch produces a nonzero exit.
+Gold labels/answers are not passed into ranking.
+
+The graph artifacts omit some newer CLI settings. The replay supplies only an
+explicit compatibility map, recorded in the report (four applied fields for
+the main base, 29 for each legacy branch), including disabled optional extra
+inputs and fixed PPR iterations. Unlisted missing settings are rejected.
+These are replay hypotheses, not recovered historical settings. A sample
+match would validate this sample's outputs under them, not prove the original
+command or all-question equivalence. The replay does not regenerate dense or
+sparse retrieval, run CAPP/reader inference, or measure full runtime/memory.
+Seven local tests and a settings-materialization check on all four audited
+configurations passed; no HPC replay success is claimed yet.
 
 Local verification: five audit unit tests cover question-ID conflicts, graph
 configuration variation, absent/oversized metadata, output isolation and
@@ -197,25 +230,26 @@ explicit change to the earlier manual-only instruction.
 - Keep new experimental tables separate from the original main-result rows.
   The guides contain draft insertions, not a finished compiled camera-ready.
 
-## Next handoff: inspect embedded legacy-dense metadata
+## Next handoff: small graph replay
 
-After the new probe and notes are pushed, run in the HPC terminal:
+The metadata probe is complete; do not repeat it. After the new replay files
+and notes are pushed, run in the HPC terminal:
 
 ~~~bash
 cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG
 if [ "$(git branch --show-current)" = "codex/mmdocir-hpc-workflow" ]; then
   git pull --ff-only origin codex/mmdocir-hpc-workflow &&
-  srun --partition=compute --nodes=1 --ntasks=1 \
-    --cpus-per-task=1 --mem=16G --time=00:10:00 \
-    env/bin/python -B scripts/probe_racs_legacy_dense.py \
-      --audit-json output/racs_runtime_audit_15911623/prerequisites.json
+  mkdir -p output &&
+  sbatch examples/sbatch_racs_graph_replay.sh
 else
   echo "Stop: unexpected branch."
   git branch --show-current
 fi
 ~~~
 
-Paste the compact printed JSON. No GPU is needed. Do not repeat the previous
-audit or any accuracy run. This metadata probe is not itself a runtime
-benchmark; only after it and replay verification can timing be interpreted
-as measuring the intended historical system.
+Share the returned job ID. After completion, check accounting and
+`output/racs_graph_replay_JOBID.out` / `.err`; the full report will be
+`output/racs_graph_replay_JOBID/replay.json`. We expect four `GRAPH_REPLAY`
+lines, each with 16 complete-order and score matches. No GPU or retraining is
+needed. A passing result is a step toward the pipeline benchmark, not that
+benchmark's completion.
