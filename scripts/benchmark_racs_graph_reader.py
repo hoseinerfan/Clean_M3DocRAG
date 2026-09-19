@@ -189,14 +189,17 @@ def prepare(audit_path, replay_path, run_dir, count, warmup):
                    "validation_policy": "outside query timer; every regenerated 1000-page graph order+scores and full CAPP order must match; failed workers do not produce a validated aggregate"}
 
 
-def rank_query(bundle, qid, catalogs, links, pages, model_state):
+def rank_query(bundle, qid, catalogs, links, pages, model_state, online_inputs=None):
     stages, regenerated = {}, {}
     for label, entry in bundle["graphs"].items():
         args = SimpleNamespace(**entry["settings"])
         start = time.perf_counter()
+        # Online mode MUST consume newly retrieved rows; missing keys fail rather
+        # than silently substituting cached references.
+        inputs = bundle["inputs"] if online_inputs is None else online_inputs
         rows, _ = replay.graph.build_qid_graph_ranking(
-            qid=qid, dense_row=bundle["inputs"][entry["inputs"]["dense"]][qid],
-            sparse_row=bundle["inputs"][entry["inputs"]["sparse"]][qid], args=args,
+            qid=qid, dense_row=inputs[entry["inputs"]["dense"]][qid],
+            sparse_row=inputs[entry["inputs"]["sparse"]][qid], args=args,
             doc_page_catalog=catalogs[args.doc_pages_jsonl],
             pdf_hyperlink_graph=links.get(args.pdf_hyperlink_edges_jsonl), gold_row=None)
         stages["graph:" + label] = time.perf_counter() - start
@@ -263,6 +266,13 @@ def worker(bundle_path, output_path, pass_index):
     started = time.perf_counter()
     cli = SimpleNamespace(data_name="m3-docvqa", split="dev", bits=16, model_name_or_path="Qwen2-VL-7B-Instruct")
     dataset = qa.M3DocVQADataset(qa.make_dataset_args(cli))
+    upstream = None
+    upstream_preparation_seconds = 0.0
+    if "online" in bundle:
+        from benchmark_racs_online import OnlineRetriever
+        online_started = time.perf_counter()
+        upstream = OnlineRetriever(bundle, dataset)
+        upstream_preparation_seconds = time.perf_counter() - online_started
     model_path = qa.resolve_model_path(cli.model_name_or_path)
     if not model_path.is_dir():
         raise FileNotFoundError(model_path)
@@ -281,7 +291,10 @@ def worker(bundle_path, output_path, pass_index):
     def one(qid):
         torch.cuda.synchronize()
         start = time.perf_counter()
-        selected, order, regenerated, stages = rank_query(bundle, qid, catalogs, links, pages, model_state)
+        inputs, upstream_stages = upstream.retrieve(qid) if upstream else (None, {})
+        retrieved = time.perf_counter()
+        selected, order, regenerated, stages = rank_query(bundle, qid, catalogs, links, pages, model_state, inputs)
+        stages.update(upstream_stages)
         ranked = time.perf_counter()
         # No persistent document cache: same declared image-cache policy for both.
         rendered, images = {}, []
@@ -299,12 +312,17 @@ def worker(bundle_path, output_path, pass_index):
         finished = time.perf_counter()
         stages.update(ranking_total=ranked - start, image_preparation=imaged - ranked,
                       reader_prompt_preprocess_generate=finished - imaged, total=finished - start)
+        if upstream:
+            stages.update(online_retrieval_total=retrieved - start, graph_and_capp_total=ranked - retrieved)
         # Validation and JSON serialization are deliberately outside the timer.
+        if upstream:
+            upstream.validate(qid, inputs)
         validate_rankings(bundle, qid, order, regenerated)
         if len(selected) != 4 or len({(r[0], int(r[1])) for r in selected}) != 4:
             raise ValueError("Exactly four unique pages required")
         return {"qid": qid, "seconds": stages, "answer": answer,
-                "selected_pages": [[r[0], int(r[1])] for r in selected], "ranking_checks_passed": True}
+                "selected_pages": [[r[0], int(r[1])] for r in selected], "ranking_checks_passed": True,
+                **({"upstream_checks_passed": True} if upstream else {})}
 
     for qid in bundle["warmup_qids"]:
         one(qid)
@@ -317,7 +335,8 @@ def worker(bundle_path, output_path, pass_index):
             print(f"GRAPH_READER_PROGRESS pass={pass_index} method={bundle['method']} questions={index}/{len(bundle['measured_qids'])}", flush=True)
     properties = torch.cuda.get_device_properties(0)
     packages = {}
-    for name in ("torch", "transformers", "accelerate", "numpy", "qwen-vl-utils", "flash-attn"):
+    for name in ("torch", "transformers", "accelerate", "numpy", "qwen-vl-utils", "flash-attn",
+                 "colpali-engine", "faiss-cpu", "faiss-gpu", "safetensors"):
         try:
             packages[name] = importlib.metadata.version(name)
         except importlib.metadata.PackageNotFoundError:
@@ -342,6 +361,14 @@ def worker(bundle_path, output_path, pass_index):
                          "image_processor": type(reader.processor.image_processor).__name__,
                          "config_sha256": config_hashes, "checkpoint_weight_bytes_hashed": False},
               "python": sys.version, "packages": packages}
+    if upstream:
+        from benchmark_racs_online import ONLINE_SCOPE, ONLINE_EXCLUDED
+        result.update(status="validated_online_worker", scope=ONLINE_SCOPE, excluded=ONLINE_EXCLUDED,
+                      upstream=upstream.identity)
+        result["preparation_seconds"]["online_retrieval_inputs"] = upstream_preparation_seconds
+        # The previous wall interval includes online preparation; avoid double
+        # counting when reporting the reader/dataset interval separately.
+        result["preparation_seconds"]["reader_and_dataset"] -= upstream_preparation_seconds
     write_new(output_path, result)
     print("GRAPH_READER_WORKER " + json.dumps({"pass": pass_index, "method": bundle["method"], **result["summary"]}), flush=True)
 
@@ -356,8 +383,11 @@ def aggregate(reports, manifest, repeats):
                        "slurm_cpus_per_task", "torch_cpu_threads", "nvidia_smi")
     bundle_hashes = {}
     grouped = defaultdict(list)
+    online = manifest.get("online_retrieval", False)
+    worker_status = "validated_online_worker" if online else "validated_graph_to_answer_worker"
+    timing_scope = manifest["scope"] if online else SCOPE
     for report in reports:
-        if report["status"] != "validated_graph_to_answer_worker" or report["scope"] != SCOPE:
+        if report["status"] != worker_status or report["scope"] != timing_scope:
             raise ValueError("Unvalidated worker or wrong timing scope")
         if (any(report["hardware"][key] != reference_hardware[key] for key in stable_hardware)
                 or report["reader"] != reference_reader or report["packages"] != reference_packages):
@@ -369,6 +399,20 @@ def aggregate(reports, manifest, repeats):
             raise ValueError("Worker question cohorts differ")
         if not all(r["ranking_checks_passed"] for r in report["results"]):
             raise ValueError("Ranking check failed")
+        if online:
+            if not all(r.get("upstream_checks_passed") is True for r in report["results"]):
+                raise ValueError("Online retrieval was not validated")
+            reference = next(r for r in reports if r["method"] == method)
+            if report.get("upstream") != reference.get("upstream") or not report.get("upstream"):
+                raise ValueError("Online retrieval inputs/configuration changed across repeats")
+            if report["upstream"] != reports[0]["upstream"]:
+                raise ValueError("Online retrieval inputs/configuration differ between methods")
+            for row in report["results"]:
+                seconds = row["seconds"]
+                for total, parts in (("total", ("ranking_total", "image_preparation", "reader_prompt_preprocess_generate")),
+                                     ("ranking_total", ("online_retrieval_total", "graph_and_capp_total"))):
+                    if not math.isclose(seconds[total], sum(seconds[key] for key in parts), rel_tol=1e-9, abs_tol=1e-7):
+                        raise ValueError("Online timing boundaries do not reconcile")
         for row in report["results"]:
             if not row["seconds"] or any(not math.isfinite(value) or value < 0 for value in row["seconds"].values()) or row["seconds"]["total"] <= 0:
                 raise ValueError("Invalid timing value")
@@ -390,7 +434,7 @@ def aggregate(reports, manifest, repeats):
                            "qids_with_answer_variation_across_repeats": sum(len({r["results"][i]["answer"] for r in runs}) > 1
                                                                          for i in range(manifest["questions"]))}
     delta = [c - g for c, g in zip(paired["CAPP"], paired["GPP"])]
-    return {"status": "validated_cached_retrieval_graph_to_answer", **manifest, "repeats": repeats,
+    result = {"status": "validated_cached_retrieval_graph_to_answer", **manifest, "repeats": repeats,
             "hardware": reference_hardware, "reader": reference_reader, "packages": reference_packages,
             "methods": methods, "paired_capp_minus_gpp_seconds": {"mean": sum(delta) / len(delta),
                  "per_question": dict(zip(manifest["measured_qids"], delta))},
@@ -401,6 +445,11 @@ def aggregate(reports, manifest, repeats):
                         "GPU reserved-memory peaks include allocator cache retained from warm-up",
                         "OS cache and external node load are not controlled; balanced order does not eliminate all variation",
                         "No significance test, concurrency throughput claim, or checkpoint-weight hash validation"]}
+    if online:
+        result["status"] = "validated_online_query_to_answer"
+        result["upstream_by_method"] = {r["method"]: r["upstream"] for r in reports}
+        result["caveats"][0] = "Online batch-one warm-service timing of this reconstructed implementation; offline indexing and model/index loading are excluded"
+    return result
 
 
 def main():

@@ -3,6 +3,26 @@
 Updated 2026-09-18 after the author requested all remaining items.
 This plan does not change Overleaf or launch remote jobs automatically.
 
+## Current completion target
+
+The author has explicitly removed the first-revision stopping point: finish
+the reviewer requests, then verify the integrated manuscript. Historical
+first-draft wording below describes earlier handoffs, not the present goal.
+The remaining experimental gap is R1.2's full online cost. A separate online
+benchmark is now implemented in `scripts/benchmark_racs_online.py` with launcher
+`examples/sbatch_racs_online_runtime.sh`; see `notes/racs_online_runtime_protocol.md`.
+It performs query encoding, FAISS, exact and required approximate MaxSim,
+SPLADE, graph/CAPP and Qwen inference, with upstream/output equivalence gates.
+Implementation and local tests are complete; HPC execution is **pending**.
+Do not call R1.2 complete until a successful online report is audited.
+
+The independent raw-record audit of job 15911732 has now passed with the same
+3.9422036205 / 4.7029153292 s means and +19.2966% cached-retrieval overhead.
+This is not another measured run and does not change that result's scope.
+All already-validated QA experiments remain reusable; no duplicate BGE, budget,
+injection or feature-ablation run is required. Manual insertion, final PDF QA,
+coauthor review and the final point-by-point response remain after the experiment.
+
 ## 1. BGE reader result
 
 Job 15911612 is complete. On September 18 the author provided `COMPLETED`,

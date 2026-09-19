@@ -8,6 +8,11 @@ insert duplicate fragments from the three earlier guides.
 
 ## What this packet completes—and what it does not
 
+Current target: complete all reviewer requests, not stop at a first revision.
+The online-runtime job is now implemented separately (see
+`notes/racs_online_runtime_protocol.md`) but has not yet produced a result.
+Step 9 remains explicitly partial-pipeline evidence until that job passes.
+
 - It consolidates the completed reader-budget, injection, BGE QA, ablation,
   feature-rationale, scoped CPU-runtime and matched graph-to-answer revisions.
 - It gives explicit configuration wording, including the different main and

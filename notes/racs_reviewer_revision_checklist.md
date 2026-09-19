@@ -1,15 +1,16 @@
-# RACS reviewer-request checklist for the advisor's first revision
+# RACS reviewer-request completion checklist
 
 As of 2026-09-18. This is an internal handoff, not a submitted response letter.
-"Draft ready" means separate manual-insertion text exists, not that Overleaf
-was edited. Nothing has been sent to the advisor or conference.
+The author explicitly changed the target to **all reviewer requests completed**,
+not an advisor-first-draft stopping point. Available manual text is not the same
+as an integrated, checked paper. Nothing has been sent to the advisor/conference.
 
-## Evidence ready for the first revision
+## Evidence available and closure conditions
 
 | Reviewer request | Evidence / revision available | Remaining condition |
 | --- | --- | --- |
 | R1.1: feature selection and relation to prior work | Corrected 5/4/6/15 feature-family description; explicit rationale; distinction between established ranking/fusion ideas and the study's selected feature set | Author review and manual insertion; no claim of exhaustive feature search |
-| R1.2: actual cost after GPP | Cached-input CPU CAPP: 196.2 ms/query. Matched graph-to-answer job 15911732: GPP 3.942 s / CAPP 4.703 s, 128 qids, four repeats, A100 80GB; auxiliary graphs timed, fresh-worker CPU/GPU peaks reported | Partial pipeline only: dense/SPLADE retrieval and scoring are excluded. Whole-worker RSS is not isolated incremental scorer memory. Manual insertion is ready |
+| R1.2: actual cost after GPP | Cached-input CPU CAPP: 196.2 ms/query. Matched graph-to-answer job 15911732: GPP 3.942 s / CAPP 4.703 s; raw-record arithmetic audit also passed | **Open experiment:** online-runtime implementation now includes dense/SPLADE retrieval and both scoring routes, but awaits HPC preflight/measurement. Whole-worker RSS is not isolated incremental scorer memory |
 | R1.3: competitive reranker under common pool and reader budget | Saved top-1000 BGE, monoT5 and LambdaMART retrieval reports confirmed; BGE job 15911612 completed with candidate/cohort/selected-page validation, 2441 questions, four pages each, 37.85 EM / 43.89 F1 | Manual table ready; alpha-selection provenance and matched total cost remain separate; no matched LambdaMART/monoT5 QA is reported |
 | R1.4: lightweight architecture trade-offs | Scorer-capacity explanation; distinction between parameter count and feature cost; expanded ablation/QA results | Do not claim a demonstrated speed advantage over neural baselines or causal coefficient interpretation |
 | R1.5: systematic feature ablation | Six variants verified, including removal of each of four families; fixed alpha 0.40; missing structure + content QA row supplied | Literal auxiliary-source filenames for historical source-bearing ablations are not established by matching main input paths |
@@ -38,7 +39,7 @@ The following files remain the supporting evidence and original draft guides.
    and consolidated Limitations. Its full Limitations replacement supersedes
    the first guide's piecemeal Limitations insertions.
 
-## Must not disappear from the advisor handoff
+## Must remain explicit in the final revision
 
 - **Full-model provenance:** the verified evaluation replay uses no-hyperlink
   GPP as its base and three auxiliary GPP rankings, two with active hyperlink
@@ -72,7 +73,7 @@ The following files remain the supporting evidence and original draft guides.
   tables/references, and check the applicable page limit. No compiled revised
   manuscript exists from these writing-only changes.
 
-## Suggested sequence from here
+## Completion sequence from here
 
 Integrate the manual prose/ablation and now-complete BGE QA comparison, and
 review the provenance questions with the advisor. The runtime audit JSON is
@@ -82,11 +83,29 @@ matched within its declared tolerance. This is not the benchmark itself.
 Job 15911732 subsequently completed graph-to-answer timing on 128 fixed questions,
 including CAPP's three auxiliary graphs and the four-page reader on one A100.
 Its supplied summaries reconcile and its reported status confirms validation.
-The new result is ready for scoped advisor-draft use; do not repeat that job.
+The new result is ready for its declared scoped use; do not repeat that job.
 It explicitly excludes dense/SPLADE retrieval and scoring, so it does not close
 the online end-to-end runtime request. See
 `notes/racs_graph_reader_runtime_protocol.md` for results and evidence boundaries.
-After manual insertion, send the advisor the first compiled revision with
-this concise list of remaining decisions. Further training is not needed for
-these writing changes or to use the completed BGE run. Any new controlled
-end-to-end benchmark is a separate experiment, not something already done.
+The author also supplied `INDEPENDENT_RUNTIME_CHECK_PASSED` from the raw worker
+records. That is a successful aggregation audit, not a new online timing run.
+
+1. Run `examples/sbatch_racs_online_runtime.sh`. The new code performs an upstream
+   equivalence preflight and then paired online timing with fail-closed checks.
+   See `notes/racs_online_runtime_protocol.md`. No online numbers exist yet.
+2. Audit the resulting raw timings and checks. Add only a validated online
+   result to the manual packet and finalize the runtime/architecture discussion.
+3. Apply the prepared feature-rationale, stronger-baseline, family-ablation,
+   budget and injection revisions manually in Overleaf, preserving the explicit
+   source/tuning/label limitations. BGE satisfies R1.3's request for one or more
+   competitive rerankers; missing QA for every other baseline is not a mandatory
+   new experiment.
+4. Finalize the point-by-point response against the actual revised paper;
+   compile, inspect tables/figures/citations/page limits and check every claimed
+   change is present. Obtain coauthor review before final submission.
+
+No retraining is required by these remaining experiments. If online replay
+fails, diagnose that exact mismatch rather than changing the paper configuration
+or treating an unvalidated timer as evidence. Unknown historical alpha selection
+must remain honestly qualified; a new tuning run would be a new experiment,
+not recovered history. The manuscript/ZIP remains untouched by this workflow.
