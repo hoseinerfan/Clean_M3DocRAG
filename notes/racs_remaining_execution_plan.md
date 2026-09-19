@@ -1,6 +1,6 @@
 # RACS: closing the remaining revision items
 
-Updated 2026-09-18 after the author requested all remaining items.
+Updated 2026-09-19 after the first online-runtime attempts failed.
 This plan does not change Overleaf or launch remote jobs automatically.
 
 ## Current completion target
@@ -13,7 +13,12 @@ benchmark is now implemented in `scripts/benchmark_racs_online.py` with launcher
 `examples/sbatch_racs_online_runtime.sh`; see `notes/racs_online_runtime_protocol.md`.
 It performs query encoding, FAISS, exact and required approximate MaxSim,
 SPLADE, graph/CAPP and Qwen inference, with upstream/output equivalence gates.
-Implementation and local tests are complete; HPC execution is **pending**.
+Jobs 15911849 and 15911871 both failed. The first log identifies an incorrect
+inner-product-only index guard in the new benchmark, before timing. The fix
+preserves the saved FAISS metric (L2 or IP), records it separately from the
+embedding-dot page scoring, and leaves all ranking replay gates unchanged.
+The second detailed log was not supplied. One fresh execution after pulling
+the correction is **pending**; old failure reports remain untouched.
 Do not call R1.2 complete until a successful online report is audited.
 
 The independent raw-record audit of job 15911732 has now passed with the same

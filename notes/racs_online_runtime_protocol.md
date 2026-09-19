@@ -1,8 +1,38 @@
 # RACS: full online runtime completion protocol
 
-Prepared September 18, 2026. Implementation ready for HPC execution; **no online
-timing result exists yet**. The goal is to close R1.2, not stop at a first draft.
+Prepared September 18, updated September 19, 2026 after the first failed attempts.
+**No validated online timing result exists yet.** The goal is to close R1.2,
+not stop at a first draft.
 Original paper/Overleaf files and old experiment outputs are not modified.
+
+## September 19 correction: preserve the saved FAISS search metric
+
+The author supplied accounting for two attempts: 15911849 failed with exit 1:0
+after 2:11 on gpu004; 15911871 failed with exit 1:0 after 2:05 on gpu010.
+The first job's traceback/preflight report identifies the benchmark's incorrect
+`Expected an inner-product FAISS index` guard. The second job's detailed log was
+not supplied, so its precise failure cause is not independently confirmed.
+Neither produced evidence of successful online timing.
+
+The repository's `examples/run_indexing_m3docvqa.py` creates an IP quantizer but
+calls `IndexIVFFlat(quantizer, d, ncentroids)` without the metric argument. The
+[official FAISS constructor documentation](https://faiss.ai/cpp_api/struct/structfaiss_1_1IndexIVFFlat.html)
+specifies L2 as that argument's default. Separately, `RAGModelBase` uses the
+loaded index for candidate-token search and recomputes candidate scores from
+embedding dot products when the token table is supplied. An embedding-dot page
+score therefore does not prove an inner-product IVF search metric. The supplied
+exception establishes a non-IP index, not its numeric metric; the next run logs
+that metric explicitly before loading the corpus.
+
+The benchmark now accepts L2 or inner-product search on the existing index,
+records the search and quantizer metrics separately, and preserves both. It
+does not rebuild the index, overwrite its metric, reinterpret L2 distances as
+page scores, or change candidate-order/score validation. Unsupported metrics
+still fail. New regressions cover an L2 IVF index with an IP quantizer, an IP
+index, and rejection of unsupported metrics/invalid search settings.
+
+Submit **one** new attempt after pulling the fix. Further upstream replay checks
+still have to pass; this correction alone does not establish output equivalence.
 
 ## What this job measures
 
@@ -40,7 +70,8 @@ legacy approximate dense output. The existing entry points do not encode every
 historical launch choice in those outputs. The new manifest explicitly records:
 
 - Local ColPali backbone `colpaligemma-3b-pt-448-base` plus adapter `colpali-v1.2`;
-  full query tokens, no PAD-score removal; embedding-dot FAISS scoring.
+  full query tokens, no PAD-score removal; preserve the loaded FAISS search
+  metric and separately recompute embedding-dot page scores.
 - GPU baseline query encoder and CPU page-scoring query encoder, following the
   current baseline and visual-reranking code paths. Two encoder replicas remain
   resident. Both query encodings are charged to both methods; exact/legacy reuse

@@ -30,6 +30,42 @@ def exact_config():
 
 
 class OnlineBenchmarkTests(unittest.TestCase):
+    def test_l2_ivf_with_ip_quantizer_keeps_both_metrics(self):
+        faiss = SimpleNamespace(METRIC_INNER_PRODUCT=0, METRIC_L2=1)
+        quantizer = SimpleNamespace(metric_type=faiss.METRIC_INNER_PRODUCT)
+        index = SimpleNamespace(metric_type=faiss.METRIC_L2, quantizer=quantizer, nprobe=1)
+        actual = online.configure_faiss_index(index, faiss, 4)
+        self.assertEqual(index.metric_type, faiss.METRIC_L2)
+        self.assertEqual(quantizer.metric_type, faiss.METRIC_INNER_PRODUCT)
+        self.assertEqual(index.nprobe, 4)
+        self.assertEqual(actual["metric_name"], "l2")
+        self.assertEqual(actual["quantizer_metric_name"], "inner_product")
+        self.assertEqual(actual["saved_nprobe"], 1)
+        self.assertEqual(actual["page_score_source"], "embedding_dot_product_not_faiss_distance")
+
+    def test_ip_ivf_remains_supported_without_metric_conversion(self):
+        faiss = SimpleNamespace(METRIC_INNER_PRODUCT=0, METRIC_L2=1)
+        index = SimpleNamespace(metric_type=faiss.METRIC_INNER_PRODUCT, nprobe=1)
+        actual = online.configure_faiss_index(index, faiss, 4)
+        self.assertEqual(index.metric_type, faiss.METRIC_INNER_PRODUCT)
+        self.assertEqual(actual["metric_name"], "inner_product")
+        self.assertIsNone(actual["quantizer_metric_type"])
+
+    def test_unknown_metric_non_ivf_and_invalid_nprobe_still_fail(self):
+        faiss = SimpleNamespace(METRIC_INNER_PRODUCT=0, METRIC_L2=1)
+        unknown = SimpleNamespace(metric_type=99, nprobe=1)
+        with self.assertRaisesRegex(ValueError, "Unsupported saved FAISS search metric: 99"):
+            online.configure_faiss_index(unknown, faiss, 4)
+        self.assertEqual(unknown.nprobe, 1)
+        self.assertEqual(unknown.metric_type, 99)
+        with self.assertRaisesRegex(ValueError, "Expected an IVF"):
+            online.configure_faiss_index(SimpleNamespace(metric_type=1), faiss, 4)
+        for nprobe in (0, -1, 4.5, True):
+            index = SimpleNamespace(metric_type=1, nprobe=1)
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                online.configure_faiss_index(index, faiss, nprobe)
+            self.assertEqual(index.nprobe, 1)
+
     def test_configuration_rejects_missing_or_different_historical_settings(self):
         online.check_exact_configuration(exact_config())
         for change in ({"query_token_filter": "semantic_only"}, {"fixed_weights": {}}, {"base_only_page_batch_size": 0}):

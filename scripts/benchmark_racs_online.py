@@ -120,7 +120,7 @@ def prepare_online(audit_path, replay_path, run_dir, count, warmup):
     manifest["input_sha256"][config["splade_index"]] = bench.replay.sha256(config["splade_index"])
     assumptions = [
         "Original complete upstream launch commands are not recovered; require output equivalence instead of assuming defaults prove history",
-        "FAISS IVFFlat nprobe=4, embedding-dot scores, full query tokens, PAD scores retained; backbone/adapter are explicit repository-wrapper choices",
+        "FAISS IVFFlat nprobe=4, serialized search metric preserved, embedding-dot page scores recomputed separately, full query tokens, PAD scores retained; backbone/adapter are explicit repository-wrapper choices",
         "Baseline query encoder on GPU, scoring query encoder on CPU, matching the current baseline/visual-rerank entry points; two resident encoder replicas",
         "Exact MaxSim page batch=64; legacy approximate query_mean/global_topk=224, unbatched fp32; inactive options inherited from exact run, diagnostic-only computations omitted",
         "SPLADE transformers backend, max_length=64, one question per query; historical summary does not record max_length or batch size",
@@ -148,6 +148,36 @@ def file_stamp(path):
     return {"path": str(path), "bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
+def configure_faiss_index(index, faiss_module, nprobe):
+    """Preserve the serialized search metric; page scores are recomputed dots.
+
+    The original builder passes an IP quantizer to IndexIVFFlat but does not
+    pass the IVF metric argument (whose default is L2). Quantizer/search/page
+    scoring metrics must not be conflated or 'repaired' during reproduction.
+    Complete candidate-order and score checks still decide equivalence.
+    """
+    if not hasattr(index, "nprobe"):
+        raise ValueError("Expected an IVF FAISS index with nprobe")
+    if isinstance(nprobe, bool) or int(nprobe) != nprobe or nprobe < 1:
+        raise ValueError("FAISS nprobe must be a positive integer")
+    names = {int(faiss_module.METRIC_INNER_PRODUCT): "inner_product",
+             int(faiss_module.METRIC_L2): "l2"}
+    metric = int(index.metric_type)
+    if metric not in names:
+        raise ValueError(f"Unsupported saved FAISS search metric: {metric}; expected L2 or inner product, without conversion")
+    quantizer = getattr(index, "quantizer", None)
+    quantizer_metric = getattr(quantizer, "metric_type", None)
+    if quantizer_metric is not None:
+        quantizer_metric = int(quantizer_metric)
+    saved_nprobe = int(index.nprobe)
+    index.nprobe = int(nprobe)  # Same per-run search parameter as the baseline.
+    return {"index_class": type(index).__name__, "metric_type": metric,
+            "metric_name": names[metric], "quantizer_metric_type": quantizer_metric,
+            "quantizer_metric_name": names.get(quantizer_metric, "unknown"),
+            "saved_nprobe": saved_nprobe, "nprobe": int(index.nprobe),
+            "page_score_source": "embedding_dot_product_not_faiss_distance"}
+
+
 class OnlineRetriever:
     def __init__(self, bundle, dataset):
         import faiss
@@ -167,11 +197,8 @@ class OnlineRetriever:
         embedding_dir = Path(LOCAL_EMBEDDINGS_DIR) / config["embedding_name"]
         index_path = Path(LOCAL_EMBEDDINGS_DIR) / (config["embedding_name"] + "_pageindex_ivfflat") / "index.bin"
         self.index = faiss.read_index(str(index_path))
-        if not hasattr(self.index, "nprobe"):
-            raise ValueError("Expected an IVF FAISS index with nprobe")
-        self.index.nprobe = config["nprobe"]
-        if self.index.metric_type != faiss.METRIC_INNER_PRODUCT:
-            raise ValueError("Expected an inner-product FAISS index")
+        faiss_configuration = configure_faiss_index(self.index, faiss, config["nprobe"])
+        print("ONLINE_FAISS_INDEX " + json.dumps({"path": str(index_path), **faiss_configuration}), flush=True)
         dataset.args.embedding_name = config["embedding_name"]
         dataset.args.retrieval_model_type = "colpali"
         self.embeddings = dataset.load_all_embeddings()
@@ -217,6 +244,7 @@ class OnlineRetriever:
         self.sparse_encoder = SpladeTextEncoder(config["splade_model"], "transformers", torch.device("cuda"), config["splade_max_length"])
         self.identity = {"config": {key: value for key, value in config.items() if key != "baseline_references"},
                          "faiss_index": file_stamp(index_path), "sparse_index": file_stamp(config["splade_index"]),
+                         "faiss_configuration": faiss_configuration,
                          "faiss_tokens": token_count, "dense_documents": len(self.embeddings),
                          "sparse_pages": self.page_count,
                          "embedding_files": [file_stamp(embedding_dir / (doc + ".safetensors")) for doc in self.embeddings],
