@@ -19,7 +19,11 @@ if [[ -f hpc_vital_paths.generated.env ]]; then
 fi
 source scripts/m3docvqa_internal_env.sh
 export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 PYTHONDONTWRITEBYTECODE=1
+: "${RACS_SPLADE_MODEL_DIR:?Set RACS_SPLADE_MODEL_DIR to the existing local checkpoint directory before sbatch}"
+RACS_SPLADE_TOKENIZER_DIR="${RACS_SPLADE_TOKENIZER_DIR:-$RACS_SPLADE_MODEL_DIR}"
 env/bin/python -B scripts/benchmark_racs_online.py \
+  --splade-model-dir "$RACS_SPLADE_MODEL_DIR" \
+  --splade-tokenizer-dir "$RACS_SPLADE_TOKENIZER_DIR" \
   --audit-json output/racs_runtime_audit_15911623/prerequisites.json \
   --replay-json output/racs_graph_replay_15911730/replay.json \
   --run-dir "output/racs_online_runtime_${SLURM_JOB_ID:?}" \

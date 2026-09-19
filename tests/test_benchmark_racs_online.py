@@ -29,7 +29,76 @@ def exact_config():
         "fixed_weights": {"base": 1.0, "visual": 0.0, "non_visual": 0.0, "balance": 0.0}}
 
 
+def local_splade_fixture(root):
+    folder = root / "splade"
+    folder.mkdir()
+    (folder / "config.json").write_text('{"model_type":"bert"}')
+    (folder / "pytorch_model.bin").write_bytes(b"test-layout-only-not-real-weights")
+    (folder / "vocab.txt").write_text("[PAD]\n[UNK]\n")
+    return folder
+
+
 class OnlineBenchmarkTests(unittest.TestCase):
+    def test_local_splade_paths_are_explicit_and_same_folder_by_default(self):
+        with self.assertRaisesRegex(ValueError, "Hub/cache fallback is disabled"):
+            online.validate_splade_directories(None)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = local_splade_fixture(Path(directory))
+            result = online.validate_splade_directories(folder)
+            self.assertEqual(result["splade_model_dir"], str(folder.resolve()))
+            self.assertEqual(result["splade_tokenizer_dir"], str(folder.resolve()))
+            self.assertIn(str((folder / "vocab.txt").resolve()), result["splade_local_identity"]["configuration_and_tokenizer_sha256"])
+            self.assertEqual(len(result["splade_local_identity"]["weight_files"]), 1)
+
+    def test_separate_local_tokenizer_files_are_fingerprinted(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = local_splade_fixture(root)
+            tokenizer = root / "tokenizer"
+            tokenizer.mkdir()
+            (tokenizer / "tokenizer_config.json").write_text('{"tokenizer_class":"BertTokenizer"}')
+            (tokenizer / "tokenizer.json").write_text('{"test":"layout-only"}')
+            before = online.validate_splade_directories(folder, tokenizer)
+            self.assertEqual(before["splade_tokenizer_dir"], str(tokenizer.resolve()))
+            (tokenizer / "tokenizer.json").write_text('{"test":"changed"}')
+            self.assertNotEqual(before["splade_local_identity"], online.validate_splade_directories(folder, tokenizer)["splade_local_identity"])
+
+    def test_missing_local_assets_fail_without_hub_fallback(self):
+        for missing in ("config.json", "vocab.txt", "pytorch_model.bin"):
+            with tempfile.TemporaryDirectory() as directory:
+                folder = local_splade_fixture(Path(directory))
+                (folder / missing).unlink()
+                with self.assertRaises(FileNotFoundError):
+                    online.validate_splade_directories(folder)
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(FileNotFoundError):
+                online.validate_splade_directories(Path(directory) / "does-not-exist")
+
+    def test_sharded_weights_require_all_local_shards(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder = local_splade_fixture(Path(directory))
+            (folder / "pytorch_model.bin").unlink()
+            (folder / "model.safetensors.index.json").write_text(json.dumps({"weight_map": {"first": "part1.safetensors", "second": "part2.safetensors"}}))
+            (folder / "part1.safetensors").write_bytes(b"part1")
+            with self.assertRaisesRegex(FileNotFoundError, "part2.safetensors"):
+                online.validate_splade_directories(folder)
+            (folder / "part2.safetensors").write_bytes(b"part2")
+            result = online.validate_splade_directories(folder)
+            self.assertEqual(len(result["splade_local_identity"]["weight_files"]), 2)
+
+    def test_local_check_does_not_prepare_retrieval_or_write_results(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            folder = local_splade_fixture(root)
+            before = {str(p): p.read_bytes() for p in root.rglob("*") if p.is_file()}
+            with mock.patch.object(sys, "argv", ["check", "--check-local-splade", "--splade-model-dir", str(folder)]), \
+                 mock.patch.object(online, "prepare_online") as prepare, \
+                 contextlib.redirect_stdout(io.StringIO()) as output:
+                online.main()
+            prepare.assert_not_called()
+            self.assertIn("LOCAL_SPLADE_FILES_PRESENT_NOT_YET_REPLAY_VALIDATED", output.getvalue())
+            self.assertEqual(before, {str(p): p.read_bytes() for p in root.rglob("*") if p.is_file()})
+
     def test_l2_ivf_with_ip_quantizer_keeps_both_metrics(self):
         faiss = SimpleNamespace(METRIC_INNER_PRODUCT=0, METRIC_L2=1)
         quantizer = SimpleNamespace(metric_type=faiss.METRIC_INNER_PRODUCT)
@@ -269,10 +338,11 @@ class OnlineBenchmarkTests(unittest.TestCase):
                           "graphs": {label: {"inputs": {"dense": "E" if label == bench.MAIN else "L", "sparse": "S"}} for label in labels}}
                 paths[method] = root / (method + ".bundle.json")
                 bench.write_new(paths[method], bundle)
-            before = {p: p.read_bytes() for p in root.iterdir()}
+            local_model = local_splade_fixture(root)
+            before = {p: p.read_bytes() for p in root.rglob("*") if p.is_file()}
             manifest = {"input_sha256": {}}
             with mock.patch.object(bench, "prepare", return_value=(paths, manifest)):
-                output, result = online.prepare_online(audit_path, root / "unused", root, 1, 1)
+                output, result = online.prepare_online(audit_path, root / "unused", root, 1, 1, local_model)
             self.assertEqual(before, {p: p.read_bytes() for p in before})
             self.assertTrue(result["online_retrieval"])
             for path in output.values():
@@ -280,6 +350,8 @@ class OnlineBenchmarkTests(unittest.TestCase):
                 self.assertNotIn("answers", path.read_text())
                 saved = json.loads(path.read_text())
                 self.assertEqual(saved["online"]["baseline_references"]["q"], rows)
+                self.assertEqual(saved["online"]["splade_model"], "naver/splade-cocondenser-ensembledistil")
+                self.assertEqual(saved["online"]["splade_model_dir"], str(local_model.resolve()))
 
 
 if __name__ == "__main__":

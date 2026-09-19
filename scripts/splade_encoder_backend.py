@@ -88,12 +88,16 @@ class SpladeTextEncoder:
     backend: EncoderBackend
     device: torch.device
     max_length: int
+    tokenizer_name_or_path: str | None = None
+    local_files_only: bool = False
 
     def __post_init__(self) -> None:
         self.tokenizer = None
         self.model = None
         self.sparse_encoder = None
         if self.backend == "sentence-transformers":
+            if self.tokenizer_name_or_path is not None or self.local_files_only:
+                raise ValueError("Explicit separate/local-only tokenizer loading is supported by the transformers backend only")
             try:
                 from sentence_transformers import SparseEncoder
             except (ImportError, AttributeError) as exc:
@@ -111,8 +115,10 @@ class SpladeTextEncoder:
 
         from transformers import AutoModelForMaskedLM, AutoTokenizer
 
-        self.tokenizer = AutoTokenizer.from_pretrained(self.model_name_or_path)
-        self.model = AutoModelForMaskedLM.from_pretrained(self.model_name_or_path)
+        load_options = {"local_files_only": True} if self.local_files_only else {}
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            self.tokenizer_name_or_path or self.model_name_or_path, **load_options)
+        self.model = AutoModelForMaskedLM.from_pretrained(self.model_name_or_path, **load_options)
         self.model.eval()
         self.model.to(self.device)
 

@@ -71,7 +71,56 @@ def check_exact_configuration(record):
         raise ValueError("Unsupported or incomplete Exact MaxSim configuration")
 
 
-def prepare_online(audit_path, replay_path, run_dir, count, warmup):
+def validate_splade_directories(model_dir, tokenizer_dir=None):
+    """Validate explicit local files without importing torch or accessing the Hub."""
+    if model_dir is None:
+        raise ValueError("Supply --splade-model-dir with the existing local SPLADE checkpoint directory; Hub/cache fallback is disabled")
+    model_dir = Path(model_dir).expanduser().resolve()
+    tokenizer_dir = Path(tokenizer_dir).expanduser().resolve() if tokenizer_dir else model_dir
+    for label, folder in (("model", model_dir), ("tokenizer", tokenizer_dir)):
+        if not folder.is_dir():
+            raise FileNotFoundError(f"Local SPLADE {label} directory does not exist: {folder}")
+    def nonempty(path):
+        return path.is_file() and path.stat().st_size > 0
+    if not nonempty(model_dir / "config.json"):
+        raise FileNotFoundError(f"Local SPLADE model requires config.json: {model_dir}")
+    config = bench.replay.read_json(model_dir / "config.json")
+    if config.get("model_type") not in (None, "bert"):
+        raise ValueError("Expected a BERT-based SPLADE checkpoint, not a replacement architecture")
+    weight_files = [p for name in ("model.safetensors", "pytorch_model.bin")
+                    if nonempty(p := model_dir / name)]
+    for name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"):
+        path = model_dir / name
+        if not path.is_file():
+            continue
+        mapping = bench.replay.read_json(path).get("weight_map", {})
+        if not mapping or any(not isinstance(value, str) or Path(value).is_absolute()
+                              or ".." in Path(value).parts for value in mapping.values()):
+            raise ValueError(f"Invalid local weight shard manifest: {path}")
+        for shard in sorted(set(mapping.values())):
+            if not nonempty(model_dir / shard):
+                raise FileNotFoundError(f"Missing local SPLADE weight shard: {model_dir / shard}")
+            weight_files.append(model_dir / shard)
+    if not weight_files:
+        raise FileNotFoundError(f"No local SPLADE model weights found: {model_dir}")
+    token_files = [p for name in ("vocab.txt", "tokenizer.json")
+                   if nonempty(p := tokenizer_dir / name)]
+    if not token_files:
+        raise FileNotFoundError(f"Local SPLADE tokenizer requires vocab.txt or tokenizer.json: {tokenizer_dir}")
+    if not any(nonempty(tokenizer_dir / name) for name in ("config.json", "tokenizer_config.json")):
+        raise FileNotFoundError(f"Local SPLADE tokenizer needs config.json or tokenizer_config.json: {tokenizer_dir}")
+    small_files = set(token_files)
+    for folder in (model_dir, tokenizer_dir):
+        small_files.update(folder.glob("*.json"))
+    return {"splade_model_dir": str(model_dir), "splade_tokenizer_dir": str(tokenizer_dir),
+            "splade_local_identity": {
+                "configuration_and_tokenizer_sha256": {str(p): bench.replay.sha256(p) for p in sorted(small_files)},
+                "weight_files": [file_stamp(p) for p in sorted(set(weight_files))],
+                "weight_bytes_hashed": False}}
+
+
+def prepare_online(audit_path, replay_path, run_dir, count, warmup, splade_model_dir=None, splade_tokenizer_dir=None):
+    local_splade = validate_splade_directories(splade_model_dir, splade_tokenizer_dir)
     paths, manifest = bench.prepare(audit_path, replay_path, run_dir, count, warmup)
     audit = bench.replay.read_json(audit_path)
     source = {item["prediction"]["path"]: item for item in audit["upstream"]}
@@ -114,7 +163,7 @@ def prepare_online(audit_path, replay_path, run_dir, count, warmup):
               "splade_max_length": 64, "nprobe": 4,
               "backbone": "colpaligemma-3b-pt-448-base", "adapter": "colpali-v1.2",
               "baseline_query_device": "cuda", "scoring_query_device": "cpu",
-              "query_filter": "full", "ignore_pad_scores": False}
+              "query_filter": "full", "ignore_pad_scores": False, **local_splade}
     # Index hashing is once, outside the timed workers. Corpus/checkpoint file
     # manifests below are stat/config fingerprints, explicitly not weight hashes.
     manifest["input_sha256"][config["splade_index"]] = bench.replay.sha256(config["splade_index"])
@@ -124,6 +173,7 @@ def prepare_online(audit_path, replay_path, run_dir, count, warmup):
         "Baseline query encoder on GPU, scoring query encoder on CPU, matching the current baseline/visual-rerank entry points; two resident encoder replicas",
         "Exact MaxSim page batch=64; legacy approximate query_mean/global_topk=224, unbatched fp32; inactive options inherited from exact run, diagnostic-only computations omitted",
         "SPLADE transformers backend, max_length=64, one question per query; historical summary does not record max_length or batch size",
+        "SPLADE loads only explicitly supplied local model/tokenizer directories; recorded model ID stays separate, with full output replay required",
         "Common FAISS pool and CPU scoring query embedding reused within a question for exact/legacy paths only if both saved outputs reproduce",
         "Full corpus embeddings and indices resident between queries; no result, query embedding, or PDF-image cache across questions",
     ]
@@ -193,6 +243,18 @@ class OnlineRetriever:
             raise RuntimeError("Online benchmark requires a GPU with at least 40 GiB; do not quantize/substitute the fixed reader")
         self.baseline_rows = None
         config = self.config
+        # Fail on missing/changed assets or tokenizer load before the FAISS index,
+        # full corpus embeddings, ColPali replicas and graph/reader timing work.
+        local_splade = validate_splade_directories(config.get("splade_model_dir"), config.get("splade_tokenizer_dir"))
+        if local_splade["splade_local_identity"] != config.get("splade_local_identity"):
+            raise ValueError("Local SPLADE assets changed after input preparation")
+        self.sparse_encoder = SpladeTextEncoder(
+            config["splade_model_dir"], "transformers", torch.device("cuda"), config["splade_max_length"],
+            tokenizer_name_or_path=config["splade_tokenizer_dir"], local_files_only=True)
+        if len(self.sparse_encoder.tokenizer) != int(self.sparse_encoder.model.config.vocab_size):
+            raise ValueError("Local SPLADE tokenizer vocabulary size differs from model output vocabulary")
+        print("ONLINE_LOCAL_SPLADE " + json.dumps({"recorded_model_id": config["splade_model"],
+              "model_dir": config["splade_model_dir"], "tokenizer_dir": config["splade_tokenizer_dir"]}), flush=True)
         faiss.omp_set_num_threads(1)
         embedding_dir = Path(LOCAL_EMBEDDINGS_DIR) / config["embedding_name"]
         index_path = Path(LOCAL_EMBEDDINGS_DIR) / (config["embedding_name"] + "_pageindex_ivfflat") / "index.bin"
@@ -241,7 +303,6 @@ class OnlineRetriever:
                 posting_weights.setdefault(int(term), []).append(float(weight))
         self.postings = {term: (torch.tensor(ids, dtype=torch.int64), torch.tensor(posting_weights[term], dtype=torch.float32))
                          for term, ids in posting_pages.items()}
-        self.sparse_encoder = SpladeTextEncoder(config["splade_model"], "transformers", torch.device("cuda"), config["splade_max_length"])
         self.identity = {"config": {key: value for key, value in config.items() if key != "baseline_references"},
                          "faiss_index": file_stamp(index_path), "sparse_index": file_stamp(config["splade_index"]),
                          "faiss_configuration": faiss_configuration,
@@ -360,7 +421,14 @@ def main():
     parser.add_argument("--worker-output", type=Path)
     parser.add_argument("--pass-index", type=int)
     parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument("--splade-model-dir", type=Path, help="Existing local SPLADE checkpoint directory; no Hub fallback")
+    parser.add_argument("--splade-tokenizer-dir", type=Path, help="Existing local tokenizer directory; defaults to the model directory")
+    parser.add_argument("--check-local-splade", action="store_true", help="Check local file layout only, without GPU/model loading or writing reports")
     args = parser.parse_args()
+    if args.check_local_splade:
+        print(json.dumps(validate_splade_directories(args.splade_model_dir, args.splade_tokenizer_dir), indent=2))
+        print("LOCAL_SPLADE_FILES_PRESENT_NOT_YET_REPLAY_VALIDATED")
+        return
     if args.worker_bundle:
         if args.worker_output is None or (not args.preflight_only and args.pass_index is None):
             parser.error("Worker output and pass index required")
@@ -380,7 +448,8 @@ def main():
     order = bench.schedule(args.repeats)
     args.run_dir.mkdir()
     try:
-        bundles, manifest = prepare_online(args.audit_json, args.replay_json, args.run_dir, args.questions, args.warmup_questions)
+        bundles, manifest = prepare_online(args.audit_json, args.replay_json, args.run_dir, args.questions, args.warmup_questions,
+                                          args.splade_model_dir, args.splade_tokenizer_dir)
         manifest["schedule"] = order
         code_paths = [Path(__file__), Path(bench.__file__), Path(bench.capp.__file__), Path(bench.capp.ca.__file__),
                       Path(bench.replay.__file__), Path(bench.replay.graph.__file__)]

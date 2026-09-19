@@ -5,6 +5,32 @@ Prepared September 18, updated September 19, 2026 after the first failed attempt
 not stop at a first draft.
 Original paper/Overleaf files and old experiment outputs are not modified.
 
+## Current action: use the author's existing local SPLADE files
+
+Job 15911873 failed with exit 1:0 after 4:56 on gpu010. Its startup log now
+confirms the saved IVF metric is L2, the quantizer metric is inner product, and
+nprobe was set to 4. All 3,366 document embeddings and both ColPali replicas
+loaded. It then failed constructing the SPLADE tokenizer, with a missing
+vocabulary-file path (`None`) in offline Hub-name resolution. This does not
+establish that the author lacks the files, and no retrieval replay/timing passed.
+
+The author confirmed local files exist and requested using them. The benchmark
+now requires an explicit local SPLADE checkpoint directory. A separate local
+tokenizer directory is supported if needed. Both loaders receive
+`local_files_only=True`; there is no Hub-name/cache fallback and no download.
+The original recorded model ID remains `naver/splade-cocondenser-ensembledistil`
+for index/provenance checks; a path override is not permission to change models.
+Configuration/tokenizer files are hashed, weights are inventoried, and every
+upstream ranking/order/score check remains mandatory.
+
+File-layout checks run before reading large prediction artifacts. In each
+worker, the local SPLADE tokenizer/model load before the FAISS index and corpus
+embeddings, so a bad local path fails early. Matching vocabulary sizes is checked
+but is not proof of token-ID/weight equivalence; complete retrieval replay is
+still required. The Mac workspace has no model directory; the HPC folder path
+must be supplied by the author, not guessed. Do not submit a new GPU job until
+that path is known and the read-only local-file check succeeds.
+
 ## September 19 correction: preserve the saved FAISS search metric
 
 The author supplied accounting for two attempts: 15911849 failed with exit 1:0
@@ -31,8 +57,8 @@ page scores, or change candidate-order/score validation. Unsupported metrics
 still fail. New regressions cover an L2 IVF index with an IP quantizer, an IP
 index, and rejection of unsupported metrics/invalid search settings.
 
-Submit **one** new attempt after pulling the fix. Further upstream replay checks
-still have to pass; this correction alone does not establish output equivalence.
+That correction was exercised by 15911873, as recorded above. Further upstream
+replay checks still have to pass; it does not establish output equivalence.
 
 ## What this job measures
 
@@ -119,7 +145,23 @@ fallback, relaxed validation, new model selection or retraining is performed.
 
 ## Submit after pushing and pulling the new commit
 
-From the HPC login terminal:
+First set `RACS_SPLADE_MODEL_DIR` to the actual existing HPC checkpoint path.
+If the tokenizer is in a different directory, also set
+`RACS_SPLADE_TOKENIZER_DIR`; otherwise it defaults to the model directory.
+The paths have not yet been supplied. Do not paste an invented example path.
+
+Check the files on the login node without GPU/model loading or report writes:
+
+```bash
+env/bin/python -B scripts/benchmark_racs_online.py \
+  --check-local-splade \
+  --splade-model-dir "${RACS_SPLADE_MODEL_DIR:?Set the existing local checkpoint path}" \
+  --splade-tokenizer-dir "${RACS_SPLADE_TOKENIZER_DIR:-$RACS_SPLADE_MODEL_DIR}"
+```
+
+This checks file layout/fingerprints, not tokenizer execution or retrieval
+equivalence. After the paths are confirmed and changes pulled, submit from the
+HPC login terminal with those variables exported:
 
 ```bash
 cd /mmfs1/scratch/jacks.local/aerfanshekooh/custom/Clean_M3DocRAG

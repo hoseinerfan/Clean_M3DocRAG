@@ -18,7 +18,13 @@ inner-product-only index guard in the new benchmark, before timing. The fix
 preserves the saved FAISS metric (L2 or IP), records it separately from the
 embedding-dot page scoring, and leaves all ranking replay gates unchanged.
 The second detailed log was not supplied. One fresh execution after pulling
-the correction is **pending**; old failure reports remain untouched.
+the correction was attempted as 15911873. That job confirmed L2 IVF/IP quantizer,
+loaded dense assets, then failed resolving the SPLADE tokenizer vocabulary from
+the offline Hub-name load. No online runtime result exists. The author has local
+SPLADE files and requested using them. Explicit local model/tokenizer directory
+support is now implemented, with no download/fallback and unchanged replay gates.
+The actual HPC directory path is still needed before a read-only file check and
+one new submission. Old failure reports remain untouched.
 Do not call R1.2 complete until a successful online report is audited.
 
 The independent raw-record audit of job 15911732 has now passed with the same
