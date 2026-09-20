@@ -5,7 +5,18 @@ Prepared September 18, updated September 20, 2026 after the candidate diagnostic
 not stop at a first draft.
 Original paper/Overleaf files and old experiment outputs are not modified.
 
-## Current action: rerun with the observed candidate-scoring path
+## Current action: diagnose Exact MaxSim after candidate replay passed
+
+Job 15915128 used the explicit candidate-scoring reconstruction below. Its
+first question passed the complete FAISS candidate-pool check, then failed
+at `exact`: the same 1,000 candidates, with the first order difference at rank
+11. This is not a completed online runtime. The next submission is
+`examples/sbatch_racs_exact_diagnostic.sh`, not another unchanged full benchmark.
+See `notes/racs_exact_diagnostic_protocol.md` for the four-question original
+runner/runtime-helper comparison and CPU thread/context checks. The cause is
+not yet established. No retraining or manuscript change is requested.
+
+## Resolved first-question FAISS candidate mismatch
 
 Job 15911874 failed after 2:09 on gpu010. Local SPLADE loading succeeded using
 the shared cache snapshot
@@ -44,12 +55,11 @@ MaxSim. The subsequent page-local Exact MaxSim stage is separate and unchanged.
 This issue needs transparent documentation and methodological review before
 final submission; successful replay will not by itself resolve that concern.
 
-Submit one fresh `examples/sbatch_racs_online_runtime.sh` job after pulling the
-tested change and exporting the validated local SPLADE path below. The job
-first tests four warm-ups, then retains all upstream/graph/CAPP checks throughout
-the 128-question, four-repeat experiment. Any mismatch blocks the final timing
-report. Further stages have not yet been freshly validated. No retraining or
-duplicate QA experiment is requested. See `notes/racs_faiss_diagnostic_protocol.md`.
+That change was submitted as 15915128 and reached the Exact MaxSim mismatch
+above. The full benchmark still first tests four warm-ups and retains all
+upstream/graph/CAPP checks throughout the 128-question, four-repeat experiment.
+Any mismatch blocks the final timing report. Later stages have not yet been
+freshly validated. See `notes/racs_faiss_diagnostic_protocol.md`.
 
 The resident token table remains allocated by the shared loader, even though
 the distance branch does not use it for scoring. Reported process memory includes

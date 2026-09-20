@@ -1,6 +1,6 @@
 # RACS: closing the remaining revision items
 
-Updated 2026-09-20 after the four-question FAISS diagnostic.
+Updated 2026-09-20 after online job 15915128 reached the Exact MaxSim mismatch.
 This plan does not change Overleaf or launch remote jobs automatically.
 
 ## Current completion target
@@ -32,10 +32,15 @@ orders and scores on all four preselected warm-ups using GPU encoding plus raw
 FAISS-distance aggregation. Embedding-dot aggregation matched zero of four;
 all 64 sampled index vectors matched the current embeddings exactly.
 The runtime reconstruction now explicitly selects `faiss_distance`, without
-automatic fallback or relaxing any replay gate. Next: pull the tested change,
-export the validated local SPLADE directory and submit one fresh
-`examples/sbatch_racs_online_runtime.sh` job. All later upstream stages still
-require fresh replay. Do not call the four-question diagnostic full validation.
+automatic fallback or relaxing any replay gate. Job 15915128 passed the first
+question's FAISS candidate-pool check, then failed Exact MaxSim: its candidate
+set matched but order first differed at rank 11. Next: pull the tested diagnostic
+and submit one `examples/sbatch_racs_exact_diagnostic.sh` job. It compares the
+original runner and runtime scoring helper on four questions, including CPU
+threads/context and a prior GPU-query control. No FAISS/SPLADE/reader or training
+is run by this diagnostic. See `notes/racs_exact_diagnostic_protocol.md`.
+Later upstream stages still require fresh replay; do not resubmit the unchanged
+full timing job or call either small diagnostic full validation.
 The observed L2-distance/max/sum/descending aggregation is a historical
 candidate-generation behavior, not exact MaxSim or a mathematically sound
 similarity rule. Document and review this separately before final submission;
