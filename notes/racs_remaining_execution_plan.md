@@ -1,6 +1,6 @@
 # RACS: closing the remaining revision items
 
-Updated 2026-09-20 after diagnostic 15915129 exposed a collapsed thread control.
+Updated 2026-09-20 after corrected diagnostic 15915206.
 This plan does not change Overleaf or launch remote jobs automatically.
 
 ## Current completion target
@@ -44,8 +44,17 @@ four questions but historical-reference agreement on only two. Both nominal
 thread controls actually used one thread: the imported CAPP benchmark forces
 thread environment variables to one. The diagnostic now explicitly sets and
 verifies eight versus one threads and rejects a collapsed control. The next
-submission is this corrected diagnostic, not a full timing rerun. Historical
-CPU thread count remains unknown; eight is a bounded diagnostic condition.
+submission was the corrected diagnostic 15915206. Its verified 8/1 controls
+matched historical complete rankings/scores on only 1/4 and 2/4 questions,
+respectively. Historical question text agrees with current inputs; one-thread
+query hashes repeat across both jobs, while eight threads change three queries.
+Historical CPU thread count remains unknown; eight is a diagnostic condition,
+not the original runner's unforced default. Next: submit one
+`examples/sbatch_racs_exact_native.sh` job, which runs the original entry point
+without importing thread-changing benchmark helpers until after inference.
+It requests 48 CPUs to accommodate native defaults, records actual counts,
+and uses the same four questions and strict checks. No training or full reader
+run is involved; see the updated Exact MaxSim diagnostic protocol.
 Later upstream stages still require fresh replay; do not resubmit the unchanged
 full timing job or call either small diagnostic full validation.
 The observed L2-distance/max/sum/descending aggregation is a historical

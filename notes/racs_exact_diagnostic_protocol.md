@@ -2,6 +2,56 @@
 
 Prepared September 20, 2026. No Overleaf/manuscript or historical output changes.
 
+## Corrected diagnostic 15915206 and next native-default control
+
+Job 15915206 completed on gpu013 (A100 80 GB). The requested/effective
+eight-versus-one CPU thread controls were distinct and verified. All four
+1,000-page candidate sets and dense top-4 orders matched the historical
+reference in both conditions. Complete historical order-and-score matches were
+only **1/4 with eight threads** and **2/4 with one thread**. Corresponding
+runtime-helper conditions gave the same counts; GPU-query control matched 0/4.
+This is not a validated online runtime or proof of downstream reader equivalence.
+
+Read-only cross-checks through the mount established:
+
+- The four question strings in the historical Exact MaxSim per-question JSONL
+  match the current diagnostic strings exactly, including capitalization and
+  punctuation. Changed question text is not the cause for this cohort.
+- The one-thread query embedding SHA-256 hashes match across jobs 15915129 and
+  15915206 on the same node. Within each condition, no-grad versus inference-mode
+  hashes match on all four questions. Eight versus one changes the query
+  embedding hashes for three of four questions. Thread sensitivity is observed;
+  the historical CPU thread setting remains unknown.
+- The current original Exact MaxSim shell wrapper does not set thread counts.
+  Older exact-efficiency launch scripts in `custom/outputs` also lack such
+  settings, but use an older baseline and are **not** proof of the launch that
+  created the main saved artifact. Neither fixed 8 nor fixed 1 tests unforced
+  PyTorch CPU defaults.
+
+Next is one native-default control, **not another full online benchmark**:
+`examples/sbatch_racs_exact_native.sh` runs the current original entry point on
+the same four questions using the small `15915206/inputs.json` artifact. Its
+standalone Python wrapper imports no RACS benchmark/diagnostic helper until
+after the original run has finished. The launcher clears explicit thread-count
+environment overrides; no `torch.set_num_threads` is called. Actual thread
+counts, parallel-library information, CPU model and GPU are recorded before
+inference and checked again afterward. A 48-CPU/one-GPU allocation prevents
+native defaults from oversubscribing the prior eight-CPU allocation; execution
+is refused if effective threads exceed the allocation. This may queue longer.
+
+Only a new `output/racs_exact_native_JOBID` directory and Slurm logs are written.
+The control checks unchanged question/candidate inputs, scoring configuration,
+all 1,000 ordered pages and strict original score tolerances. Four CPU query
+embeddings are saved after execution for inspection. It does not train, run
+FAISS/SPLADE/Qwen, change old outputs, select a winning setting automatically,
+or produce runtime claims. It tests current unforced defaults, not recovered
+historical settings. Local mocked/CPU-only unit tests cannot establish GPU
+equivalence; that remains the purpose of the cluster run.
+
+After this control, inspect actual thread count, per-question comparisons and
+query hashes. A match would still require full online replay; another mismatch
+does not authorize broader parameter sweeps or a relaxed equivalence gate.
+
 ## First diagnostic outcome and required correction
 
 Job 15915129 completed. The current original runner and all four CPU-query
