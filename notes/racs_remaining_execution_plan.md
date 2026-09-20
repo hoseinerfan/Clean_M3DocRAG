@@ -23,8 +23,14 @@ loaded dense assets, then failed resolving the SPLADE tokenizer vocabulary from
 the offline Hub-name load. No online runtime result exists. The author has local
 SPLADE files and requested using them. Explicit local model/tokenizer directory
 support is now implemented, with no download/fallback and unchanged replay gates.
-The actual HPC directory path is still needed before a read-only file check and
-one new submission. Old failure reports remain untouched.
+The shared scratch-cache snapshot was subsequently found and passed the offline
+file/tokenizer check. Job 15911874 loaded it successfully, then failed the first
+FAISS candidate-pool replay. The reference for that question was checked directly
+against the original June 7 raw baseline and agrees. Old failure reports remain
+untouched. Next is `examples/sbatch_racs_faiss_diagnostic.sh`: four existing
+warm-up questions, encoder/score-source comparisons and sampled index alignment,
+with no reader or runtime result. See `notes/racs_faiss_diagnostic_protocol.md`.
+Do not resubmit the full timing job or change its acceptance gates yet.
 Do not call R1.2 complete until a successful online report is audited.
 
 The independent raw-record audit of job 15911732 has now passed with the same

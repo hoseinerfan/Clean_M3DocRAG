@@ -5,7 +5,22 @@ Prepared September 18, updated September 19, 2026 after the first failed attempt
 not stop at a first draft.
 Original paper/Overleaf files and old experiment outputs are not modified.
 
-## Current action: use the author's existing local SPLADE files
+## Current action: diagnose the FAISS candidate mismatch
+
+Job 15911874 failed after 2:09 on gpu010. Local SPLADE loading succeeded using
+the shared cache snapshot
+`/mmfs1/scratch/jacks.local/aerfanshekooh/custom/hf_cache/transformers/models--naver--splade-cocondenser-ensembledistil/snapshots/49cf4c7b0db5b870a401ddf5e2669993ef3699c7`.
+It then failed the first fresh FAISS candidate-pool replay (different page set
+and order, not just small score differences). No online timing is validated.
+
+The next job is the bounded, diagnostic-only
+`examples/sbatch_racs_faiss_diagnostic.sh`, described in
+`notes/racs_faiss_diagnostic_protocol.md`. It compares encoder preparation,
+both existing page-score branches and sampled index/token-table alignment.
+It does not change the benchmark, auto-select a branch, train models or run QA.
+Do not resubmit the full runtime job until the discrepancy is understood.
+
+## Resolved local SPLADE loading issue
 
 Job 15911873 failed with exit 1:0 after 4:56 on gpu010. Its startup log now
 confirms the saved IVF metric is L2, the quantizer metric is inner product, and
@@ -27,9 +42,9 @@ File-layout checks run before reading large prediction artifacts. In each
 worker, the local SPLADE tokenizer/model load before the FAISS index and corpus
 embeddings, so a bad local path fails early. Matching vocabulary sizes is checked
 but is not proof of token-ID/weight equivalence; complete retrieval replay is
-still required. The Mac workspace has no model directory; the HPC folder path
-must be supplied by the author, not guessed. Do not submit a new GPU job until
-that path is known and the read-only local-file check succeeds.
+still required. The initial path search found only tokenizer configuration in
+the home cache. The shared scratch cache above passed the offline file/tokenizer
+check, and 15911874 confirmed that the local model loads successfully.
 
 ## September 19 correction: preserve the saved FAISS search metric
 
