@@ -213,11 +213,12 @@ class DiagnosticTests(unittest.TestCase):
             original = source.read_bytes()
             output = root / "diagnostic"
             output.mkdir()
-            with mock.patch.dict(sys.modules, modules), mock.patch.object(diagnostic.online, "OnlineRetriever", return_value=retriever), \
+            with mock.patch.dict(sys.modules, modules), mock.patch.object(diagnostic.online, "OnlineRetriever", return_value=retriever) as loader, \
                  mock.patch.object(diagnostic, "sampled_index_alignment", return_value={"samples": [], "fixture": True}), \
                  mock.patch.object(diagnostic, "candidate_modes", return_value={k: page_rows() for k in diagnostic.SCORE_SOURCES}), \
                  contextlib.redirect_stdout(io.StringIO()):
                 diagnostic.run(source, output)
+            self.assertEqual(loader.call_args.args[0]["online"]["faiss_page_score_source"], "embedding")
             report = json.loads((output / "diagnostic.json").read_text())
             self.assertEqual(report["status"], "diagnostic_complete_not_a_runtime_result")
             self.assertTrue(report["no_automatic_configuration_selection"])

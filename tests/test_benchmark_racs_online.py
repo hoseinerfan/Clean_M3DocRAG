@@ -103,37 +103,55 @@ class OnlineBenchmarkTests(unittest.TestCase):
         faiss = SimpleNamespace(METRIC_INNER_PRODUCT=0, METRIC_L2=1)
         quantizer = SimpleNamespace(metric_type=faiss.METRIC_INNER_PRODUCT)
         index = SimpleNamespace(metric_type=faiss.METRIC_L2, quantizer=quantizer, nprobe=1)
-        actual = online.configure_faiss_index(index, faiss, 4)
+        actual = online.configure_faiss_index(index, faiss, 4, "faiss_distance")
         self.assertEqual(index.metric_type, faiss.METRIC_L2)
         self.assertEqual(quantizer.metric_type, faiss.METRIC_INNER_PRODUCT)
         self.assertEqual(index.nprobe, 4)
         self.assertEqual(actual["metric_name"], "l2")
         self.assertEqual(actual["quantizer_metric_name"], "inner_product")
         self.assertEqual(actual["saved_nprobe"], 1)
-        self.assertEqual(actual["page_score_source"], "embedding_dot_product_not_faiss_distance")
+        self.assertEqual(actual["page_score_source"], "faiss_distance")
+        self.assertEqual(actual["page_score_semantics"], "l2")
+        self.assertTrue(actual["l2_descending_aggregation_caveat"])
+        self.assertEqual(actual["page_aggregation"], "max_per_page_per_query_token_then_sum_descending")
+        dots = online.configure_faiss_index(index, faiss, 4, "embedding")
+        self.assertEqual(dots["page_score_semantics"], "embedding_dot_product")
+        self.assertFalse(dots["l2_descending_aggregation_caveat"])
+        self.assertEqual(index.metric_type, faiss.METRIC_L2)
 
     def test_ip_ivf_remains_supported_without_metric_conversion(self):
         faiss = SimpleNamespace(METRIC_INNER_PRODUCT=0, METRIC_L2=1)
         index = SimpleNamespace(metric_type=faiss.METRIC_INNER_PRODUCT, nprobe=1)
-        actual = online.configure_faiss_index(index, faiss, 4)
+        actual = online.configure_faiss_index(index, faiss, 4, "faiss_distance")
         self.assertEqual(index.metric_type, faiss.METRIC_INNER_PRODUCT)
         self.assertEqual(actual["metric_name"], "inner_product")
         self.assertIsNone(actual["quantizer_metric_type"])
+        self.assertFalse(actual["l2_descending_aggregation_caveat"])
 
     def test_unknown_metric_non_ivf_and_invalid_nprobe_still_fail(self):
         faiss = SimpleNamespace(METRIC_INNER_PRODUCT=0, METRIC_L2=1)
         unknown = SimpleNamespace(metric_type=99, nprobe=1)
         with self.assertRaisesRegex(ValueError, "Unsupported saved FAISS search metric: 99"):
-            online.configure_faiss_index(unknown, faiss, 4)
+            online.configure_faiss_index(unknown, faiss, 4, "embedding")
         self.assertEqual(unknown.nprobe, 1)
         self.assertEqual(unknown.metric_type, 99)
         with self.assertRaisesRegex(ValueError, "Expected an IVF"):
-            online.configure_faiss_index(SimpleNamespace(metric_type=1), faiss, 4)
+            online.configure_faiss_index(SimpleNamespace(metric_type=1), faiss, 4, "embedding")
         for nprobe in (0, -1, 4.5, True):
             index = SimpleNamespace(metric_type=1, nprobe=1)
             with self.assertRaisesRegex(ValueError, "positive integer"):
-                online.configure_faiss_index(index, faiss, nprobe)
+                online.configure_faiss_index(index, faiss, nprobe, "embedding")
             self.assertEqual(index.nprobe, 1)
+
+    def test_candidate_score_source_requires_explicit_supported_choice(self):
+        self.assertEqual(online.FAISS_PAGE_SCORE_SOURCE, "faiss_distance")
+        faiss = SimpleNamespace(METRIC_INNER_PRODUCT=0, METRIC_L2=1)
+        for source in (None, "", "auto", "negated_l2"):
+            index = SimpleNamespace(metric_type=1, nprobe=1)
+            with self.assertRaisesRegex(ValueError, "no fallback"):
+                online.configure_faiss_index(index, faiss, 4, source)
+            self.assertEqual(index.nprobe, 1)
+            self.assertEqual(index.metric_type, 1)
 
     def test_configuration_rejects_missing_or_different_historical_settings(self):
         online.check_exact_configuration(exact_config())
@@ -185,7 +203,8 @@ class OnlineBenchmarkTests(unittest.TestCase):
     def retriever_stub(self, method):
         obj = object.__new__(online.OnlineRetriever)
         obj.bundle = {"method": method, "questions": {"q": "Question?"}}
-        obj.config = {"roles": {"exact": "E", "legacy": "L", "sparse": "S"}}
+        obj.config = {"roles": {"exact": "E", "legacy": "L", "sparse": "S"},
+                      "faiss_page_score_source": online.FAISS_PAGE_SCORE_SOURCE}
         obj.torch = SimpleNamespace(cuda=SimpleNamespace(synchronize=lambda: None), inference_mode=contextlib.nullcontext)
         obj.baseline_encoder = SimpleNamespace(encode_query_with_metadata=mock.Mock(return_value="query-gpu"))
         obj.scoring_encoder = SimpleNamespace(encode_query_with_metadata=mock.Mock(return_value="query-cpu"))
@@ -208,9 +227,26 @@ class OnlineBenchmarkTests(unittest.TestCase):
                 self.assertEqual(obj.baseline_encoder.encode_query_with_metadata.call_count, 2)
                 self.assertEqual(obj.scoring_encoder.encode_query_with_metadata.call_count, 2)
                 self.assertEqual(obj.rag._retrieve_pages_from_index_query_meta.call_count, 2)
+                self.assertIsNone(obj.rag._retrieve_pages_from_index_query_meta.call_args.args[3])
+                self.assertEqual(obj.rag._retrieve_pages_from_index_query_meta.call_args.args[4:], (1000, False))
+                self.assertIs(obj.dense_scores.call_args.args[0], obj.baseline_rows)
                 self.assertEqual(obj.dense_scores.call_count, 4 if method == "CAPP" else 2)
                 self.assertEqual("upstream:legacy_approximate_maxsim" in stages, method == "CAPP")
                 self.assertTrue(all(value >= 0 for value in stages.values()))
+
+    def test_explicit_embedding_branch_is_preserved_without_auto_selection(self):
+        encoder_module = SimpleNamespace(embedding_rows_to_terms=mock.Mock(return_value=[([1], [2.0])]))
+        with mock.patch.dict(sys.modules, {"splade_encoder_backend": encoder_module}):
+            obj = self.retriever_stub("GPP")
+            obj.config["faiss_page_score_source"] = "embedding"
+            obj.retrieve("q")
+            self.assertIs(obj.rag._retrieve_pages_from_index_query_meta.call_args.args[3], obj.token_table)
+            for source in (None, "auto"):
+                obj.config["faiss_page_score_source"] = source
+                obj.rag._retrieve_pages_from_index_query_meta.reset_mock()
+                with self.assertRaisesRegex(ValueError, "no fallback"):
+                    obj.retrieve("q")
+                obj.rag._retrieve_pages_from_index_query_meta.assert_not_called()
 
     def test_real_scoring_helpers_called_with_compatible_parameters(self):
         # Autospec checks the large scoring API without loading torch/models.

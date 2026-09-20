@@ -23,6 +23,7 @@ ONLINE_SCOPE = "online batch-one query-to-answer including dense/SPLADE retrieva
 ONLINE_EXCLUDED = ["offline corpus embedding/index construction and page-text extraction",
                    "one-time resident index/model/input loading (reported separately)",
                    "validation and report serialization"]
+FAISS_PAGE_SCORE_SOURCE = "faiss_distance"
 
 
 class ReplayMismatch(ValueError):
@@ -161,6 +162,11 @@ def prepare_online(audit_path, replay_path, run_dir, count, warmup, splade_model
               "legacy_options": scoring_options(exact, approximate=True),
               "splade_index": sparse["index_pt"], "splade_model": sparse["model_name_or_path"],
               "splade_max_length": 64, "nprobe": 4,
+              "faiss_page_score_source": FAISS_PAGE_SCORE_SOURCE,
+              "faiss_score_source_evidence": {
+                  "diagnostic_job": "15915127", "matched_questions": 4,
+                  "matched_pages_each": 1000, "maximum_score_difference": 0.0,
+                  "scope": "four preselected warm-ups, not a recovered historical command or full validation"},
               "backbone": "colpaligemma-3b-pt-448-base", "adapter": "colpali-v1.2",
               "baseline_query_device": "cuda", "scoring_query_device": "cpu",
               "query_filter": "full", "ignore_pad_scores": False, **local_splade}
@@ -169,7 +175,10 @@ def prepare_online(audit_path, replay_path, run_dir, count, warmup, splade_model
     manifest["input_sha256"][config["splade_index"]] = bench.replay.sha256(config["splade_index"])
     assumptions = [
         "Original complete upstream launch commands are not recovered; require output equivalence instead of assuming defaults prove history",
-        "FAISS IVFFlat nprobe=4, serialized search metric preserved, embedding-dot page scores recomputed separately, full query tokens, PAD scores retained; backbone/adapter are explicit repository-wrapper choices",
+        "FAISS IVFFlat nprobe=4, serialized search metric preserved, raw returned distances aggregated by the existing max/sum/descending rule; full query tokens and PAD scores retained",
+        "Job 15915127 reproduced all 1000 candidate pages/orders/scores on four warm-ups with GPU queries and faiss_distance, not embedding-dot aggregation; full replay still required",
+        "The saved IVF metric is L2: descending distance aggregation is a historical candidate-generation behavior, not a sound similarity rule or the later Exact MaxSim score; no sign/metric conversion is made",
+        "Backbone/adapter are explicit repository-wrapper choices; historical full launch command remains unrecovered",
         "Baseline query encoder on GPU, scoring query encoder on CPU, matching the current baseline/visual-rerank entry points; two resident encoder replicas",
         "Exact MaxSim page batch=64; legacy approximate query_mean/global_topk=224, unbatched fp32; inactive options inherited from exact run, diagnostic-only computations omitted",
         "SPLADE transformers backend, max_length=64, one question per query; historical summary does not record max_length or batch size",
@@ -198,14 +207,21 @@ def file_stamp(path):
     return {"path": str(path), "bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
 
 
-def configure_faiss_index(index, faiss_module, nprobe):
-    """Preserve the serialized search metric; page scores are recomputed dots.
+def validate_faiss_page_score_source(source):
+    if source not in ("embedding", "faiss_distance"):
+        raise ValueError("Explicit faiss_page_score_source must be embedding or faiss_distance; no fallback")
+    return source
+
+
+def configure_faiss_index(index, faiss_module, nprobe, page_score_source):
+    """Preserve the serialized metric and record the explicit aggregation path.
 
     The original builder passes an IP quantizer to IndexIVFFlat but does not
     pass the IVF metric argument (whose default is L2). Quantizer/search/page
     scoring metrics must not be conflated or 'repaired' during reproduction.
     Complete candidate-order and score checks still decide equivalence.
     """
+    source = validate_faiss_page_score_source(page_score_source)
     if not hasattr(index, "nprobe"):
         raise ValueError("Expected an IVF FAISS index with nprobe")
     if isinstance(nprobe, bool) or int(nprobe) != nprobe or nprobe < 1:
@@ -225,7 +241,10 @@ def configure_faiss_index(index, faiss_module, nprobe):
             "metric_name": names[metric], "quantizer_metric_type": quantizer_metric,
             "quantizer_metric_name": names.get(quantizer_metric, "unknown"),
             "saved_nprobe": saved_nprobe, "nprobe": int(index.nprobe),
-            "page_score_source": "embedding_dot_product_not_faiss_distance"}
+            "page_score_source": source,
+            "page_score_semantics": "embedding_dot_product" if source == "embedding" else names[metric],
+            "page_aggregation": "max_per_page_per_query_token_then_sum_descending",
+            "l2_descending_aggregation_caveat": source == "faiss_distance" and names[metric] == "l2"}
 
 
 class OnlineRetriever:
@@ -243,6 +262,7 @@ class OnlineRetriever:
             raise RuntimeError("Online benchmark requires a GPU with at least 40 GiB; do not quantize/substitute the fixed reader")
         self.baseline_rows = None
         config = self.config
+        page_score_source = validate_faiss_page_score_source(config.get("faiss_page_score_source"))
         # Fail on missing/changed assets or tokenizer load before the FAISS index,
         # full corpus embeddings, ColPali replicas and graph/reader timing work.
         local_splade = validate_splade_directories(config.get("splade_model_dir"), config.get("splade_tokenizer_dir"))
@@ -259,7 +279,7 @@ class OnlineRetriever:
         embedding_dir = Path(LOCAL_EMBEDDINGS_DIR) / config["embedding_name"]
         index_path = Path(LOCAL_EMBEDDINGS_DIR) / (config["embedding_name"] + "_pageindex_ivfflat") / "index.bin"
         self.index = faiss.read_index(str(index_path))
-        faiss_configuration = configure_faiss_index(self.index, faiss, config["nprobe"])
+        faiss_configuration = configure_faiss_index(self.index, faiss, config["nprobe"], page_score_source)
         print("ONLINE_FAISS_INDEX " + json.dumps({"path": str(index_path), **faiss_configuration}), flush=True)
         dataset.args.embedding_name = config["embedding_name"]
         dataset.args.retrieval_model_type = "colpali"
@@ -354,6 +374,11 @@ class OnlineRetriever:
 
     def retrieve(self, qid):
         from splade_encoder_backend import embedding_rows_to_terms
+        source = validate_faiss_page_score_source(self.config.get("faiss_page_score_source"))
+        # Explicit reconstruction choice, never chosen from reference rankings
+        # at query time. None selects the existing raw-distance branch, without
+        # negation or L2-to-IP conversion. Exact MaxSim remains a separate stage.
+        candidate_token_table = self.token_table if source == "embedding" else None
         stages, rows = {}, {}
         question = self.bundle["questions"][qid]
 
@@ -369,7 +394,7 @@ class OnlineRetriever:
             query = measured("faiss_query_encoding", lambda: self.baseline_encoder.encode_query_with_metadata(
                 question, to_cpu=True, query_token_filter="full"))
             baseline = measured("faiss_search_and_page_aggregation", lambda: self.rag._retrieve_pages_from_index_query_meta(
-                query, self.index, self.token_uids, self.token_table, 1000, False))
+                query, self.index, self.token_uids, candidate_token_table, 1000, False))
             self.baseline_rows = baseline  # Validation only; never reused by another query.
             score_query = measured("maxsim_query_encoding", lambda: self.scoring_encoder.encode_query_with_metadata(
                 question, to_cpu=True, query_token_filter="full"))

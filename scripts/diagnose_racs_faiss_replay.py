@@ -181,6 +181,10 @@ def run(bundle_path, output_dir):
     torch.manual_seed(0)
     bundle = bench.replay.read_json(bundle_path)
     qids = diagnostic_qids(bundle)
+    # Old failed bundles predate this explicit field and used embedding dots.
+    # Annotate only the in-memory diagnostic loader input; both score branches
+    # are still tested, and no original bundle/default is rewritten.
+    bundle["online"].setdefault("faiss_page_score_source", "embedding")
     cli = SimpleNamespace(data_name="m3-docvqa", split="dev", bits=16, model_name_or_path="Qwen2-VL-7B-Instruct")
     retriever = online.OnlineRetriever(bundle, qa.M3DocVQADataset(qa.make_dataset_args(cli)))
     alignment = sampled_index_alignment(retriever.index, retriever.token_table, retriever.token_uids, faiss)

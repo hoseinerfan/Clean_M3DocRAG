@@ -1,6 +1,6 @@
 # RACS: closing the remaining revision items
 
-Updated 2026-09-19 after the first online-runtime attempts failed.
+Updated 2026-09-20 after the four-question FAISS diagnostic.
 This plan does not change Overleaf or launch remote jobs automatically.
 
 ## Current completion target
@@ -27,10 +27,21 @@ The shared scratch-cache snapshot was subsequently found and passed the offline
 file/tokenizer check. Job 15911874 loaded it successfully, then failed the first
 FAISS candidate-pool replay. The reference for that question was checked directly
 against the original June 7 raw baseline and agrees. Old failure reports remain
-untouched. Next is `examples/sbatch_racs_faiss_diagnostic.sh`: four existing
-warm-up questions, encoder/score-source comparisons and sampled index alignment,
-with no reader or runtime result. See `notes/racs_faiss_diagnostic_protocol.md`.
-Do not resubmit the full timing job or change its acceptance gates yet.
+untouched. Diagnostic 15915127 subsequently reproduced all 1,000 candidate pages,
+orders and scores on all four preselected warm-ups using GPU encoding plus raw
+FAISS-distance aggregation. Embedding-dot aggregation matched zero of four;
+all 64 sampled index vectors matched the current embeddings exactly.
+The runtime reconstruction now explicitly selects `faiss_distance`, without
+automatic fallback or relaxing any replay gate. Next: pull the tested change,
+export the validated local SPLADE directory and submit one fresh
+`examples/sbatch_racs_online_runtime.sh` job. All later upstream stages still
+require fresh replay. Do not call the four-question diagnostic full validation.
+The observed L2-distance/max/sum/descending aggregation is a historical
+candidate-generation behavior, not exact MaxSim or a mathematically sound
+similarity rule. Document and review this separately before final submission;
+no historical outputs or manuscript files are rewritten by this change.
+See `notes/racs_online_runtime_protocol.md` and
+`notes/racs_faiss_diagnostic_protocol.md`.
 Do not call R1.2 complete until a successful online report is audited.
 
 The independent raw-record audit of job 15911732 has now passed with the same

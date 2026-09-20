@@ -78,3 +78,25 @@ Default input is `output/racs_online_runtime_15911874/capp.online.bundle.json`.
 No need to re-export the SPLADE path: this bundle contains the validated local
 checkpoint/tokenizer location. Changing inputs requires an explicit
 `RACS_DIAGNOSTIC_BUNDLE` override; never overwrite the previous bundle.
+
+## September 20 outcome: job 15915127
+
+The diagnostic completed with all 24 comparisons (four questions × three
+encoder paths × two scoring paths). Direct GPU and Accelerate-prepared GPU
+queries produced identical embeddings. With either GPU path, `faiss_distance`
+matched all 1,000 page IDs, complete order and scores exactly on all four
+questions. Their embedding-dot branches matched no complete candidate set/order.
+CPU query encoding matched no complete candidate set/order with either branch.
+All 64 sampled stored vectors exactly matched the current token table.
+
+Raw candidate files were also checked for 1,000 unique pages and finite scores;
+direct/Accelerate GPU distance files were identical. Source report:
+`output/racs_faiss_diagnostic_15915127/diagnostic.json`.
+
+This supports an explicit candidate-scoring reconstruction change, not automatic
+selection or validation of the whole pipeline. The full online benchmark retains
+all later output-equivalence checks. The L2/descending caveat above remains a
+methodological concern even when replay succeeds. No runtime number was produced
+by this diagnostic. Future diagnostic runs annotate old bundles' missing
+page-score-source field as `embedding` only in memory, preserving the original
+loader convention while still testing both branches.

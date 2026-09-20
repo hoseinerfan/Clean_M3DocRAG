@@ -1,11 +1,11 @@
 # RACS: full online runtime completion protocol
 
-Prepared September 18, updated September 19, 2026 after the first failed attempts.
+Prepared September 18, updated September 20, 2026 after the candidate diagnostic.
 **No validated online timing result exists yet.** The goal is to close R1.2,
 not stop at a first draft.
 Original paper/Overleaf files and old experiment outputs are not modified.
 
-## Current action: diagnose the FAISS candidate mismatch
+## Current action: rerun with the observed candidate-scoring path
 
 Job 15911874 failed after 2:09 on gpu010. Local SPLADE loading succeeded using
 the shared cache snapshot
@@ -13,12 +13,47 @@ the shared cache snapshot
 It then failed the first fresh FAISS candidate-pool replay (different page set
 and order, not just small score differences). No online timing is validated.
 
-The next job is the bounded, diagnostic-only
-`examples/sbatch_racs_faiss_diagnostic.sh`, described in
-`notes/racs_faiss_diagnostic_protocol.md`. It compares encoder preparation,
-both existing page-score branches and sampled index/token-table alignment.
-It does not change the benchmark, auto-select a branch, train models or run QA.
-Do not resubmit the full runtime job until the discrepancy is understood.
+Diagnostic job 15915127 completed. Its report is
+`output/racs_faiss_diagnostic_15915127/diagnostic.json`:
+
+- Direct GPU encoding plus `faiss_distance`: all four preselected questions
+  reproduce all 1,000 candidate pages, complete order and scores exactly.
+  Maximum aligned score difference is zero for every question.
+- Direct GPU plus embedding-dot aggregation: zero of four candidate sets or
+  complete orders match. Accelerate-prepared GPU encoding yields identical
+  query embeddings and the same outcomes as direct GPU encoding.
+- CPU encoding matches none of the four full candidate rankings in either
+  branch. This does not change the separate CPU encoding used by the existing
+  page-local MaxSim reconstruction; that stage must still pass its own replay.
+- All 64 sampled stored index vectors exactly match the current token table.
+  This is a sampled check, not exhaustive proof of index alignment.
+
+The next runtime reconstruction explicitly records
+`faiss_page_score_source=faiss_distance` and calls the existing raw-returned-value
+aggregation branch. No reference-based auto-selection, sign reversal, index
+rebuilding or tolerance relaxation is permitted. Old unannotated runtime bundles
+are rejected: prepare fresh bundles using the launcher. The diagnostic alone
+can still annotate an old bundle as embedding-dot in memory without rewriting
+it, and continues to compare both branches.
+
+**Methodological caveat:** the index returns L2 distances, but the existing page
+aggregation takes per-token/per-page maxima, sums them, and sorts descending.
+This reproduces the observed historical candidate-generation behavior; it is
+not a sound similarity rule, and must not be described as exact dot-product
+MaxSim. The subsequent page-local Exact MaxSim stage is separate and unchanged.
+This issue needs transparent documentation and methodological review before
+final submission; successful replay will not by itself resolve that concern.
+
+Submit one fresh `examples/sbatch_racs_online_runtime.sh` job after pulling the
+tested change and exporting the validated local SPLADE path below. The job
+first tests four warm-ups, then retains all upstream/graph/CAPP checks throughout
+the 128-question, four-repeat experiment. Any mismatch blocks the final timing
+report. Further stages have not yet been freshly validated. No retraining or
+duplicate QA experiment is requested. See `notes/racs_faiss_diagnostic_protocol.md`.
+
+The resident token table remains allocated by the shared loader, even though
+the distance branch does not use it for scoring. Reported process memory includes
+that allocation; it is not a minimum-memory implementation estimate.
 
 ## Resolved local SPLADE loading issue
 
@@ -65,12 +100,13 @@ score therefore does not prove an inner-product IVF search metric. The supplied
 exception establishes a non-IP index, not its numeric metric; the next run logs
 that metric explicitly before loading the corpus.
 
-The benchmark now accepts L2 or inner-product search on the existing index,
-records the search and quantizer metrics separately, and preserves both. It
-does not rebuild the index, overwrite its metric, reinterpret L2 distances as
-page scores, or change candidate-order/score validation. Unsupported metrics
-still fail. New regressions cover an L2 IVF index with an IP quantizer, an IP
-index, and rejection of unsupported metrics/invalid search settings.
+That September 19 correction accepted L2 or inner-product search on the existing
+index, recorded search and quantizer metrics separately, and preserved both.
+At that point the new benchmark still recomputed embedding-dot page scores.
+The September 20 diagnostic above subsequently identified the returned-distance
+aggregation needed for candidate replay. Neither change rebuilds the index,
+overwrites its metric or changes candidate-order/score tolerances. Unsupported
+metrics and missing/unsupported explicit page-score sources still fail.
 
 That correction was exercised by 15911873, as recorded above. Further upstream
 replay checks still have to pass; it does not establish output equivalence.
