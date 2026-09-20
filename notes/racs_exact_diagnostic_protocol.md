@@ -2,6 +2,33 @@
 
 Prepared September 20, 2026. No Overleaf/manuscript or historical output changes.
 
+## First diagnostic outcome and required correction
+
+Job 15915129 completed. The current original runner and all four CPU-query
+runtime-helper conditions produced identical page lists and scores on all four
+questions. Two questions exactly matched the saved historical scores/rankings;
+the other two first differed at ranks 11 and 13. All four retained the same top-4
+page order, but the two failing questions had score differences across all
+1,000 pages, with maximum absolute differences 0.1829566956 and 0.0720348358.
+These are not grounds for relaxing the checks. The GPU-query control matched
+zero complete historical rankings. No online runtime was validated.
+
+**Diagnostic flaw:** both the nominal default-thread and one-thread conditions
+actually used one thread. The imported `benchmark_capp_runtime.py` sets OMP,
+MKL and other thread environment variables to one at import time. Consequently,
+15915129 did not test different CPU thread counts. Its original/helper agreement
+and inference-context comparisons remain useful under the observed one-thread
+setting; it cannot rule out thread-count effects or recover historical settings.
+
+The corrected diagnostic below explicitly sets eight versus one PyTorch CPU
+threads, restores OMP/MKL/OpenBLAS variables to the declared condition before
+loading the original runner, records PyTorch parallel-backend information, and
+refuses to summarize results unless the effective counts are verified as 8/1.
+Eight fits the existing eight-CPU allocation; it is a predeclared diagnostic
+condition, not a claim that the historical run used eight threads. Old outputs
+remain untouched. Submit one new diagnostic job with the same launcher after
+pulling this correction, not the full online runtime job.
+
 ## Reason and scope
 
 Online-runtime job 15915128 passed the first question's FAISS candidate-pool
@@ -33,7 +60,7 @@ Two fresh subprocesses invoke the actual current
 `run_visual_rerank_batch.main()` entry point with the original Exact MaxSim
 arguments, pinned model names, all query tokens, 1,000 candidates, and batch 64:
 
-1. Preserve the process's default CPU thread count; record its effective value.
+1. Explicitly use eight CPU threads, within the requested eight-CPU allocation.
 2. Explicitly use one CPU thread, as the runtime benchmark does.
 
 The CPU encoder's actual query outputs are captured without replacing its
@@ -46,8 +73,8 @@ A third, single-threaded subprocess calls the production runtime
 `OnlineRetriever.dense_scores(..., approximate=False)` directly, without
 initializing the full online retriever. It tests five fixed query sources:
 
-- Original default-thread CPU queries, ordinary no-grad path.
-- Default-thread CPU queries, outer inference mode.
+- Original eight-thread CPU queries, ordinary no-grad path.
+- Eight-thread CPU queries, outer inference mode.
 - Original one-thread CPU queries, ordinary no-grad path.
 - One-thread CPU queries, outer inference mode.
 - The prior diagnostic's saved direct-GPU queries.
@@ -61,7 +88,7 @@ and original scoring configuration. There is no automatic setting selection.
 
 The complete diagnostic contains seven conditions × four questions = 28
 ranking comparisons. The strict original order/score checks are unchanged.
-Defaults versus one thread are diagnostic hypotheses, not hyperparameter tuning
+Eight versus one thread are diagnostic hypotheses, not hyperparameter tuning
 or evidence of the historical launch environment. Current original-runner code
 is not claimed to be an archived historical checkout.
 
@@ -73,7 +100,7 @@ graph/CAPP, Qwen reader, training, or publishable timing measurement.
 
 Only a new `output/racs_exact_diagnostic_JOBID` directory and Slurm logs are
 written. Existing directories are refused. Worker stdout/stderr is kept in
-`original_default_threads.log`, `original_one_thread.log`, and `harness.log`.
+`original_eight_threads.log`, `original_one_thread.log`, and `harness.log`.
 The top-level `diagnostic.json` reports each condition's complete ranking/score
 match count. Completion means comparisons were collected, not that replay passed.
 On failure, read `failure.json` and the corresponding worker log.

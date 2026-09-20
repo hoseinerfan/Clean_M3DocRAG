@@ -16,6 +16,14 @@ See `notes/racs_exact_diagnostic_protocol.md` for the four-question original
 runner/runtime-helper comparison and CPU thread/context checks. The cause is
 not yet established. No retraining or manuscript change is requested.
 
+Diagnostic 15915129 then completed: the original runner and CPU-query runtime
+helper outputs were identical on all four questions, but only two matched the
+historical reference. Its nominal default/one-thread conditions both actually
+used one thread due to a benchmark import's environment-variable side effect.
+Do not claim that it ruled out CPU thread effects. The next action is one
+corrected Exact MaxSim diagnostic with explicit, verified 8/1 thread conditions,
+using the same launcher. No validation tolerances or historical outputs change.
+
 ## Resolved first-question FAISS candidate mismatch
 
 Job 15911874 failed after 2:09 on gpu010. Local SPLADE loading succeeded using

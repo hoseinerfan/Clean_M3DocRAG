@@ -18,8 +18,10 @@ from test_diagnose_racs_faiss_replay import bundle, page_rows, query_meta, Tenso
 
 
 def fake_torch():
-    return SimpleNamespace(__version__="test-not-real-gpu", get_num_threads=lambda: 8,
-        get_num_interop_threads=lambda: 8, set_num_threads=mock.Mock(),
+    state = {"threads": 1}
+    return SimpleNamespace(__version__="test-not-real-gpu", get_num_threads=lambda: state["threads"],
+        get_num_interop_threads=lambda: 8,
+        set_num_threads=mock.Mock(side_effect=lambda n: state.update(threads=n)),
         cuda=SimpleNamespace(is_available=lambda: True, device_count=lambda: 1, get_device_name=lambda n: "fake"),
         backends=SimpleNamespace(cuda=SimpleNamespace(matmul=SimpleNamespace(allow_tf32=False)),
                                  cudnn=SimpleNamespace(allow_tf32=False)),
@@ -157,13 +159,15 @@ class ExactDiagnosticTests(unittest.TestCase):
                 exact.bench.write_new(output / "original.prediction.json", {
                     qid: {"page_retrieval_results": page_rows()} for qid in inputs["qids"]})
             torch = fake_torch()
-            with mock.patch.dict(sys.modules, {"torch": torch,
+            with mock.patch.dict(exact.os.environ), mock.patch.dict(sys.modules, {"torch": torch,
                     "run_visual_rerank_batch": SimpleNamespace(main=run_original),
                     "m3docrag.retrieval": SimpleNamespace(ColPaliRetrievalModel=Encoder)}):
                 exact.original_worker(inputs, output, 1)
             self.assertIs(Encoder.encode_query_with_metadata, original_method)
             torch.set_num_threads.assert_called_once_with(1)
             report = json.loads((output / "worker.json").read_text())
+            self.assertEqual(report["environment"]["cpu_threads"], 1)
+            self.assertEqual(report["environment"]["requested_cpu_threads"], 1)
             self.assertEqual(len(calls), 8)
             self.assertEqual(len(list(output.glob("*.npz"))), 8)
             self.assertTrue(all(row["scores_close"] for row in report["comparisons"].values()))
@@ -196,7 +200,9 @@ class ExactDiagnosticTests(unittest.TestCase):
         qids = ["q0", "q1", "q2", "q3"]
         cells = {qid: {"candidate_sets_match": True, "complete_order_matches": True, "scores_close": True} for qid in qids}
         inputs = {"qids": qids, "input_sha256": {}}
-        originals = {mode: {"comparisons": copy.deepcopy(cells), "environment": {}} for mode in exact.ORIGINAL_MODES}
+        originals = {mode: {"comparisons": copy.deepcopy(cells),
+            "environment": {"cpu_threads": threads, "requested_cpu_threads": threads}}
+            for mode, threads in zip(exact.ORIGINAL_MODES, (8, 1))}
         harness = {"comparisons": {mode: copy.deepcopy(cells) for mode in exact.HARNESS_MODES}, "environment": {}}
         harness["comparisons"][exact.HARNESS_MODES[0]]["q0"]["scores_close"] = False
         report = exact.summarize(inputs, originals, harness)
@@ -206,6 +212,28 @@ class ExactDiagnosticTests(unittest.TestCase):
         del harness["comparisons"][exact.HARNESS_MODES[-1]]
         with self.assertRaisesRegex(ValueError, "conditions"):
             exact.summarize(inputs, originals, harness)
+
+    def test_collapsed_thread_control_is_rejected_before_reporting_matches(self):
+        originals = {mode: {"environment": {"cpu_threads": 1, "requested_cpu_threads": threads}}
+                     for mode, threads in zip(exact.ORIGINAL_MODES, (8, 1))}
+        with self.assertRaisesRegex(ValueError, "distinct 8/1"):
+            exact.summarize({}, originals, {})
+
+    def test_eight_thread_condition_is_applied_before_loading_runner(self):
+        torch = fake_torch()
+        def stop_runner():
+            self.assertEqual(torch.get_num_threads(), 8)
+            for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+                self.assertEqual(exact.os.environ[key], "8")
+            raise RuntimeError("stop after checking actual thread configuration")
+        encoder = SimpleNamespace(encode_query_with_metadata=mock.Mock())
+        with mock.patch.dict(exact.os.environ), mock.patch.dict(sys.modules, {"torch": torch,
+                "run_visual_rerank_batch": SimpleNamespace(main=stop_runner),
+                "m3docrag.retrieval": SimpleNamespace(ColPaliRetrievalModel=encoder)}), \
+             mock.patch.object(exact, "original_argv", return_value=["fixture"]):
+            with self.assertRaisesRegex(RuntimeError, "checking actual thread"):
+                exact.original_worker({"qids": []}, Path("unused"), 8)
+        torch.set_num_threads.assert_called_once_with(8)
 
     def test_cli_refuses_existing_output_and_marks_failures_not_runtime(self):
         with tempfile.TemporaryDirectory() as folder:

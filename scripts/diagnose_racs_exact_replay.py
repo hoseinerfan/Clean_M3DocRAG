@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Four-question Exact MaxSim diagnosis. Not a runtime result or auto-fix.
 
-Run the original entry point with its default CPU threads and with one thread,
+Run the original entry point with eight CPU threads and with one thread,
 capture its actual query embeddings, then replay the runtime scoring helper on
 those fixed embeddings. Never retrain, modify old artifacts or relax checks.
 """
@@ -23,7 +23,7 @@ import diagnose_racs_faiss_replay as diagnostic
 
 bench = online.bench
 ROOT = Path(__file__).resolve().parents[1]
-ORIGINAL_MODES = ("original_default_threads", "original_one_thread")
+ORIGINAL_MODES = ("original_eight_threads", "original_one_thread")
 HARNESS_MODES = tuple(f"{mode}_{context}" for mode in ORIGINAL_MODES
                       for context in ("no_grad", "inference_mode")) + ("prior_saved_gpu_query",)
 
@@ -165,13 +165,24 @@ def argv_scope(values):
 
 
 def original_worker(inputs, output_dir, threads):
+    if threads not in (1, 8):
+        raise ValueError("Original-runner diagnostic requires one or eight CPU threads")
+    # Imported CAPP benchmark support forces these variables to one. Explicitly
+    # restore this diagnostic's declared condition before loading/using torch;
+    # never treat the contaminated process default as an independent control.
+    for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ[key] = str(threads)
     import torch
     import run_visual_rerank_batch as runner
     from m3docrag.retrieval import ColPaliRetrievalModel
 
-    if threads == 1:
-        torch.set_num_threads(1)
+    torch.set_num_threads(threads)
     env = environment(torch)
+    env["requested_cpu_threads"] = threads
+    if env["cpu_threads"] != threads:
+        raise ValueError("Effective CPU thread count differs from diagnostic condition")
+    if hasattr(torch, "__config__"):
+        env["torch_parallel_info"] = torch.__config__.parallel_info()
     encode = ColPaliRetrievalModel.encode_query_with_metadata
     captured, models = {}, []
 
@@ -245,6 +256,10 @@ def harness_worker(inputs, root, output_dir):
 
 
 def summarize(inputs, original_reports, harness_report):
+    for mode, threads in zip(ORIGINAL_MODES, (8, 1)):
+        env = original_reports[mode]["environment"]
+        if env.get("cpu_threads") != threads or env.get("requested_cpu_threads") != threads:
+            raise ValueError("CPU thread controls were not verified as distinct 8/1 conditions")
     cells = {**{mode: report["comparisons"] for mode, report in original_reports.items()},
              **{"harness/" + mode: rows for mode, rows in harness_report["comparisons"].items()}}
     expected_modes = set(ORIGINAL_MODES) | {"harness/" + mode for mode in HARNESS_MODES}
@@ -265,7 +280,7 @@ def summarize(inputs, original_reports, harness_report):
             "no_automatic_configuration_selection": True,
             "limitations": ["Four fixed warm-ups, not full validation or proof of historical launch settings",
                 "Original entry point is current repository code with metadata capture, not recovered historical source",
-                "Default-thread and one-thread subprocesses are diagnostic conditions, not a thread-count optimization",
+                "Eight-thread and one-thread subprocesses are diagnostic conditions, not a thread-count optimization or recovered historical setting",
                 "Harness uses recorded query embeddings and cached candidate pages only to isolate scoring, not to measure runtime",
                 "Prior GPU query comes from job 15915127, not a fresh query encoding in this job",
                 "No FAISS/SPLADE/graph/CAPP/reader run, training, runtime result or old artifact modification"]}
@@ -279,7 +294,7 @@ def main():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--worker", choices=("original", "harness"))
     parser.add_argument("--inputs", type=Path)
-    parser.add_argument("--threads", type=int, choices=(0, 1), default=0)
+    parser.add_argument("--threads", type=int, choices=(1, 8), default=1)
     args = parser.parse_args()
     if args.worker and args.inputs is None:
         parser.error("Worker requires --inputs")
@@ -295,7 +310,7 @@ def main():
                 harness_worker(inputs, args.inputs.parent, args.output_dir)
             return
         inputs = prepare(args.bundle, args.exact_summary, args.prior_query_dir, args.output_dir)
-        for name, worker, threads in ((ORIGINAL_MODES[0], "original", 0), (ORIGINAL_MODES[1], "original", 1),
+        for name, worker, threads in ((ORIGINAL_MODES[0], "original", 8), (ORIGINAL_MODES[1], "original", 1),
                                       ("harness", "harness", 1)):
             command = [sys.executable, "-B", str(Path(__file__).resolve()), "--worker", worker,
                 "--threads", str(threads), "--inputs", str((args.output_dir / "inputs.json").resolve()),
@@ -315,7 +330,7 @@ def main():
         print("saved_diagnostic=" + str(args.output_dir / "diagnostic.json"), flush=True)
     except Exception as exc:
         bench.write_new(args.output_dir / "failure.json", {"status": "diagnostic_failed_not_a_runtime_result",
-            "type": type(exc).__name__, "error": str(exc), "worker_logs": "See original_default_threads.log, original_one_thread.log or harness.log"})
+            "type": type(exc).__name__, "error": str(exc), "worker_logs": "See original_eight_threads.log, original_one_thread.log or harness.log"})
         raise
 
 
