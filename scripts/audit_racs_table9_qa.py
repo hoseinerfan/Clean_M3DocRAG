@@ -14,6 +14,11 @@ import train_content_aware_pseudo_page_reranker as ca
 from validate_racs_bge_reader import unique_object, require, normalize_pages, write_new
 
 
+def same_question_except_boundary_space(expected, actual):
+    """The reader can strip boundary whitespace from an otherwise identical question."""
+    return isinstance(expected, str) and isinstance(actual, str) and expected.strip() == actual.strip()
+
+
 def metric_module(repo, remote):
     # Load the unchanged evaluator without importing GPU/dataset packages.
     # word2number is pure Python; permit the installed HPC copy as a fallback.
@@ -79,9 +84,15 @@ def run(remote, report_path):
         predictions = read(folder / f"{stem}.prediction.json")
         require(set(predictions) == set(gold), "QA QIDs differ")
         qa_answers = {}
+        boundary_space_differences = 0
         for qid, row in predictions.items():
             require(row.get("qid") == qid, "QA row QID mismatch")
-            require(row.get("question") == gold[qid]["question"], "Question text differs")
+            expected_question = gold[qid]["question"]
+            actual_question = row.get("question")
+            require(same_question_except_boundary_space(expected_question, actual_question),
+                    f"Question text differs beyond boundary whitespace for {qid}: "
+                    f"gold={expected_question!r}, qa={actual_question!r}")
+            boundary_space_differences += actual_question != expected_question
             actual = normalize_pages({"qid": qid, "page_retrieval_results": row.get("selected_page_retrieval_results", [])}, qid, 4)
             require([p[:2] for p in actual] == [p[:2] for p in selected[qid]],
                     f"Selected ordered pages differ for {qid}")
@@ -92,6 +103,7 @@ def run(remote, report_path):
             require(math.isclose(overall[metric], evaluation["overall"][metric], abs_tol=1e-8, rel_tol=0),
                     f"Saved and recomputed {metric} differ")
         return {"questions": 2441, "ordered_top4_matches": 2441,
+                "boundary_space_question_differences": boundary_space_differences,
                 "EM": overall["list_em"], "F1": overall["list_f1"], "matches_saved_eval": True}
 
     base, base_metrics = ranking(out / "m3docvqa_gpp_hyperlink_node_ablation_exact_maxsim/mmqa_dev_exact_maxsim_gpp_hyperlink_node_no_hyperlink.prediction.json")
